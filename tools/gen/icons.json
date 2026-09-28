@@ -1,0 +1,246 @@
+[
+  {
+    "mockup": "back",
+    "drawable": "ic_morse_back"
+  },
+  {
+    "mockup": "more",
+    "drawable": "ic_morse_more"
+  },
+  {
+    "mockup": "moreV",
+    "drawable": "ic_morse_more_v"
+  },
+  {
+    "mockup": "plus",
+    "drawable": "ic_morse_plus"
+  },
+  {
+    "mockup": "list",
+    "drawable": "ic_morse_list"
+  },
+  {
+    "mockup": "pause",
+    "drawable": "ic_morse_pause"
+  },
+  {
+    "mockup": "play",
+    "drawable": "ic_morse_play"
+  },
+  {
+    "mockup": "minus",
+    "drawable": "ic_morse_minus"
+  },
+  {
+    "mockup": "close",
+    "drawable": "ic_morse_close"
+  },
+  {
+    "mockup": "target",
+    "drawable": "ic_morse_target"
+  },
+  {
+    "mockup": "folder",
+    "drawable": "ic_morse_folder"
+  },
+  {
+    "mockup": "clock",
+    "drawable": "ic_morse_clock"
+  },
+  {
+    "mockup": "sliders",
+    "drawable": "ic_morse_sliders"
+  },
+  {
+    "mockup": "search",
+    "drawable": "ic_morse_search"
+  },
+  {
+    "mockup": "filter",
+    "drawable": "ic_morse_filter"
+  },
+  {
+    "mockup": "trash",
+    "drawable": "ic_morse_trash"
+  },
+  {
+    "mockup": "check",
+    "drawable": "ic_morse_check"
+  },
+  {
+    "mockup": "down",
+    "drawable": "ic_morse_down"
+  },
+  {
+    "mockup": "up",
+    "drawable": "ic_morse_up"
+  },
+  {
+    "mockup": "wifi",
+    "drawable": "ic_morse_wifi"
+  },
+  {
+    "mockup": "image",
+    "drawable": "ic_morse_image"
+  },
+  {
+    "mockup": "video",
+    "drawable": "ic_morse_video"
+  },
+  {
+    "mockup": "music",
+    "drawable": "ic_morse_music"
+  },
+  {
+    "mockup": "doc",
+    "drawable": "ic_morse_doc"
+  },
+  {
+    "mockup": "apk",
+    "drawable": "ic_morse_apk"
+  },
+  {
+    "mockup": "zip",
+    "drawable": "ic_morse_zip"
+  },
+  {
+    "mockup": "chat",
+    "drawable": "ic_morse_chat"
+  },
+  {
+    "mockup": "globe",
+    "drawable": "ic_morse_globe"
+  },
+  {
+    "mockup": "lock",
+    "drawable": "ic_morse_lock"
+  },
+  {
+    "mockup": "radar",
+    "drawable": "ic_morse_radar"
+  },
+  {
+    "mockup": "qr",
+    "drawable": "ic_morse_qr"
+  },
+  {
+    "mockup": "refresh",
+    "drawable": "ic_morse_refresh"
+  },
+  {
+    "mockup": "share",
+    "drawable": "ic_morse_share"
+  },
+  {
+    "mockup": "heart",
+    "drawable": "ic_morse_heart"
+  },
+  {
+    "mockup": "edit",
+    "drawable": "ic_morse_edit"
+  },
+  {
+    "mockup": "info",
+    "drawable": "ic_morse_info"
+  },
+  {
+    "mockup": "send",
+    "drawable": "ic_morse_send"
+  },
+  {
+    "mockup": "shuffle",
+    "drawable": "ic_morse_shuffle"
+  },
+  {
+    "mockup": "repeat",
+    "drawable": "ic_morse_repeat"
+  },
+  {
+    "mockup": "prev",
+    "drawable": "ic_morse_prev"
+  },
+  {
+    "mockup": "next",
+    "drawable": "ic_morse_next"
+  },
+  {
+    "mockup": "vol",
+    "drawable": "ic_morse_vol"
+  },
+  {
+    "mockup": "cc",
+    "drawable": "ic_morse_cc"
+  },
+  {
+    "mockup": "back10",
+    "drawable": "ic_morse_back10"
+  },
+  {
+    "mockup": "fwd10",
+    "drawable": "ic_morse_fwd10"
+  },
+  {
+    "mockup": "upload",
+    "drawable": "ic_morse_upload"
+  },
+  {
+    "mockup": "chevron",
+    "drawable": "ic_morse_chevron"
+  },
+  {
+    "mockup": "chevD",
+    "drawable": "ic_morse_chev_d"
+  },
+  {
+    "mockup": "bolt",
+    "drawable": "ic_morse_bolt"
+  },
+  {
+    "mockup": "shield",
+    "drawable": "ic_morse_shield"
+  },
+  {
+    "mockup": "battery",
+    "drawable": "ic_morse_battery"
+  },
+  {
+    "mockup": "warn",
+    "drawable": "ic_morse_warn"
+  },
+  {
+    "mockup": "help",
+    "drawable": "ic_morse_help"
+  },
+  {
+    "mockup": "pc",
+    "drawable": "ic_morse_pc"
+  },
+  {
+    "mockup": "note",
+    "drawable": "ic_morse_note"
+  },
+  {
+    "mockup": "grid",
+    "drawable": "ic_morse_grid"
+  },
+  {
+    "mockup": "expand",
+    "drawable": "ic_morse_expand"
+  },
+  {
+    "mockup": "eye",
+    "drawable": "ic_morse_eye"
+  },
+  {
+    "mockup": "copy",
+    "drawable": "ic_morse_copy"
+  },
+  {
+    "mockup": "volLow",
+    "drawable": "ic_morse_vol_low"
+  },
+  {
+    "mockup": "volMute",
+    "drawable": "ic_morse_vol_mute"
+  }
+]

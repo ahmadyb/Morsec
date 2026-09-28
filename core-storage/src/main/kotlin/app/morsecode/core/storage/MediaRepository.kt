@@ -1,0 +1,86 @@
+package app.morsecode.core.storage
+
+import app.morsecode.core.model.MediaItem
+import app.morsecode.core.model.SafGrant
+import kotlinx.coroutines.flow.Flow
+
+/**
+ * What the app is currently allowed to read.
+ *
+ * The Files screen and the Connection Doctor both render from this, so a missing
+ * permission is explained instead of producing an empty grid that looks like the
+ * device has no photos.
+ */
+public data class StorageAccess(
+    /** Media read permission granted for the current API level. */
+    public val mediaReadGranted: Boolean = false,
+    /** Permission ids still missing, in the order they should be requested. */
+    public val missingPermissions: List<String> = emptyList(),
+    /** User-picked folders (SAF trees) that are still valid. */
+    public val grants: List<SafGrant> = emptyList(),
+    /** True when a grant was revoked outside the app since it was recorded. */
+    public val revokedGrantUris: List<String> = emptyList(),
+) {
+    public val canListMedia: Boolean get() = mediaReadGranted
+
+    /**
+     * On API 33+ the platform no longer exposes arbitrary documents through
+     * MediaStore, so the Files tab is driven by the folders the user picked.
+     */
+    public val canListDocuments: Boolean get() = mediaReadGranted || grants.isNotEmpty()
+
+    public val isFullyBlocked: Boolean get() = !mediaReadGranted && grants.isEmpty()
+}
+
+/**
+ * Read access to the device's files.
+ *
+ * Everything here is real device data — MediaStore, the PackageManager and SAF
+ * document trees. There is no sample content anywhere in the app: an empty list
+ * means the device (or the permission state) has nothing to show, and the UI
+ * says which of the two it is.
+ */
+public interface MediaRepository {
+
+    /** Current permission and grant state; re-emitted when grants change. */
+    public fun observeAccess(): Flow<StorageAccess>
+
+    public fun observeImages(): Flow<List<MediaItem>>
+
+    public fun observeVideos(): Flow<List<MediaItem>>
+
+    public fun observeAudio(): Flow<List<MediaItem>>
+
+    /** Launchable user apps, as shareable APK items. */
+    public fun observeApps(): Flow<List<MediaItem>>
+
+    /**
+     * Documents, archives and other non-media files.
+     *
+     * API 32 and below: MediaStore's non-media rows. API 33 and above: the
+     * contents of the SAF folders the user granted, because the platform no
+     * longer exposes arbitrary shared documents to MediaStore readers.
+     */
+    public fun observeDocuments(): Flow<List<MediaItem>>
+
+    /** Folder rows shown at the top of the Files tab (SAF trees + buckets). */
+    public fun observeFolders(): Flow<List<MediaItem>>
+
+    /** Children of one SAF folder, for the folder browser screen. */
+    public suspend fun childrenOf(treeUri: String): List<MediaItem>
+
+    /** Resolves a single item by its opaque id, for the viewer and players. */
+    public suspend fun itemById(id: String): MediaItem?
+
+    /** Re-runs every query; called after a permission grant or a transfer. */
+    public suspend fun refresh()
+
+    /** Records a newly picked SAF tree and takes its persistable permission. */
+    public suspend fun addFolder(treeUri: String): SafGrant?
+
+    /** Releases a previously granted folder. */
+    public suspend fun removeFolder(grantId: Long)
+
+    /** Drops recorded grants the platform no longer honours. */
+    public suspend fun pruneRevokedGrants(): Int
+}

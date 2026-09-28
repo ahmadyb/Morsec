@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+local.properties
+
+# Android
+*.apk
+*.aab
+*.ap_
+*.dex
+captures/
+.externalNativeBuild/
+.cxx/
+release/
+keystore.properties
+*.jks
+*.keystore
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Node (webshare-ui + verification tools)
+node_modules/
+webshare-ui/dist/
+webshare-ui/.turbo/
+coverage/
+
+# Test / tooling output
+tools/verify/out/
+*.hprof

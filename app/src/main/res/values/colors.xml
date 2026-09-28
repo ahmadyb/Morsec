@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Window-level colours only. The whole in-app palette is computed at runtime
+  from core-design's MockupTokens, so no colour is duplicated here.
+-->
+<resources>
+    <color name="morse_background_light">#FFFBF2</color>
+    <color name="morse_background_dark">#10100D</color>
+    <color name="ic_launcher_background">#FACC15</color>
+    <color name="ic_launcher_ink">#1A1400</color>
+</resources>

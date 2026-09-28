@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Every string the phone UI shows. Copy is taken verbatim from the approved
+  mockup (doc/morsecode_material3_mockup.html) so the shipped app and the
+  reference cannot drift apart.
+-->
+<resources>
+    <string name="app_name">Morsecode</string>
+
+    <!-- Bottom navigation -->
+    <string name="nav_connect">Connect</string>
+    <string name="nav_files">Files</string>
+    <string name="nav_history">History</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Common -->
+    <string name="action_back">Back</string>
+    <string name="action_close">Close</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_save">Save</string>
+    <string name="action_clear">Clear</string>
+    <string name="action_search">Search</string>
+    <string name="action_share">Share</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_resume">Resume</string>
+    <string name="action_more">More options</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="action_grant">Grant</string>
+    <string name="transport_label">LAN or Nearby</string>
+
+    <!-- Onboarding: four cards, exact mockup copy -->
+    <string name="onb1_title">Send files without the internet</string>
+    <string name="onb1_body">Direct phone-to-phone transfer over Wi-Fi or Bluetooth. No cloud. No accounts. No ads.</string>
+    <string name="onb1_primary">Continue</string>
+    <string name="onb1_secondary">Skip</string>
+
+    <string name="onb2_title">Permissions we need</string>
+    <string name="onb2_body">Nearby devices to find peers. Storage to read and save files. Battery exemption to keep transfers alive when the screen is off.</string>
+    <string name="onb2_primary">Grant permissions</string>
+    <string name="onb2_secondary">Not now</string>
+
+    <string name="onb3_title">Or use a browser</string>
+    <string name="onb3_body">Start WebShare and any laptop on the same network can browse, download, and upload from your phone.</string>
+    <string name="onb3_primary">Continue</string>
+    <string name="onb3_secondary">Skip</string>
+
+    <string name="onb4_title">You\'re all set</string>
+    <string name="onb4_body">Tap Send to choose files or Receive to listen. Everything stays on your local network.</string>
+    <string name="onb4_primary">Open Morsecode</string>
+    <string name="onb4_secondary">Replay tour</string>
+    <string name="onb_progress">Onboarding step %1$d of %2$d</string>
+
+    <!-- Connect -->
+    <string name="connect_title">Connect</string>
+    <string name="connect_help">Help</string>
+    <string name="connect_send">↑ Send</string>
+    <string name="connect_receive">↓ Receive</string>
+    <string name="connect_broadcast">⇶ Broadcast to several phones</string>
+    <string name="connect_radar_active">Radar, scanning for nearby devices</string>
+    <string name="connect_webshare_title">WebShare · PC</string>
+    <string name="connect_webshare_on">ON</string>
+    <string name="connect_webshare_off">OFF</string>
+    <string name="connect_webshare_meta">Port %1$d · server not running in this build</string>
+    <string name="connect_recent_header">Recent devices</string>
+    <string name="connect_recent_cleared">Recent devices cleared</string>
+    <plurals name="connect_devices_nearby">
+        <item quantity="zero">No devices nearby</item>
+        <item quantity="one">%d device nearby</item>
+        <item quantity="other">%d devices nearby</item>
+    </plurals>
+    <string name="connect_scanning">Scanning the local network</string>
+    <string name="connect_idle_title">Discovery is off</string>
+    <string name="connect_idle_body">Start discovery to find phones on the same Wi-Fi network or within Nearby range.</string>
+    <string name="connect_start_discovery">Start discovery</string>
+    <string name="connect_blocked_permissions">Permissions needed: %1$s</string>
+    <string name="connect_blocked_no_network">Wi-Fi is off. Turn it on, or use Nearby over Bluetooth.</string>
+    <string name="connect_blocked_play_services">Google Play services is unavailable, so Nearby cannot run. LAN discovery still works.</string>
+    <string name="connect_blocked_location">Location is off. Android needs it to scan Wi-Fi networks.</string>
+    <string name="connect_blocked_multicast">Multicast lock unavailable, so UDP beacons may not arrive.</string>
+    <string name="connect_recent_empty_title">No recent devices</string>
+    <string name="connect_recent_empty_body">Devices you transfer with are listed here for a faster next send.</string>
+
+    <!-- Files -->
+    <string name="files_title">Files</string>
+    <string name="files_tab_photos">Photos</string>
+    <string name="files_tab_videos">Videos</string>
+    <string name="files_tab_music">Music</string>
+    <string name="files_tab_apps">Apps</string>
+    <string name="files_tab_files">Files</string>
+    <string name="files_sort">Sort</string>
+    <string name="files_select">Select</string>
+    <string name="files_add_folder">Add folder</string>
+    <string name="files_permission_title">Storage access needed</string>
+    <string name="files_permission_body">Grant media access to list the photos, videos and music on this device.</string>
+    <string name="files_permission_grant">Grant access</string>
+    <string name="files_empty_photos_title">No photos yet</string>
+    <string name="files_empty_photos_body">Images saved on this device appear here.</string>
+    <string name="files_empty_videos_title">No videos yet</string>
+    <string name="files_empty_videos_body">Videos recorded or received appear here.</string>
+    <string name="files_empty_music_title">No music yet</string>
+    <string name="files_empty_music_body">Audio files on this device appear here.</string>
+    <string name="files_empty_apps_title">No apps found</string>
+    <string name="files_empty_apps_body">Installed apps you can share as APK files appear here.</string>
+    <string name="files_empty_files_title">Nothing to browse</string>
+    <string name="files_empty_files_body">Add a folder to browse its documents, archives and other files.</string>
+    <string name="files_selected_count">%1$d selected</string>
+    <string name="files_section_header">%1$s · %2$d items</string>
+    <string name="files_all_section">All items · %1$d</string>
+    <string name="files_folder_children">%1$d items</string>
+    <string name="files_sort_sheet_title">Sort by</string>
+    <string name="files_sort_date">Date</string>
+    <string name="files_sort_name">Name</string>
+    <string name="files_sort_size">Size</string>
+    <string name="files_sort_type">Type</string>
+    <string name="files_sort_ascending">Ascending</string>
+    <string name="files_sort_descending">Descending</string>
+    <string name="files_send_selected">Send</string>
+    <string name="files_share_selected">Share</string>
+    <string name="files_grant_failed">That folder could not be granted. Pick it again.</string>
+    <string name="files_grant_added">Folder added: %1$s</string>
+    <string name="files_grant_removed">Folder removed</string>
+
+    <!-- History -->
+    <string name="history_title">History</string>
+    <string name="history_tab_received">Received</string>
+    <string name="history_tab_sent">Sent</string>
+    <string name="history_filter">Filter</string>
+    <string name="history_clear_confirm">Clear history?</string>
+    <string name="history_cleared">History cleared</string>
+    <string name="history_empty_title">Nothing here yet</string>
+    <string name="history_empty_body">Transfers you finish will be listed here.</string>
+    <string name="history_search_hint">Search history</string>
+    <string name="history_header_today">Today</string>
+    <string name="history_header_yesterday">Yesterday</string>
+    <string name="history_row_actions">Open · Share · Send again · Remove · Delete file</string>
+    <string name="history_action_open">Open</string>
+    <string name="history_action_share">Share</string>
+    <string name="history_action_send_again">Send again</string>
+    <string name="history_action_remove">Remove from history</string>
+    <string name="history_action_delete_file">Delete file</string>
+    <string name="history_row_failed">Failed</string>
+    <string name="history_row_completed">Completed</string>
+    <string name="history_removed">Removed from history</string>
+    <string name="history_file_deleted">File deleted</string>
+    <string name="history_file_delete_failed">That file could not be deleted.</string>
+    <string name="history_open_failed">No app can open that file any more.</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_device_subtitle">Tap to rename · %1$s avatar</string>
+    <string name="settings_rename_title">Device name</string>
+    <string name="settings_rename_hint">How other devices see this phone</string>
+    <string name="settings_section_accent">Accent colour</string>
+    <string name="settings_section_appearance">Appearance</string>
+    <string name="settings_section_transfer">Transfer</string>
+    <string name="settings_section_system">System</string>
+    <string name="settings_section_diagnostics">Diagnostics</string>
+    <string name="settings_section_about">About</string>
+
+    <string name="settings_dark_mode">Dark mode</string>
+    <string name="settings_dark_mode_sub">Sunflower hue</string>
+    <string name="settings_follow_system">Follow system</string>
+    <string name="settings_follow_system_sub">Match the phone setting</string>
+    <string name="settings_sounds">Sounds</string>
+    <string name="settings_sounds_sub">Connect · fail · success</string>
+    <string name="settings_conflict">Conflict policy</string>
+    <string name="settings_notifications">Notifications</string>
+    <string name="settings_notifications_sub">Transfer progress</string>
+    <string name="settings_broadcast_peers">Broadcast peers</string>
+    <string name="settings_broadcast_peers_sub">Maximum %1$d phones</string>
+    <string name="settings_storage_access">Storage access</string>
+    <string name="settings_storage_access_sub">Download · SAF folders</string>
+    <string name="settings_battery">Battery optimization</string>
+    <string name="settings_battery_sub_exempt">Exemption granted — transfers stay alive</string>
+    <string name="settings_battery_sub_not_exempt">Exemption disabled — tap to request</string>
+    <string name="settings_logs">Logs</string>
+    <string name="settings_logs_sub">View · export .txt · clear</string>
+    <string name="settings_crashes">Crash reports</string>
+    <string name="settings_doctor">Connection Doctor</string>
+    <string name="settings_doctor_sub">Wi-Fi · Multicast · Play Services</string>
+    <string name="settings_replay_onboarding">Replay onboarding</string>
+    <string name="settings_replay_onboarding_sub">Show the tour again</string>
+    <string name="settings_help">Help &amp; FAQ</string>
+    <string name="settings_about_sub">Morsecode %1$s (%2$d) · no accounts, no cloud, no ads</string>
+    <string name="settings_about">About</string>
+    <plurals name="settings_crash_count">
+        <item quantity="zero">No local reports</item>
+        <item quantity="one">%d local report · view, export or clear</item>
+        <item quantity="other">%d local reports · view, export or clear</item>
+    </plurals>
+    <string name="settings_granted_folders">Granted: %1$s</string>
+    <string name="settings_no_folders">No folders granted yet</string>
+
+    <!-- Accent names -->
+    <string name="accent_sunflower">Sunflower</string>
+    <string name="accent_leaf">Leaf</string>
+    <string name="accent_ember">Ember</string>
+    <string name="accent_violet">Violet</string>
+    <string name="accent_sky">Sky</string>
+    <string name="accent_selected">%1$s accent selected</string>
+
+    <!-- Conflict policies -->
+    <string name="policy_rename">Rename new file</string>
+    <string name="policy_overwrite">Overwrite existing</string>
+    <string name="policy_skip">Skip duplicate</string>
+    <string name="policy_ask">Ask every time</string>
+
+    <!-- Logs -->
+    <string name="logs_title">Logs</string>
+    <string name="logs_export">Export .txt</string>
+    <string name="logs_errors_only">Errors only</string>
+    <string name="logs_cleared">Log cleared</string>
+    <string name="logs_export_header">Header of every export: %1$s</string>
+    <string name="logs_empty_title">No log entries</string>
+    <string name="logs_empty_body">Diagnostic messages appear here as the app runs.</string>
+    <string name="logs_shared_subject">Morsecode log export</string>
+
+    <!-- Crash reports -->
+    <string name="crashes_title">Crash reports</string>
+    <string name="crashes_privacy_title">Stored only on this device</string>
+    <string name="crashes_privacy_body">Reports are never uploaded automatically. Review or export them as a text file.</string>
+    <string name="crashes_cleared">Crash reports cleared</string>
+    <string name="crashes_badge">CRASH</string>
+    <string name="crashes_empty_title">No crash reports</string>
+    <string name="crashes_empty_body">If the app ever crashes, the report is stored here for you to review.</string>
+    <string name="crashes_shared_subject">Morsecode crash reports</string>
+
+    <!-- Connection Doctor -->
+    <string name="doctor_title">Connection Doctor</string>
+    <string name="doctor_battery_action">Request battery exemption</string>
+    <string name="doctor_refresh">Refresh checks</string>
+    <string name="doctor_check_wifi">Wi-Fi</string>
+    <string name="doctor_check_wifi_ok">Connected to %1$s</string>
+    <string name="doctor_check_wifi_off">Wi-Fi is off — LAN discovery needs it</string>
+    <string name="doctor_check_multicast">Multicast lock</string>
+    <string name="doctor_check_multicast_ok">UDP beacons on port %1$d can be received</string>
+    <string name="doctor_check_multicast_bad">Multicast lock could not be acquired</string>
+    <string name="doctor_check_permissions">Permissions</string>
+    <string name="doctor_check_permissions_ok">All permissions for %1$s are granted</string>
+    <string name="doctor_check_permissions_bad">Missing: %1$s</string>
+    <string name="doctor_check_storage">Storage access</string>
+    <string name="doctor_check_storage_ok">Media read granted · %1$d folders</string>
+    <string name="doctor_check_storage_bad">No media permission and no granted folders</string>
+    <string name="doctor_check_revoked">Revoked folder grants</string>
+    <string name="doctor_check_revoked_bad">%1$d recorded folders are no longer accessible</string>
+    <string name="doctor_check_location">Location for Wi-Fi scanning</string>
+    <string name="doctor_check_location_bad">Location is off; Android %1$d needs it to list Wi-Fi networks</string>
+    <string name="doctor_check_location_ok">Location is on</string>
+    <string name="doctor_check_battery">Battery optimization</string>
+    <string name="doctor_check_battery_ok">Exemption granted</string>
+    <string name="doctor_check_battery_bad">Optimization may pause background transfers</string>
+    <string name="doctor_check_notifications">Notifications</string>
+    <string name="doctor_check_notifications_bad">Transfer progress cannot be shown</string>
+    <string name="doctor_check_notifications_ok">Transfer notifications allowed</string>
+    <string name="doctor_check_nearby">Nearby (Google Play services)</string>
+    <string name="doctor_check_nearby_ok">Play services available</string>
+    <string name="doctor_check_nearby_bad">Play services unavailable — LAN discovery still works</string>
+    <string name="doctor_requesting_exemption">Requesting exemption…</string>
+    <string name="doctor_check_ports">Local ports</string>
+    <string name="doctor_check_ports_ok">WebShare %1$d, control %2$d and beacon %3$d are free</string>
+    <string name="doctor_check_ports_bad">Port %1$d is already in use by another app</string>
+    <string name="doctor_check_summary">%1$d checks · %2$d need attention</string>
+    <string name="doctor_all_ok">Everything this build can check is healthy.</string>
+
+    <!-- Help -->
+    <string name="help_title">Help &amp; FAQ</string>
+    <string name="help_q1">Why can\'t my phone see the other one?</string>
+    <string name="help_a1">Both phones must be on the same Wi-Fi network, or within Bluetooth range for Nearby. Some routers isolate clients from each other — the Connection Doctor reports that case. Turning Wi-Fi off and on again re-sends the discovery beacon.</string>
+    <string name="help_q2">Does Morsecode use the internet?</string>
+    <string name="help_a2">No. Transfers run over your local network or Nearby. There are no accounts, no cloud storage and no analytics; the only network traffic is between the two devices.</string>
+    <string name="help_q3">A transfer stopped halfway. Is it lost?</string>
+    <string name="help_a3">No. Every confirmed offset is stored, so Retry continues from the last acknowledged byte instead of restarting the file.</string>
+    <string name="help_q4">Where do received files go?</string>
+    <string name="help_a4">Into the folder you granted under Storage access. Photos, videos and music are also added to the media library so other apps can see them.</string>
+    <string name="help_q5">Can a laptop join without the app?</string>
+    <string name="help_a5">Yes. Turn on WebShare and open the printed address in any browser on the same network. Each browser session must be approved on the phone and can be revoked at any time.</string>
+    <string name="help_q6">Transfers stop when the screen turns off.</string>
+    <string name="help_a6">Request a battery optimization exemption in Settings. Android otherwise suspends background work within minutes.</string>
+    <string name="help_troubleshoot">Troubleshooting</string>
+    <string name="help_open_doctor">Open Connection Doctor</string>
+
+    <!-- Unit labels used by the shared formatters -->
+    <string name="unit_gb">" GB"</string>
+    <string name="unit_mb">" MB"</string>
+    <string name="unit_kb">" KB"</string>
+    <string name="unit_mb_per_second">" MB/s"</string>
+    <string name="unit_percent">%</string>
+    <string name="time_today">Today</string>
+    <string name="time_yesterday">Yesterday</string>
+    <string name="time_just_now">just now</string>
+    <string name="time_minutes_ago">%1$d min ago</string>
+    <string name="time_hours_ago">%1$d h ago</string>
+    <plurals name="time_days_ago">
+        <item quantity="one">1 day ago</item>
+        <item quantity="other">%d days ago</item>
+    </plurals>
+
+    <!-- Feature gates: an action that this build cannot honour says so plainly -->
+    <string name="gated_title">Not available in this build</string>
+    <string name="gated_body">%1$s arrives in milestone %2$d of the build plan. This build is milestone %3$d, so nothing has been simulated in its place.</string>
+    <string name="gated_area_send">Sending files to another phone</string>
+    <string name="gated_area_receive">Listening for incoming files</string>
+    <string name="gated_area_broadcast">Broadcasting to several phones</string>
+    <string name="gated_area_discovery">Device discovery over LAN or Nearby</string>
+    <string name="gated_area_webshare">The embedded WebShare server</string>
+    <string name="gated_area_playback">In-app media playback</string>
+    <string name="gated_action">Understood</string>
+
+    <!-- Accessibility -->
+    <string name="cd_avatar">Avatar for %1$s</string>
+    <string name="cd_file_icon">%1$s file</string>
+    <string name="cd_progress">%1$s, %2$d percent</string>
+    <string name="cd_switch_on">%1$s, on</string>
+    <string name="cd_switch_off">%1$s, off</string>
+    <string name="cd_accent_swatch">%1$s accent</string>
+    <string name="cd_radar">Discovery radar</string>
+
+    <!-- Errors surfaced to the user -->
+    <string name="error_generic">Something went wrong. Check the logs for details.</string>
+    <string name="error_share_no_app">No app available to receive that file.</string>
+    <string name="error_export_failed">The export could not be written.</string>
+</resources>

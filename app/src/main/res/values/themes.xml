@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The activity theme only provides the window background and system bar
+      colours before Compose draws its first frame; everything else comes from
+      MorseTheme. minSdk is 23, so windowLightStatusBar is always available.
+    -->
+    <style name="Theme.Morsecode" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/morse_background_light</item>
+        <item name="android:statusBarColor">@color/morse_background_light</item>
+        <item name="android:navigationBarColor">@color/morse_background_light</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>

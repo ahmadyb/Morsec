@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup policy (API <= 30).
+
+  Settings are worth restoring; diagnostics are not. The database holds logs,
+  crash reports and transfer history — private records of what the user shared —
+  so it is excluded, and so are in-flight partial files and text exports.
+-->
+<full-backup-content>
+    <include domain="file" path="datastore/" />
+    <exclude domain="database" path="morsecode.db" />
+    <exclude domain="database" path="morsecode.db-wal" />
+    <exclude domain="database" path="morsecode.db-shm" />
+    <exclude domain="file" path="incoming/" />
+    <exclude domain="file" path="exports/" />
+    <exclude domain="cache" path="." />
+</full-backup-content>

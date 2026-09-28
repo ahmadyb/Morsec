@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paths the FileProvider may hand to other apps: log/crash exports written into
+  the cache dir, and files the app committed into its own files dir. Never a
+  raw file:// uri to shared storage.
+-->
+<paths>
+    <cache-path name="exports" path="exports/" />
+    <files-path name="shares" path="shares/" />
+</paths>
