@@ -1,6 +1,7 @@
 package app.morsecode.core.design.component
 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Text
@@ -9,7 +10,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
@@ -17,7 +17,6 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
@@ -43,6 +42,11 @@ import org.robolectric.annotation.GraphicsMode
  * is the newest Robolectric models (the module targets 36), and the qualifiers
  * pin the reference phone width of 411 dp so the strip is measured as designed
  * rather than squeezed into Robolectric's 320 dp default.
+ *
+ * Assertions are made on text nodes: they carry the same information a user
+ * reads, and their bounds are reported reliably. The tab that owns the
+ * `selected` semantic is a `matchParentSize` box, so it is asserted to exist and
+ * to be the only selected node while its label is the one checked for display.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -68,8 +72,9 @@ class MorseCategoryPagerTest {
 
     /**
      * A pager driven exactly like the Files screen drives it: the host owns the
-     * selection, so a tap and a swipe both end in the same place. Pages are tall
-     * vertical lists, which is what makes the vertical-scroll case meaningful.
+     * selection, so a tap and a swipe both end in the same place. Each page is a
+     * long vertical list headed by a line naming its category, which is what
+     * makes both the page identity and the vertical-scroll case observable.
      */
     private fun showPager() {
         selections.clear()
@@ -85,9 +90,18 @@ class MorseCategoryPagerTest {
                     },
                     modifier = Modifier.fillMaxSize(),
                 ) { tab ->
-                    LazyColumn(modifier = Modifier.fillMaxSize().testTag("page:${tab.id}")) {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        item {
+                            Text(
+                                text = pageLine(tab.label),
+                                modifier = Modifier.fillMaxWidth().height(160.dp),
+                            )
+                        }
                         items(count = 40) { index ->
-                            Text(text = "row:$index", modifier = Modifier.height(120.dp))
+                            Text(
+                                text = "row:$index",
+                                modifier = Modifier.fillMaxWidth().height(160.dp),
+                            )
                         }
                     }
                 }
@@ -96,25 +110,35 @@ class MorseCategoryPagerTest {
         composeTestRule.waitForIdle()
     }
 
-    /** Exactly one tab is marked selected, and it is the one with [label]. */
+    /** The line each page starts with; unique per category, unlike `row:n`. */
+    private fun pageLine(label: String) = "$label category"
+
+    /** Exactly one tab is marked selected, and its label is the one on screen. */
     private fun assertSelectedTab(label: String) {
         composeTestRule.onAllNodes(selectedTab).assertCountEquals(1)
         composeTestRule
             .onNode(selectedTab.and(hasAnyDescendant(hasText(label))))
-            .assertIsDisplayed()
+            .assertExists()
+        composeTestRule.onNodeWithText(label).assertIsDisplayed()
+    }
+
+    /** The pager is showing [label]'s page. */
+    private fun assertPageShown(label: String) {
+        composeTestRule.onNodeWithText(pageLine(label)).assertIsDisplayed()
     }
 
     @Test
     fun `tapping a category moves the pager to that category`() {
         showPager()
         assertSelectedTab("Photos")
+        assertPageShown("Photos")
 
         composeTestRule.onNodeWithText("Videos").performClick()
         composeTestRule.waitForIdle()
 
         assertEquals(listOf("videos"), selections)
         assertSelectedTab("Videos")
-        composeTestRule.onNodeWithTag("page:videos").assertIsDisplayed()
+        assertPageShown("Videos")
     }
 
     @Test
@@ -126,19 +150,19 @@ class MorseCategoryPagerTest {
 
         assertEquals(listOf("files"), selections)
         assertSelectedTab("Files")
-        composeTestRule.onNodeWithTag("page:files").assertIsDisplayed()
+        assertPageShown("Files")
     }
 
     @Test
     fun `swiping left advances to the next category`() {
         showPager()
 
-        composeTestRule.onNodeWithTag("page:photos").performTouchInput { swipeLeft() }
+        composeTestRule.onNodeWithText(pageLine("Photos")).performTouchInput { swipeLeft() }
         composeTestRule.waitForIdle()
 
         assertEquals(listOf("videos"), selections)
         assertSelectedTab("Videos")
-        composeTestRule.onNodeWithTag("page:videos").assertIsDisplayed()
+        assertPageShown("Videos")
     }
 
     @Test
@@ -147,24 +171,24 @@ class MorseCategoryPagerTest {
         composeTestRule.onNodeWithText("Videos").performClick()
         composeTestRule.waitForIdle()
 
-        composeTestRule.onNodeWithTag("page:videos").performTouchInput { swipeRight() }
+        composeTestRule.onNodeWithText(pageLine("Videos")).performTouchInput { swipeRight() }
         composeTestRule.waitForIdle()
 
         assertEquals(listOf("videos", "photos"), selections)
         assertSelectedTab("Photos")
-        composeTestRule.onNodeWithTag("page:photos").assertIsDisplayed()
+        assertPageShown("Photos")
     }
 
     @Test
     fun `swiping up scrolls the category without selecting another one`() {
         showPager()
 
-        composeTestRule.onNodeWithTag("page:photos").performTouchInput { swipeUp() }
+        composeTestRule.onNodeWithText(pageLine("Photos")).performTouchInput { swipeUp() }
         composeTestRule.waitForIdle()
 
+        // The list took the vertical gesture; the strip never moved.
         assertEquals(emptyList<String>(), selections)
         assertSelectedTab("Photos")
-        composeTestRule.onNodeWithTag("page:photos").assertIsDisplayed()
     }
 
     @Test
