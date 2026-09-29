@@ -88,6 +88,7 @@ public object SafPaths {
     public fun uriFor(treeUri: String, documentId: String): String? {
         val parsed = parse(treeUri) ?: return null
         val tree = parsed.segments.indexOf(TREE)
+        if (tree < 0) return null
         val root = parsed.segments.getOrNull(tree + 1) ?: return null
         if (documentId.isBlank()) return null
         return "${parsed.base}/$TREE/${encode(root)}/$DOCUMENT/${encode(documentId)}"
