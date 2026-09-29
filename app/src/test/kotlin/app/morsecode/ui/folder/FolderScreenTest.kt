@@ -2,12 +2,15 @@ package app.morsecode.ui.folder
 
 import android.app.Application
 import android.content.Context
-import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedDispatcher
+import androidx.activity.OnBackPressedDispatcherOwner
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.annotation.StringRes
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -15,7 +18,12 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
 import androidx.test.core.app.ApplicationProvider
 import app.morsecode.R
 import app.morsecode.core.design.theme.MorseTheme
@@ -52,8 +60,9 @@ import org.robolectric.shadows.ShadowToast
  *
  * Robolectric runs the app module's own manifest, so the Hilt application is
  * replaced with a plain one — nothing here needs injection, and the point of the
- * test is the screen, not the graph. The activity rule is what makes the system
- * back gesture reachable: the browser turns it into "up one level".
+ * test is the screen, not the graph. No activity is launched either: the two things
+ * this screen reads from one are supplied directly (see [TestBackOwner]), which is
+ * also what makes the system back gesture reachable in both build variants.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -61,7 +70,7 @@ import org.robolectric.shadows.ShadowToast
 class FolderScreenTest {
 
     @get:Rule
-    val composeTestRule = createAndroidComposeRule<ComponentActivity>()
+    val composeTestRule = createComposeRule()
 
     private val context: Context = ApplicationProvider.getApplicationContext()
 
@@ -74,6 +83,9 @@ class FolderScreenTest {
     /** Levels this fake grant really has, so a typed path can be checked against them. */
     private val yearUri = level("primary:Download/2026")
     private val marchUri = level("primary:Download/2026/March")
+
+    private lateinit var backOwner: TestBackOwner
+    private lateinit var savedStateHandle: SavedStateHandle
 
     private var backPresses = 0
 
@@ -120,9 +132,11 @@ class FolderScreenTest {
     /**
      * Shows the browser for [tree]. Everything the platform would answer with is
      * supplied up front, so a level is either readable or it is not — nothing here
-     * stands in for work the storage layer has not done.
+     * stands in for work the storage layer has not done. [restoredLevel] is what a
+     * browser coming back after process death would have saved.
      */
     private fun showFolder(
+        restoredLevel: String? = null,
         children: Map<String, List<MediaItem>> = mapOf(
             tree to downloadChildren,
             yearUri to yearChildren,
@@ -135,18 +149,30 @@ class FolderScreenTest {
         ),
     ) {
         backPresses = 0
+        backOwner = TestBackOwner()
+        savedStateHandle = SavedStateHandle(
+            buildMap {
+                put(Routes.FOLDER_ARG, tree)
+                if (restoredLevel != null) put(FolderViewModel.SAVED_LEVEL, restoredLevel)
+            },
+        )
         val viewModel = FolderViewModel(
             media = FakeMediaRepository(children = children, folders = folders),
             formatters = MorseFormatters.forDefaultLocale(),
-            savedStateHandle = SavedStateHandle(mapOf(Routes.FOLDER_ARG to tree)),
+            savedStateHandle = savedStateHandle,
         )
         composeTestRule.setContent {
-            MorseTheme(reducedMotion = true) {
-                FolderScreen(
-                    onBack = { backPresses += 1 },
-                    onNavigate = { _: MorseDestination -> },
-                    viewModel = viewModel,
-                )
+            CompositionLocalProvider(
+                LocalLifecycleOwner provides backOwner,
+                LocalOnBackPressedDispatcherOwner provides backOwner,
+            ) {
+                MorseTheme(reducedMotion = true) {
+                    FolderScreen(
+                        onBack = { backPresses += 1 },
+                        onNavigate = { _: MorseDestination -> },
+                        viewModel = viewModel,
+                    )
+                }
             }
         }
         settle()
@@ -158,6 +184,12 @@ class FolderScreenTest {
         composeTestRule.waitForIdle()
         ShadowLooper.idleMainLooper()
         composeTestRule.waitForIdle()
+    }
+
+    /** The system back gesture, as the phone would deliver it. */
+    private fun pressBack() {
+        backOwner.onBackPressedDispatcher.onBackPressed()
+        settle()
     }
 
     /** The granted level: its own rows, and a breadcrumb that ends at it. */
@@ -183,12 +215,11 @@ class FolderScreenTest {
 
         // Breadcrumb: the volume level is named locally, the folder by its real name.
         composeTestRule.onNodeWithText(rootLabel).assertIsDisplayed()
-        composeTestRule.onNodeWithText("Download").assertIsDisplayed()
+        // "Download" is both the header's title and the breadcrumb's current level.
+        composeTestRule.onAllNodesWithText("Download").assertCountEquals(2)
         // The header carries exactly one back control, and it is the only one.
         composeTestRule.onAllNodesWithContentDescription(string(R.string.action_back))
             .assertCountEquals(1)
-        // "Download" is both the header's title and the breadcrumb's last level.
-        composeTestRule.onAllNodesWithText("Download").assertCountEquals(2)
         // Real contents.
         composeTestRule.onNodeWithText("2026").assertIsDisplayed()
         composeTestRule.onNodeWithText("notes.txt").assertIsDisplayed()
@@ -199,7 +230,7 @@ class FolderScreenTest {
     }
 
     @Test
-    fun `tapping a subfolder shows that level`() {
+    fun `tapping a subfolder shows that level and saves it`() {
         showFolder()
 
         composeTestRule.onNodeWithText("2026").performClick()
@@ -207,17 +238,29 @@ class FolderScreenTest {
 
         assertAtYear()
         composeTestRule.onNodeWithText("signed.zip").assertDoesNotExist()
+        // Saved as it moves, so a restored browser comes back here.
+        assertEquals(yearUri, savedStateHandle.get<String>(FolderViewModel.SAVED_LEVEL))
     }
 
     @Test
-    fun `tapping a file opens the file rather than the browser`() {
+    fun `a restored browser comes back to the level it was showing`() {
+        showFolder(restoredLevel = yearUri)
+
+        assertAtYear()
+        composeTestRule.onNodeWithText("notes.txt").assertDoesNotExist()
+    }
+
+    @Test
+    fun `tapping a file does not descend into it`() {
         showFolder()
 
         composeTestRule.onNodeWithText("notes.txt").performClick()
         settle()
 
-        assertEquals(string(R.string.history_open_failed), ShadowToast.getTextOfLatestToast())
+        // A file row is a file, not a level. What opening it hands off to depends on
+        // what the platform has to open it with, which is not this test's subject.
         assertAtDownload()
+        assertEquals(0, backPresses)
     }
 
     @Test
@@ -270,29 +313,31 @@ class FolderScreenTest {
         composeTestRule.onNodeWithText("2026").performClick()
         settle()
 
-        composeTestRule.activity.onBackPressedDispatcher.onBackPressed()
-        settle()
+        pressBack()
         assertAtDownload()
         assertEquals(0, backPresses)
 
-        composeTestRule.activity.onBackPressedDispatcher.onBackPressed()
-        settle()
+        pressBack()
         assertEquals(1, backPresses)
     }
 
     @Test
     fun `a selection belongs to the level it was made in`() {
         showFolder()
+        composeTestRule.onNodeWithText("2026").performClick()
+        settle()
         composeTestRule.onNodeWithContentDescription(string(R.string.files_select)).performClick()
         settle()
-        composeTestRule.onNodeWithText("notes.txt").performClick()
+        composeTestRule.onNodeWithText("report.pdf").performClick()
         settle()
         composeTestRule.onNodeWithText("1 selected", substring = true).assertIsDisplayed()
 
-        composeTestRule.onNodeWithText("2026").performClick()
+        // The breadcrumb is not a selection control, so it navigates even while rows
+        // are selected — and the selection does not follow the user down the path.
+        composeTestRule.onNodeWithText("Download").performClick()
         settle()
 
-        assertAtYear()
+        assertAtDownload()
         composeTestRule.onNodeWithText("selected", substring = true).assertDoesNotExist()
     }
 
@@ -323,7 +368,7 @@ class FolderScreenTest {
         settle()
 
         composeTestRule.onNodeWithText(string(R.string.gated_title)).assertIsDisplayed()
-        assertAtDownload()
+        assertEquals("a gated action must not navigate anywhere", 0, backPresses)
     }
 
     @Test
@@ -414,6 +459,32 @@ class FolderScreenTest {
         field.performTextInput(path)
         composeTestRule.onNodeWithText(string(R.string.folder_open)).performClick()
         settle()
+    }
+}
+
+/**
+ * The lifecycle and back-dispatcher owner the browser composes under.
+ *
+ * Robolectric resolves an activity through the merged manifest, and only the debug
+ * variant carries the one `androidx.compose.ui.test.manifest` declares, so no
+ * activity is launched here at all. These are the two things this screen reads from
+ * one: a resumed lifecycle, to collect its state, and a back dispatcher, to turn the
+ * system gesture into "up one level".
+ */
+private class TestBackOwner : OnBackPressedDispatcherOwner {
+
+    private val lifecycleRegistry = LifecycleRegistry(this)
+    private val savedStateRegistryController = SavedStateRegistryController.create(this)
+
+    override val onBackPressedDispatcher: OnBackPressedDispatcher = OnBackPressedDispatcher()
+    override val lifecycle: Lifecycle get() = lifecycleRegistry
+    override val savedStateRegistry: SavedStateRegistry
+        get() = savedStateRegistryController.savedStateRegistry
+
+    init {
+        savedStateRegistryController.performAttach()
+        savedStateRegistryController.performRestore(null)
+        lifecycleRegistry.currentState = Lifecycle.State.RESUMED
     }
 }
 

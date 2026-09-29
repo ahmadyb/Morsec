@@ -90,7 +90,7 @@ public class FolderViewModel @Inject constructor(
 
     /** The level being shown, saved as it moves. */
     private val level = MutableStateFlow(
-        savedStateHandle.get<String>(KEY_LEVEL)?.takeIf { it.isNotEmpty() } ?: grantUri,
+        savedStateHandle.get<String>(SAVED_LEVEL)?.takeIf { it.isNotEmpty() } ?: grantUri,
     )
 
     private val folder = MutableStateFlow<MediaItem?>(null)
@@ -157,7 +157,7 @@ public class FolderViewModel @Inject constructor(
         if (target.isEmpty() || target == level.value) return
         read(target)
         level.value = target
-        savedStateHandle[KEY_LEVEL] = target
+        savedStateHandle[SAVED_LEVEL] = target
     }
 
     /** Shows the breadcrumb level at [index], or nothing when the grant cannot reach it. */
@@ -319,7 +319,11 @@ public class FolderViewModel @Inject constructor(
         private val BROWSE_ORDER = SortOrder(key = SortKey.NAME, direction = SortDirection.ASC)
         private const val STOP_TIMEOUT_MILLIS = 5_000L
 
-        /** Saved-state key for the level being shown. */
-        private const val KEY_LEVEL = "app.morsecode.folder.level"
+        /**
+         * Saved-state key for the level being shown, so a browser restored after
+         * process death comes back to the level the user was reading rather than
+         * to the one the grant named.
+         */
+        public const val SAVED_LEVEL: String = "app.morsecode.folder.level"
     }
 }
