@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import app.morsecode.core.design.theme.MorseTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -42,7 +43,11 @@ class MorseCrumbTest {
     /** Every level index the bar reported, in order. */
     private val taps = mutableListOf<Int>()
 
-    private fun showCrumb(path: List<String> = levels, trailingLabel: String? = null) {
+    private fun showCrumb(
+        path: List<String> = levels,
+        trailingLabel: String? = null,
+        navigableFrom: Int = 0,
+    ) {
         taps.clear()
         composeTestRule.setContent {
             MorseTheme(reducedMotion = true) {
@@ -51,6 +56,7 @@ class MorseCrumbTest {
                     onLevelClick = taps::add,
                     currentDescription = "Current folder",
                     iconDescription = "Path",
+                    navigableFrom = navigableFrom,
                     modifier = Modifier.fillMaxWidth(),
                     trailing = if (trailingLabel == null) null else {
                         { Text(trailingLabel) }
@@ -107,6 +113,22 @@ class MorseCrumbTest {
 
         composeTestRule.onNodeWithText("Copy path").assertIsDisplayed()
         composeTestRule.onNodeWithText("Internal storage").assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("Download").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(listOf(1), taps)
+    }
+
+    @Test
+    fun `a level above the grant is shown but is not a target`() {
+        // A SAF grant reaches down from what the user picked and never up, so the
+        // volume level belongs in the path and is still nowhere to go.
+        showCrumb(navigableFrom = 1)
+
+        composeTestRule.onNodeWithText("Internal storage").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Internal storage").performClick()
+        composeTestRule.waitForIdle()
+        assertTrue("a level above the grant must not navigate: $taps", taps.isEmpty())
 
         composeTestRule.onNodeWithText("Download").performClick()
         composeTestRule.waitForIdle()

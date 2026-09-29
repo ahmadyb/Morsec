@@ -46,6 +46,12 @@ import app.morsecode.core.design.theme.MorseTheme
  * screen, because the level being browsed is the one worth reading. No horizontal
  * scrollbar is drawn.
  *
+ * [navigableFrom] says where the targets start. A SAF grant reaches down from the
+ * folder the user picked and never up, so the levels above it are shown for
+ * orientation — the path is not honest without them — but are not clickable, and
+ * are drawn in the tertiary colour that the rest of the app uses for text that is
+ * not a control.
+ *
  * The reference draws the pill at about 40 dp with `padding:11px 16px`; it is
  * 48 dp here so a level meets the touch-target floor (§11), the same call the
  * category strip makes. Recorded in doc/fidelity-notes.md.
@@ -58,6 +64,7 @@ public fun MorseCrumb(
     iconRes: Int = MorseIcons.folder,
     iconDescription: String? = null,
     currentDescription: String? = null,
+    navigableFrom: Int = 0,
     trailing: (@Composable RowScope.() -> Unit)? = null,
 ) {
     val colors = MorseTheme.colors
@@ -108,6 +115,7 @@ public fun MorseCrumb(
                     label = label,
                     current = index == levels.lastIndex,
                     currentDescription = currentDescription,
+                    navigable = index >= navigableFrom,
                     onClick = { onLevelClick(index) },
                 )
             }
@@ -123,6 +131,7 @@ private fun CrumbLevel(
     label: String,
     current: Boolean,
     currentDescription: String?,
+    navigable: Boolean,
     onClick: () -> Unit,
 ) {
     val colors = MorseTheme.colors
@@ -136,19 +145,28 @@ private fun CrumbLevel(
         style = MorseTextStyles.monospacedAddress,
         color = when {
             // .crumb span:hover{color:var(--acc)}
-            pressed -> colors.accent
+            pressed && navigable -> colors.accent
             current -> colors.textPrimary
-            else -> colors.textSecondary
+            navigable -> colors.textSecondary
+            // Above the grant: shown because the path is not honest without it,
+            // drawn as text because it cannot be opened.
+            else -> colors.textTertiary
         },
         maxLines = 1,
         overflow = TextOverflow.Visible,
         modifier = Modifier
             .defaultMinSize(minHeight = metrics.touchTarget)
             .clip(RoundedCornerShape(metrics.radiusXs))
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-                onClick = onClick,
+            .then(
+                if (navigable) {
+                    Modifier.clickable(
+                        interactionSource = interaction,
+                        indication = null,
+                        onClick = onClick,
+                    )
+                } else {
+                    Modifier
+                },
             )
             .then(
                 if (current && currentDescription != null) {
