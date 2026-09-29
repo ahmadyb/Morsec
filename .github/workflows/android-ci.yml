@@ -60,6 +60,21 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           printf 'sdk.dir=%s\n' "$SDK" > local.properties
 
+      - name: Record the build environment
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          {
+            echo "== date/uname =="; date -u; uname -a
+            echo "== java =="; java -version 2>&1; echo "JAVA_HOME=$JAVA_HOME"
+            echo "== PATH =="; echo "$PATH" | tr ':' '\n'
+            echo "== android =="; echo "ANDROID_HOME=${ANDROID_HOME:-unset} ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
+            ls -1 "${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms" 2>&1 || true
+            ls -1 "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" 2>&1 || true
+            echo "== which =="; for c in gradle sdkmanager java javac python3 unzip curl; do printf '%s: ' "$c"; command -v "$c" || echo MISSING; done
+            echo "== local.properties =="; cat local.properties 2>&1 || true
+          } 2>&1 | tee ci-logs/00-environment.log
+
       - name: Install Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -70,25 +85,39 @@ jobs:
       # repository yet, so the wrapper is generated here and uploaded below.
       - name: Generate the Gradle wrapper
         run: |
-          set -euo pipefail
-          gradle wrapper --gradle-version 8.13 --distribution-type bin
-          chmod +x gradlew
-          test -s gradle/wrapper/gradle-wrapper.jar || { echo "::error::wrapper jar was not generated"; exit 1; }
-          test -s gradlew.bat || { echo "::error::gradlew.bat was not generated"; exit 1; }
-          ./gradlew --version
+          set -uo pipefail
+          mkdir -p ci-logs
+          {
+            if ! command -v gradle > /dev/null 2>&1; then
+              echo "gradle is not on PATH; installing the 8.13 distribution directly"
+              curl -fsSL -o /tmp/gradle-8.13-bin.zip \
+                https://services.gradle.org/distributions/gradle-8.13-bin.zip
+              unzip -q /tmp/gradle-8.13-bin.zip -d /opt
+              export PATH="/opt/gradle-8.13/bin:$PATH"
+              echo "/opt/gradle-8.13/bin" >> "$GITHUB_PATH"
+            fi
+            echo "gradle: $(command -v gradle)"
+            gradle --version
+            gradle wrapper --gradle-version 8.13 --distribution-type bin
+            chmod +x gradlew
+            test -s gradle/wrapper/gradle-wrapper.jar || echo "::error::wrapper jar was not generated"
+            test -s gradlew.bat || echo "::error::gradlew.bat was not generated"
+            ls -la gradlew gradlew.bat gradle/wrapper/
+            ./gradlew --version
+          } 2>&1 | tee ci-logs/05-wrapper.log
 
       - name: Milestone hygiene (no TODO/stub markers in delivered sources)
         run: |
           set -uo pipefail
           mkdir -p ci-logs
-          ./gradlew --no-daemon --stacktrace checkMilestoneHygiene 2>&1 | tee ci-logs/01-hygiene.log
+          ./gradlew --no-daemon --stacktrace checkMilestoneHygiene 2>&1 | tee ci-logs/10-hygiene.log
 
       - name: JVM unit tests
         if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
           mkdir -p ci-logs
-          ./gradlew --no-daemon --stacktrace --continue test 2>&1 | tee ci-logs/02-unit-tests.log
+          ./gradlew --no-daemon --stacktrace --continue test 2>&1 | tee ci-logs/20-unit-tests.log
 
       - name: Android lint
         if: ${{ !cancelled() }}
@@ -102,14 +131,14 @@ jobs:
             :core-storage:lintDebug \
             :transport-lan:lintDebug \
             :transport-nearby:lintDebug \
-            :media:lintDebug 2>&1 | tee ci-logs/03-lint.log
+            :media:lintDebug 2>&1 | tee ci-logs/30-lint.log
 
       - name: Assemble the debug APK
         if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
           mkdir -p ci-logs
-          ./gradlew --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee ci-logs/04-assemble.log
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee ci-logs/40-assemble.log
 
       - name: Summarise test and lint results
         if: always()
@@ -178,7 +207,7 @@ jobs:
               r"Lint found|errors? generated|unresolved reference|"
               r"Kotlin could not compile|Could not resolve|Cannot access built-in|"
               r"java\.lang\.|GradleException|warning: )", re.IGNORECASE)
-          MAX_ANNOTATIONS = 120
+          MAX_ANNOTATIONS = 140
           MAX_MESSAGE = 600
 
           def command(level, title, message):
@@ -216,10 +245,16 @@ jobs:
                       continue
                   seen.add(key)
                   matches.append(f"L{i + 1}: {stripped[:MAX_MESSAGE]}")
-              for entry in matches[:MAX_ANNOTATIONS]:
+              for entry in matches[:60]:
                   if emitted >= MAX_ANNOTATIONS:
                       break
                   print(command("error", name, entry))
+                  emitted += 1
+              # Always publish the tail: when a step dies before Gradle starts
+              # (missing binary, bad PATH) there are no error lines to match.
+              tail = [l for l in lines[-25:] if l.strip()]
+              if tail and emitted < MAX_ANNOTATIONS:
+                  print(command("error", f"{name} — tail", " ⏎ ".join(tail)[:3000]))
                   emitted += 1
               print(f"{name}: {len(lines)} log lines, {len(failures)} failure block(s), {len(matches)} matching line(s)")
           PY
