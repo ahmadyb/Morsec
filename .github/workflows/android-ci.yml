@@ -4,6 +4,10 @@ name: Android CI
 # so compilation, KSP/Hilt processing, lint, unit tests and APK assembly are
 # proven here instead. The Node scripts under tools/verify check design-token
 # fidelity only; they are not a substitute for this workflow.
+#
+# Failure text is republished as check-run annotations on purpose: the Actions
+# log blob hosts are not reachable from every environment, while the annotations
+# API is, so a failed run can be diagnosed without downloading logs.
 
 on:
   workflow_dispatch:
@@ -30,21 +34,31 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Temurin JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up the Android SDK command-line tools
-        uses: android-actions/setup-android@v3
-
+      # ubuntu-latest ships the Android SDK; only the packages this project needs
+      # are installed explicitly so the build never depends on image drift.
       - name: Install Android SDK Platform 36 and build tools
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          sdkmanager --list_installed || true
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "Android SDK root: $SDK"
+          SDKMANAGER="$(find "$SDK/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort | tail -1 || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under $SDK/cmdline-tools"
+            ls -R "$SDK" | head -50
+            exit 1
+          fi
+          echo "sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          "$SDKMANAGER" --list_installed || true
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          printf 'sdk.dir=%s\n' "$SDK" > local.properties
 
       - name: Install Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
@@ -59,27 +73,43 @@ jobs:
           set -euo pipefail
           gradle wrapper --gradle-version 8.13 --distribution-type bin
           chmod +x gradlew
+          test -s gradle/wrapper/gradle-wrapper.jar || { echo "::error::wrapper jar was not generated"; exit 1; }
+          test -s gradlew.bat || { echo "::error::gradlew.bat was not generated"; exit 1; }
           ./gradlew --version
 
       - name: Milestone hygiene (no TODO/stub markers in delivered sources)
-        run: ./gradlew --no-daemon --stacktrace checkMilestoneHygiene
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --stacktrace checkMilestoneHygiene 2>&1 | tee ci-logs/01-hygiene.log
 
       - name: JVM unit tests
-        run: ./gradlew --no-daemon --stacktrace --continue test
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --stacktrace --continue test 2>&1 | tee ci-logs/02-unit-tests.log
 
       - name: Android lint
-        run: >-
-          ./gradlew --no-daemon --stacktrace --continue
-          :app:lintDebug
-          :core-design:lintDebug
-          :core-data:lintDebug
-          :core-storage:lintDebug
-          :transport-lan:lintDebug
-          :transport-nearby:lintDebug
-          :media:lintDebug
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --stacktrace --continue \
+            :app:lintDebug \
+            :core-design:lintDebug \
+            :core-data:lintDebug \
+            :core-storage:lintDebug \
+            :transport-lan:lintDebug \
+            :transport-nearby:lintDebug \
+            :media:lintDebug 2>&1 | tee ci-logs/03-lint.log
 
       - name: Assemble the debug APK
-        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee ci-logs/04-assemble.log
 
       - name: Summarise test and lint results
         if: always()
@@ -134,12 +164,73 @@ jobs:
           print("\n".join(lines))
           PY
 
+      # Publishes the interesting lines of every captured Gradle log as check-run
+      # annotations, which stay readable through the REST API.
+      - name: Publish failure annotations
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, os, re
+
+          ERROR_LINE = re.compile(
+              r"(^e: |^w: |error:|ERROR:|AAPT: error|FAILURE:|What went wrong|"
+              r"^> Task .* FAILED|Execution failed for task|Caused by:|"
+              r"Lint found|errors? generated|unresolved reference|"
+              r"Kotlin could not compile|Could not resolve|Cannot access built-in|"
+              r"java\.lang\.|GradleException|warning: )", re.IGNORECASE)
+          MAX_ANNOTATIONS = 120
+          MAX_MESSAGE = 600
+
+          def command(level, title, message):
+              # Workflow-command escaping: %, \r and \n are special in ::commands::.
+              text = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              title = title.replace("%", "%25").replace("\r", " ").replace("\n", " ")
+              return f"::{level} title={title}::{text}"
+
+          emitted = 0
+          logs = sorted(glob.glob("ci-logs/*.log"))
+          if not logs:
+              print("::error title=ci::no Gradle logs were captured")  # noqa
+
+          for path in logs:
+              name = os.path.basename(path)
+              with open(path, encoding="utf-8", errors="replace") as handle:
+                  lines = handle.read().splitlines()
+              failures = [i for i, l in enumerate(lines) if l.startswith("FAILURE:")]
+              if failures:
+                  start = failures[0]
+                  block = [l for l in lines[start:start + 60] if l.strip()]
+                  message = " ⏎ ".join(block)[:4000]
+                  print(command("error", f"{name} — build failure", message))
+                  emitted += 1
+              matches = []
+              seen = set()
+              for i, line in enumerate(lines):
+                  stripped = line.strip()
+                  if not stripped or not ERROR_LINE.search(stripped):
+                      continue
+                  if stripped.startswith("w: ") and len(matches) > 40:
+                      continue  # warnings only matter once the errors are fixed
+                  key = stripped[:200]
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  matches.append(f"L{i + 1}: {stripped[:MAX_MESSAGE]}")
+              for entry in matches[:MAX_ANNOTATIONS]:
+                  if emitted >= MAX_ANNOTATIONS:
+                      break
+                  print(command("error", name, entry))
+                  emitted += 1
+              print(f"{name}: {len(lines)} log lines, {len(failures)} failure block(s), {len(matches)} matching line(s)")
+          PY
+
       - name: Upload the debug APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: morsecode-debug-apk
           path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload test and lint reports
         if: always()
@@ -149,6 +240,7 @@ jobs:
           path: |
             **/build/reports/**
             **/build/test-results/**
+            ci-logs/**
           if-no-files-found: ignore
           retention-days: 14
 
@@ -164,5 +256,5 @@ jobs:
             gradlew.bat
             gradle/wrapper/gradle-wrapper.jar
             gradle/wrapper/gradle-wrapper.properties
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
