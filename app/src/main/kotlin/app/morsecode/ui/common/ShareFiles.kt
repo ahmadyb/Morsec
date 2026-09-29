@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
+import androidx.core.net.toUri
 import app.morsecode.core.model.MediaItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,7 +27,7 @@ public object ShareFiles {
     public suspend fun prepare(context: Context, items: List<MediaItem>): List<Uri> =
         withContext(Dispatchers.IO) {
             items.mapNotNull { item ->
-                val uri = item.uriString?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                val uri = item.uriString?.let { runCatching { it.toUri() }.getOrNull() }
                     ?: return@mapNotNull null
                 if (uri.scheme == "file") stageFile(context, uri) else uri
             }
@@ -64,7 +65,7 @@ public object ShareFiles {
 
     /** Opens one item with whatever app on the device can handle it. */
     public fun open(context: Context, item: MediaItem): Boolean {
-        val uri = item.uriString?.let { runCatching { Uri.parse(it) }.getOrNull() } ?: return false
+        val uri = item.uriString?.let { runCatching { it.toUri() }.getOrNull() } ?: return false
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, item.mimeType ?: "*/*")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)

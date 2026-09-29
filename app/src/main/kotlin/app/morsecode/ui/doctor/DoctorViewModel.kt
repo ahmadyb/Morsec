@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.morsecode.R
@@ -253,13 +254,10 @@ public class DoctorViewModel @Inject constructor(
                 Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-            DiagnosticAction.REQUEST_NOTIFICATION_PERMISSION ->
-                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            DiagnosticAction.REQUEST_NOTIFICATION_PERMISSION -> notificationSettingsIntent()
 
             DiagnosticAction.OPEN_PLAY_STORE ->
-                Intent(Intent.ACTION_VIEW, android.net.Uri.parse("market://details?id=$PLAY_SERVICES_PACKAGE"))
+                Intent(Intent.ACTION_VIEW, "market://details?id=$PLAY_SERVICES_PACKAGE".toUri())
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
             DiagnosticAction.CHANGE_WEBSHARE_PORT,
@@ -274,6 +272,24 @@ public class DoctorViewModel @Inject constructor(
             context.startActivity(intent)
             true
         }.getOrDefault(false)
+    }
+
+    /**
+     * Where the user turns notifications for Morsecode back on.
+     *
+     * The per-app notification settings screen only exists from API 26, so on an
+     * API 23-25 device the action opens the app details screen instead: the
+     * check's button must never dead-end on a supported device.
+     */
+    private fun notificationSettingsIntent(): Intent {
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        } else {
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData("package:${context.packageName}".toUri())
+        }
+        return intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 
     private fun String.shortName(): String = substringAfterLast('.')

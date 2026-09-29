@@ -397,8 +397,8 @@ public fun MorseMetaText(
 @Composable
 public fun MorseEmptyState(
     title: String,
-    message: String? = null,
     modifier: Modifier = Modifier,
+    message: String? = null,
     iconRes: Int = MorseIcons.folder,
     action: (@Composable () -> Unit)? = null,
 ) {

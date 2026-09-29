@@ -12,8 +12,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Box
+import androidx.core.net.toUri
 import kotlinx.coroutines.launch
-import android.net.Uri
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -167,7 +167,7 @@ public fun HistoryScreen(
                             onDeleteFile = {
                                 val deleted = entry.resultUriString?.let { uri ->
                                     runCatching {
-                                        context.contentResolver.delete(Uri.parse(uri), null, null)
+                                        context.contentResolver.delete(uri.toUri(), null, null)
                                     }.getOrDefault(0)
                                 } ?: 0
                                 Toast.makeText(

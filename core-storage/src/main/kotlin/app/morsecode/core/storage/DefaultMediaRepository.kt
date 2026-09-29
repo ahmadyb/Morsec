@@ -1,8 +1,8 @@
 package app.morsecode.core.storage
 
 import android.content.Context
-import android.net.Uri
 import android.os.Build
+import androidx.core.net.toUri
 import app.morsecode.core.data.repository.DeviceRepository
 import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.MediaKind
@@ -95,7 +95,7 @@ internal class DefaultMediaRepository @Inject constructor(
     }
 
     override suspend fun addFolder(treeUri: String): SafGrant? = withContext(io) {
-        val uri = runCatching { Uri.parse(treeUri) }.getOrNull() ?: return@withContext null
+        val uri = runCatching { treeUri.toUri() }.getOrNull() ?: return@withContext null
         if (!saf.isValid(treeUri)) return@withContext null
         if (!saf.takePersistablePermission(uri)) return@withContext null
         val name = saf.displayName(uri) ?: "Folder"
@@ -106,7 +106,7 @@ internal class DefaultMediaRepository @Inject constructor(
 
     override suspend fun removeFolder(grantId: Long) = withContext(io) {
         val grant = devices.observeGrants().first().firstOrNull { it.id == grantId }
-        grant?.let { saf.releasePersistablePermission(Uri.parse(it.treeUri)) }
+        grant?.let { saf.releasePersistablePermission(it.treeUri.toUri()) }
         devices.removeGrant(grantId)
         refresh()
     }
@@ -115,7 +115,7 @@ internal class DefaultMediaRepository @Inject constructor(
         val grants = devices.observeGrants().first()
         val revoked = grants.filterNot { saf.isValid(it.treeUri) }
         revoked.forEach { grant ->
-            runCatching { saf.releasePersistablePermission(Uri.parse(grant.treeUri)) }
+            runCatching { saf.releasePersistablePermission(grant.treeUri.toUri()) }
             devices.removeGrantForUri(grant.treeUri)
         }
         if (revoked.isNotEmpty()) refresh()

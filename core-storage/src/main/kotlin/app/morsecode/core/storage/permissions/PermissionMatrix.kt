@@ -1,6 +1,7 @@
 package app.morsecode.core.storage.permissions
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -14,7 +15,13 @@ import androidx.core.content.ContextCompat
  * the moment the user triggers the action — never all of them at launch.
  *
  * API 23 is the floor, so every branch below is reachable on a supported device.
+ *
+ * InlinedApi is suppressed for the whole matrix: these are compile-time constants,
+ * and each one is only ever returned from a branch that tests the SDK level first.
+ * The level arrives as a parameter (defaulting to `Build.VERSION.SDK_INT`) so the
+ * matrix is unit-testable, which is exactly why lint cannot see the guard itself.
  */
+@SuppressLint("InlinedApi")
 public object PermissionMatrix {
 
     /** Reading photos/videos/audio. API 33 split READ_EXTERNAL_STORAGE per media type. */

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.MediaKind
@@ -27,7 +28,7 @@ internal class SafTreeReader @Inject constructor(
 
     /** True while the platform still honours this tree grant. */
     public fun isValid(treeUri: String): Boolean {
-        val uri = runCatching { Uri.parse(treeUri) }.getOrNull() ?: return false
+        val uri = runCatching { treeUri.toUri() }.getOrNull() ?: return false
         val tree = runCatching { DocumentFile.fromTreeUri(context, uri) }.getOrNull() ?: return false
         return tree.exists() && tree.canRead()
     }
@@ -38,7 +39,7 @@ internal class SafTreeReader @Inject constructor(
     }
 
     public fun children(treeUri: String): List<MediaItem> {
-        val uri = runCatching { Uri.parse(treeUri) }.getOrNull() ?: return emptyList()
+        val uri = runCatching { treeUri.toUri() }.getOrNull() ?: return emptyList()
         val tree = runCatching { DocumentFile.fromTreeUri(context, uri) }.getOrNull() ?: return emptyList()
         return runCatching { tree.listFiles() }.getOrDefault(emptyArray()).mapNotNull { file -> toItem(file) }
     }
@@ -58,7 +59,7 @@ internal class SafTreeReader @Inject constructor(
     )
 
     public fun byUri(documentUri: String): MediaItem? {
-        val uri = runCatching { Uri.parse(documentUri) }.getOrNull() ?: return null
+        val uri = runCatching { documentUri.toUri() }.getOrNull() ?: return null
         val file = runCatching { DocumentFile.fromSingleUri(context, uri) }.getOrNull()
             ?: runCatching { DocumentFile.fromTreeUri(context, uri) }.getOrNull()
             ?: return null

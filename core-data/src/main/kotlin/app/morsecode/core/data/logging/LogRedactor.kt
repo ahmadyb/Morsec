@@ -1,4 +1,11 @@
+// The "/sdcard/" literal below is a redaction *pattern*: LogRedactor has to
+// recognise the legacy alias in whatever text another component logged. Lint's
+// SdCardPath check reads it as a hardcoded path the app opens, which it is not.
+@file:SuppressLint("SdCardPath")
+
 package app.morsecode.core.data.logging
+
+import android.annotation.SuppressLint
 
 /**
  * Redaction applied to every log message and stack trace before it is written.

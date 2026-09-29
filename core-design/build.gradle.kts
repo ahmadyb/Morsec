@@ -39,8 +39,17 @@ android {
         xmlReport = true
         textReport = true
         warningsAsErrors = false
-        // NewApi stays enabled: it is one of the two automated gates that keep
-        // API 23 devices safe (the other is tools/verify/api23-scan).
+        // The toolchain is pinned, so "a newer version is available" can never be
+        // acted on here — see doc/decisions/ADR-0001-toolchain.md.
+        disable += setOf(
+            "GradleDependency",
+            "NewerVersionAvailable",
+            "AndroidGradlePluginVersion",
+        )
+        // NewApi stays enabled: it is the automated gate that keeps API 23 devices
+        // safe. The pure-JVM modules cannot be checked by lint, so their API floor
+        // is an explicit allowlist instead — see
+        // doc/decisions/ADR-0002-webshare-server.md and doc/qa/lint-and-warnings.md.
     }
 
     testOptions {

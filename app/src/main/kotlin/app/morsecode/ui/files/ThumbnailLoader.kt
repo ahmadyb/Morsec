@@ -2,7 +2,6 @@ package app.morsecode.ui.files
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.util.LruCache
@@ -22,6 +21,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.Image
+import androidx.core.net.toUri
 import app.morsecode.core.design.component.FileKindIcon
 import app.morsecode.core.design.theme.MorseTheme
 import app.morsecode.core.model.MediaItem
@@ -109,7 +109,7 @@ private suspend fun loadThumbnail(
     itemId: String,
     pixels: Int,
 ): Bitmap? = withContext(Dispatchers.IO) {
-    val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return@withContext null
+    val uri = runCatching { uriString.toUri() }.getOrNull() ?: return@withContext null
     val resolver = context.contentResolver
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         runCatching {

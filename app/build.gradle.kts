@@ -101,7 +101,19 @@ android {
         warningsAsErrors = false
         checkReleaseBuilds = true
         // NewApi / UnusedResources stay on: they are the automated API 23 gate.
-        disable += setOf("MissingTranslation")
+        //
+        // The three version checks are off on purpose. The toolchain is pinned
+        // (AGP 8.13 · Gradle 8.13 · Hilt 2.58 · androidx.hilt 1.3.0, see
+        // doc/decisions/ADR-0001-toolchain.md), so "a newer version is available"
+        // is permanently true for 44 findings and would drown the checks that can
+        // actually fail. MissingTranslation is off because the app ships exactly
+        // one locale: the mockup's English copy.
+        disable += setOf(
+            "MissingTranslation",
+            "GradleDependency",
+            "NewerVersionAvailable",
+            "AndroidGradlePluginVersion",
+        )
     }
 
     testOptions {

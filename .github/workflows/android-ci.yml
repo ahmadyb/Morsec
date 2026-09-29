@@ -105,8 +105,10 @@ jobs:
             if [ -s gradlew ] && [ -s gradle/wrapper/gradle-wrapper.jar ] \
               && git ls-files --error-unmatch gradlew > /dev/null 2>&1; then
               echo "the wrapper is committed already; verifying it instead of regenerating"
+              echo "::notice title=gradle wrapper::the committed wrapper was used as-is (gradlew, gradlew.bat and gradle-wrapper.jar are tracked); nothing was regenerated"
             else
               gradle wrapper --gradle-version 8.13 --distribution-type bin
+              echo "::notice title=gradle wrapper::wrapper generated with Gradle 8.13; the last step commits it back to the branch"
             fi
             chmod +x gradlew
             test -s gradle/wrapper/gradle-wrapper.jar || echo "::error::wrapper jar was not generated"
@@ -211,25 +213,38 @@ jobs:
               lines += [f"- `{entry}`" for entry in failing[:40]]
               lines.append("")
           lines += ["## Lint", ""]
-          reports = sorted(set(glob.glob("**/build/reports/lint-results-debug.*", recursive=True)))
-          lint_issues = 0
+          reports = sorted(set(glob.glob("**/build/reports/lint-results-debug.xml", recursive=True)))
+          lint_errors = lint_warnings = 0
           for path in reports:
-              if path.endswith(".xml"):
-                  try:
-                      issues = ET.parse(path).getroot().findall("issue")
-                      lint_issues += len(issues)
-                      lines.append(f"- `{path.split('/build/')[0]}`: {len(issues)} issue(s)")
-                  except ET.ParseError:
-                      lines.append(f"- `{path}`: unparseable report")
-              else:
-                  lines.append(f"- `{path}`")
+              try:
+                  issues = ET.parse(path).getroot().findall("issue")
+              except ET.ParseError:
+                  lines.append(f"- `{path}`: unparseable report")
+                  continue
+              module_errors = sum(1 for i in issues
+                                  if (i.get("severity") or "").lower() in ("error", "fatal"))
+              module_warnings = len(issues) - module_errors
+              lint_errors += module_errors
+              lint_warnings += module_warnings
+              lines.append(f"- `{path.split('/build/')[0]}`: {module_errors} error(s), {module_warnings} warning(s)")
           if not reports:
               lines.append("No lint reports were produced.")
           else:
-              lines += ["", f"**Total lint issues: {lint_issues}**"]
-          apks = sorted(glob.glob("app/build/outputs/apk/debug/*.apk"))
+              lines += ["", f"**Total: {lint_errors} lint errors, {lint_warnings} lint warnings**"]
+          apks = sorted(glob.glob("app/build/outputs/apk/**/*.apk", recursive=True))
           lines += ["", "## APK", ""]
           lines += [f"- `{a}`: {os.path.getsize(a) / 1048576:.2f} MiB" for a in apks] or ["No APK produced."]
+
+          # The step summary is not readable through the API from every
+          # environment, so the headline numbers are echoed as notice
+          # annotations too — they are what a green run can be reported from.
+          def notice(title, message):
+              text = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::notice title={title}::{text}")
+
+          notice("unit tests", f"{total} tests, {failed} failed, {skipped} skipped in {len(files)} report(s)")
+          notice("lint", f"{lint_errors} errors, {lint_warnings} warnings in {len(reports)} report(s)")
+          notice("apk", "; ".join(f"{a} = {os.path.getsize(a) / 1048576:.2f} MiB" for a in apks) or "no APK produced")
 
           with open(os.environ["SUMMARY_PATH"], "a", encoding="utf-8") as out:
               out.write("\n".join(lines) + "\n")
@@ -333,19 +348,19 @@ jobs:
               title = title.replace("%", "%25").replace("\r", " ").replace("\n", " ")
               return f"::{level} title={title}::{text}"
 
-          def emit(name, bucket, lines):
+          def emit(level, name, bucket, lines):
               if not lines:
                   return 0
               sent = 0
               chunk, index = [], 1
               for line in lines:
                   if sum(len(x) + 3 for x in chunk) + len(line) > CHUNK and chunk:
-                      print(command("error", f"{name} — {bucket} ({index})", " ⏎ ".join(chunk)))
+                      print(command(level, f"{name} — {bucket} part {index}", " ⏎ ".join(chunk)))
                       sent += 1
                       chunk, index = [], index + 1
                   chunk.append(line)
               if chunk:
-                  print(command("error", f"{name} — {bucket} ({index})", " ⏎ ".join(chunk)))
+                  print(command(level, f"{name} — {bucket} part {index}", " ⏎ ".join(chunk)))
                   sent += 1
               return sent
 
@@ -356,6 +371,11 @@ jobs:
               name = os.path.basename(path)
               with open(path, encoding="utf-8", errors="replace") as handle:
                   raw = handle.read().splitlines()
+              # A log whose Gradle build succeeded contributes no diagnostics:
+              # publishing its "> Task …" lines as error annotations made a green
+              # run look broken. A green log gets one notice carrying the counters.
+              failed = any(l.startswith("FAILURE:") or "BUILD FAILED" in l for l in raw)
+              level = "error" if failed else "notice"
               counts = []
               for bucket, pattern in BUCKETS:
                   seen, kept = set(), []
@@ -369,16 +389,21 @@ jobs:
                       seen.add(key)
                       kept.append(f"L{i + 1}: {stripped[:700]}")
                   if kept:
-                      emit(name, bucket, kept[:400])
                       counts.append(f"{bucket}={len(kept)}")
+                      if failed:
+                          emit(level, name, bucket, kept[:400])
+              if not failed:
+                  print(command(level, f"{name} — clean",
+                                f"{len(raw)} lines; {' '.join(counts) or 'no matching lines'}"))
+                  continue
               failures = [i for i, l in enumerate(raw)
                           if l.startswith("FAILURE:") or re.match(r"^\d+: Task failed with an exception", l)]
               for start in failures[:8]:
                   block = [l for l in raw[start:start + 200] if l.strip() and not l.strip().startswith("at org.gradle")]
-                  emit(name, "what went wrong", [" ⏎ ".join(block)[:CHUNK]])
+                  emit(level, name, "what went wrong", [" ⏎ ".join(block)[:CHUNK]])
               tail = [l for l in raw[-30:] if l.strip()]
               if tail:
-                  emit(name, "tail", [" ⏎ ".join(tail)[:CHUNK]])
+                  emit(level, name, "tail", [" ⏎ ".join(tail)[:CHUNK]])
               print(f"{name}: {len(raw)} lines; {' '.join(counts) or 'no matching lines'}")
           PY
 

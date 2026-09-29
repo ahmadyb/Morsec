@@ -31,6 +31,13 @@ android {
         xmlReport = true
         textReport = true
         warningsAsErrors = false
+        // The toolchain is pinned, so "a newer version is available" can never be
+        // acted on here — see doc/decisions/ADR-0001-toolchain.md.
+        disable += setOf(
+            "GradleDependency",
+            "NewerVersionAvailable",
+            "AndroidGradlePluginVersion",
+        )
     }
 
     testOptions {
