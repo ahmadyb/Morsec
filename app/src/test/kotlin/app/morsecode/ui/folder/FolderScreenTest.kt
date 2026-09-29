@@ -22,8 +22,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.savedstate.SavedStateRegistry
-import androidx.savedstate.SavedStateRegistryController
 import androidx.test.core.app.ApplicationProvider
 import app.morsecode.R
 import app.morsecode.core.design.theme.MorseTheme
@@ -474,16 +472,11 @@ class FolderScreenTest {
 private class TestBackOwner : OnBackPressedDispatcherOwner {
 
     private val lifecycleRegistry = LifecycleRegistry(this)
-    private val savedStateRegistryController = SavedStateRegistryController.create(this)
 
     override val onBackPressedDispatcher: OnBackPressedDispatcher = OnBackPressedDispatcher()
     override val lifecycle: Lifecycle get() = lifecycleRegistry
-    override val savedStateRegistry: SavedStateRegistry
-        get() = savedStateRegistryController.savedStateRegistry
 
     init {
-        savedStateRegistryController.performAttach()
-        savedStateRegistryController.performRestore(null)
         lifecycleRegistry.currentState = Lifecycle.State.RESUMED
     }
 }
