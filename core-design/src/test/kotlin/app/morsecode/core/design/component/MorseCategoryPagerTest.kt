@@ -43,10 +43,9 @@ import org.robolectric.annotation.GraphicsMode
  * pin the reference phone width of 411 dp so the strip is measured as designed
  * rather than squeezed into Robolectric's 320 dp default.
  *
- * Assertions are made on text nodes: they carry the same information a user
- * reads, and their bounds are reported reliably. The tab that owns the
- * `selected` semantic is a `matchParentSize` box, so it is asserted to exist and
- * to be the only selected node while its label is the one checked for display.
+ * A tab merges its label into the node that carries `selected`, so that node is
+ * looked up in the unmerged tree; what the user sees is asserted on the label
+ * itself, which is a text node in the merged tree like any other.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -115,9 +114,9 @@ class MorseCategoryPagerTest {
 
     /** Exactly one tab is marked selected, and its label is the one on screen. */
     private fun assertSelectedTab(label: String) {
-        composeTestRule.onAllNodes(selectedTab).assertCountEquals(1)
+        composeTestRule.onAllNodes(selectedTab, useUnmergedTree = true).assertCountEquals(1)
         composeTestRule
-            .onNode(selectedTab.and(hasAnyDescendant(hasText(label))))
+            .onNode(selectedTab.and(hasAnyDescendant(hasText(label))), useUnmergedTree = true)
             .assertExists()
         composeTestRule.onNodeWithText(label).assertIsDisplayed()
     }
@@ -198,6 +197,6 @@ class MorseCategoryPagerTest {
         tabs.forEach { tab ->
             composeTestRule.onNodeWithText(tab.label).assertIsDisplayed()
         }
-        composeTestRule.onAllNodes(selectedTab).assertCountEquals(1)
+        composeTestRule.onAllNodes(selectedTab, useUnmergedTree = true).assertCountEquals(1)
     }
 }
