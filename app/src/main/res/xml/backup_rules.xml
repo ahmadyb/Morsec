@@ -2,16 +2,16 @@
 <!--
   Backup policy (API <= 30).
 
-  Settings are worth restoring; diagnostics are not. The database holds logs,
-  crash reports and transfer history — private records of what the user shared —
-  so it is excluded, and so are in-flight partial files and text exports.
+  Only the DataStore directory is backed up, so the user's settings survive a
+  restore while everything else stays on the device: the Room database holds
+  logs, crash reports and transfer history — private records of what the user
+  shared — and in-flight partial files, text exports and the cache are transient.
+
+  Those are not listed as <exclude> entries on purpose. As soon as a
+  full-backup-content file declares an <include>, every path outside it is
+  already left out, and lint's FullBackupContent check rejects an <exclude> whose
+  path is not inside an included path.
 -->
 <full-backup-content>
     <include domain="file" path="datastore/" />
-    <exclude domain="database" path="morsecode.db" />
-    <exclude domain="database" path="morsecode.db-wal" />
-    <exclude domain="database" path="morsecode.db-shm" />
-    <exclude domain="file" path="incoming/" />
-    <exclude domain="file" path="exports/" />
-    <exclude domain="cache" path="." />
 </full-backup-content>

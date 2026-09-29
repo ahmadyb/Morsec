@@ -33,6 +33,11 @@ android {
 
     lint {
         abortOnError = true
+        // CI parses the machine-readable reports and republishes the findings as
+        // check-run annotations: the Actions log and artifact hosts are not
+        // reachable from every environment that has to debug a red build.
+        xmlReport = true
+        textReport = true
         warningsAsErrors = false
         // NewApi stays enabled: it is one of the two automated gates that keep
         // API 23 devices safe (the other is tools/verify/api23-scan).

@@ -1,20 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Same policy as backup_rules.xml, for the API 31+ extraction engine. -->
+<!--
+  Same policy as backup_rules.xml, for the API 31+ extraction engine: settings
+  travel with the user, private records and transient files do not.
+
+  <cloud-backup> covers backup to Google Drive; <device-transfer> covers a
+  direct device-to-device copy. Both are include-only, because an <exclude> for
+  a path that is not inside an <include> is redundant and lint rejects it.
+-->
 <data-extraction-rules>
     <cloud-backup>
         <include domain="file" path="datastore/" />
-        <exclude domain="database" path="morsecode.db" />
-        <exclude domain="database" path="morsecode.db-wal" />
-        <exclude domain="database" path="morsecode.db-shm" />
-        <exclude domain="file" path="incoming/" />
-        <exclude domain="file" path="exports/" />
-        <exclude domain="cache" path="." />
     </cloud-backup>
     <device-transfer>
         <include domain="file" path="datastore/" />
-        <exclude domain="database" path="morsecode.db" />
-        <exclude domain="file" path="incoming/" />
-        <exclude domain="file" path="exports/" />
-        <exclude domain="cache" path="." />
     </device-transfer>
 </data-extraction-rules>

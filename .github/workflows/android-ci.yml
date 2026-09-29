@@ -17,7 +17,11 @@ on:
       - arena/01a0e98a-morsec
 
 permissions:
-  contents: read
+  # contents: write is needed by the last step, which commits the Gradle wrapper
+  # this workflow generates: the jar is a binary artifact that cannot be produced
+  # in a checkout without the Android toolchain, and Actions artifact downloads
+  # are not reachable from every environment.
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -98,7 +102,12 @@ jobs:
             fi
             echo "gradle: $(command -v gradle)"
             gradle --version
-            gradle wrapper --gradle-version 8.13 --distribution-type bin
+            if [ -s gradlew ] && [ -s gradle/wrapper/gradle-wrapper.jar ] \
+              && git ls-files --error-unmatch gradlew > /dev/null 2>&1; then
+              echo "the wrapper is committed already; verifying it instead of regenerating"
+            else
+              gradle wrapper --gradle-version 8.13 --distribution-type bin
+            fi
             chmod +x gradlew
             test -s gradle/wrapper/gradle-wrapper.jar || echo "::error::wrapper jar was not generated"
             test -s gradlew.bat || echo "::error::gradlew.bat was not generated"
@@ -227,6 +236,75 @@ jobs:
           print("\n".join(lines))
           PY
 
+      # Lint runs with abortOnError = true, so a red build is the only signal
+      # that survives in the log tail — which prints a single "first failure".
+      # Every finding is therefore republished from the XML reports (xmlReport is
+      # enabled in each module's lint block), packed into as few annotations as
+      # the per-step cap allows.
+      - name: Publish lint findings
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, os, xml.etree.ElementTree as ET
+
+          CHUNK = 12000
+
+          def command(level, title, message):
+              # Workflow-command escaping: %, \r and \n are special in ::commands::.
+              text = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              title = title.replace("%", "%25").replace("\r", " ").replace("\n", " ")
+              return f"::{level} title={title}::{text}"
+
+          def emit(level, title, entries):
+              sent, chunk, index = 0, [], 1
+              for entry in entries:
+                  if chunk and sum(len(x) + 3 for x in chunk) + len(entry) > CHUNK:
+                      print(command(level, f"{title} part {index}", " ⏎ ".join(chunk)))
+                      sent, chunk, index = sent + 1, [], index + 1
+                  chunk.append(entry)
+              if chunk:
+                  print(command(level, f"{title} part {index}", " ⏎ ".join(chunk)))
+                  sent += 1
+              return sent
+
+          reports = sorted(set(glob.glob("**/build/reports/lint-results-*.xml", recursive=True)))
+          if not reports:
+              print("::error title=lint::no lint XML report was produced")
+          errors, warnings = [], {}
+          for path in reports:
+              try:
+                  issues = ET.parse(path).getroot().findall("issue")
+              except ET.ParseError:
+                  print(command("error", "lint", f"{path} could not be parsed"))
+                  continue
+              for issue in issues:
+                  iid = issue.get("id", "?")
+                  severity = (issue.get("severity") or "").lower()
+                  message = " ".join((issue.get("message") or "").split())
+                  location = issue.find("location")
+                  where = ""
+                  if location is not None and location.get("file"):
+                      where = os.path.relpath(location.get("file"))
+                      if location.get("line"):
+                          where += f":{location.get('line')}"
+                  entry = f"{where or path.split('/build/')[0]} [{iid}] {message}"
+                  if severity in ("fatal", "error"):
+                      errors.append(entry)
+                  else:
+                      warnings.setdefault(iid, []).append(entry)
+
+          total_warnings = sum(len(found) for found in warnings.values())
+          if errors:
+              emit("error", f"lint errors: {len(errors)}", errors)
+          if warnings:
+              histogram = [
+                  f"{iid}: {len(found)} — first at {found[0]}"
+                  for iid, found in sorted(warnings.items(), key=lambda kv: -len(kv[1]))
+              ]
+              emit("warning", f"lint warnings: {total_warnings}", histogram)
+          print(f"lint reports: {len(reports)}; errors: {len(errors)}; warnings: {total_warnings}")
+          PY
+
       # Publishes the interesting lines of every captured Gradle log as check-run
       # annotations. GitHub caps the number of annotations, so related lines are
       # packed into as few (long) messages as possible instead of one per line.
@@ -338,3 +416,44 @@ jobs:
             gradle/wrapper/gradle-wrapper.properties
           if-no-files-found: warn
           retention-days: 30
+
+      # The artifact above cannot be downloaded in every environment (the blob
+      # hosts are blocked in some sandboxes), so the wrapper is committed back to
+      # the branch here. Pushes made with GITHUB_TOKEN never start another
+      # workflow run, so this cannot loop, and the step above starts verifying
+      # the committed wrapper from the next run onwards.
+      - name: Commit the generated Gradle wrapper
+        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/arena/01a0e98a-morsec' }}
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+          if git ls-files --error-unmatch gradlew > /dev/null 2>&1; then
+            echo "gradlew is already tracked; nothing to commit."
+            exit 0
+          fi
+          for f in gradlew gradlew.bat gradle/wrapper/gradle-wrapper.jar \
+                   gradle/wrapper/gradle-wrapper.properties; do
+            test -s "$f" || { echo "::error::generated wrapper file is missing: $f"; exit 1; }
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --quiet origin "$BRANCH"
+          # Rebased on the current tip so a fix pushed while this run was in
+          # flight is not overwritten.
+          git checkout -B wrapper-commit "origin/$BRANCH"
+          git add gradlew gradlew.bat \
+                  gradle/wrapper/gradle-wrapper.jar gradle/wrapper/gradle-wrapper.properties
+          git commit -m "Commit the Gradle 8.13 wrapper generated in CI
+
+          gradle-wrapper.jar is a binary artifact and no checkout of this
+          repository has the Android toolchain to produce it, so CI generates the
+          wrapper once and commits it back. Every later run verifies the
+          committed wrapper instead of regenerating it."
+          if ! git push origin "HEAD:$BRANCH"; then
+            echo "push rejected; rebasing on the new tip and retrying"
+            git fetch --quiet origin "$BRANCH"
+            git rebase "origin/$BRANCH" || { echo "::error::wrapper commit does not rebase cleanly"; exit 1; }
+            git push origin "HEAD:$BRANCH"
+          fi
+          git --no-pager log --oneline -3

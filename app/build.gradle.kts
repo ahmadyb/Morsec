@@ -93,6 +93,11 @@ android {
 
     lint {
         abortOnError = true
+        // CI parses the machine-readable reports and republishes the findings as
+        // check-run annotations: the Actions log and artifact hosts are not
+        // reachable from every environment that has to debug a red build.
+        xmlReport = true
+        textReport = true
         warningsAsErrors = false
         checkReleaseBuilds = true
         // NewApi / UnusedResources stay on: they are the automated API 23 gate.
