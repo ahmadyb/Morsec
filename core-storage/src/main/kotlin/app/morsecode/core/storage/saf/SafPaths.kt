@@ -84,6 +84,12 @@ public object SafPaths {
      * The browser uri for [documentId] inside the tree [treeUri], or null when
      * either side is not a SAF tree uri. The result keeps the grant's authority
      * and root, so it can never point outside what the user granted.
+     *
+     * The granted level itself comes back as the bare tree uri rather than as a
+     * document inside it. Both forms address the same folder, but the bare one is
+     * what the platform granted and what the repository stores, so climbing out of
+     * a level lands on a uri the app already knows instead of an equal-but-different
+     * string.
      */
     public fun uriFor(treeUri: String, documentId: String): String? {
         val parsed = parse(treeUri) ?: return null
@@ -91,7 +97,8 @@ public object SafPaths {
         if (tree < 0) return null
         val root = parsed.segments.getOrNull(tree + 1) ?: return null
         if (documentId.isBlank()) return null
-        return "${parsed.base}/$TREE/${encode(root)}/$DOCUMENT/${encode(documentId)}"
+        val granted = "${parsed.base}/$TREE/${encode(root)}"
+        return if (documentId == root) granted else "$granted/$DOCUMENT/${encode(documentId)}"
     }
 
     /** Breadcrumb levels for a document id, volume first. */

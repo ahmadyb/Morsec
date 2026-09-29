@@ -83,6 +83,17 @@ class SafPathsTest {
     }
 
     @Test
+    fun `the granted level comes back as the tree itself`() {
+        // Climbing out of a level has to land on the uri the platform granted, not
+        // on an equal-but-different document form of it, or the browser cannot tell
+        // that it is standing where it started.
+        assertEquals(tree, SafPaths.uriFor(sub, "primary:Download"))
+        assertEquals(tree, SafPaths.uriFor(tree, "primary:Download"))
+        assertEquals(sub, SafPaths.uriFor(sub, "primary:Download/2026"))
+        assertEquals("primary:Download", SafPaths.documentIdOf(SafPaths.uriFor(sub, "primary:Download")!!))
+    }
+
+    @Test
     fun `a copied path pastes back to the same level`() {
         val levels = SafPaths.levelsOf("primary:Download/2026")
         val copied = SafPaths.displayPath(levels, rootLabel)
