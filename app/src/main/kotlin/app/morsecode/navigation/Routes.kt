@@ -1,5 +1,7 @@
 package app.morsecode.navigation
 
+import android.net.Uri
+
 /**
  * Navigation graph routes.
  *
@@ -21,11 +23,25 @@ public object Routes {
     public const val HELP: String = "help"
     public const val WEBSHARE: String = "webshare"
 
-    private const val FOLDER_ARG: String = "treeUri"
+    /** Argument name for [FOLDER]; the folder browser reads it from its SavedStateHandle. */
+    public const val FOLDER_ARG: String = "treeUri"
     public const val FOLDER: String = "folder/{$FOLDER_ARG}"
 
     /** Route for one granted SAF folder, ready to hand to `navigate`. */
     public fun folder(encodedTreeUri: String): String = "folder/$encodedTreeUri"
+
+    /**
+     * The tree uri a [FOLDER] destination was opened with.
+     *
+     * Navigation decodes a path argument on the way in, but a restored or
+     * deep-linked value can still carry the encoding, so the rule lives here
+     * rather than being re-derived in each destination: a value that is already a
+     * uri is used as it is, anything else is decoded once.
+     */
+    public fun decodeFolderArg(value: String?): String {
+        val text = value.orEmpty()
+        return if (text.startsWith("content://")) text else Uri.decode(text)
+    }
 
     /** Routes that render the bottom navigation bar, and which item is lit. */
     public val topLevel: Set<String> = setOf(CONNECT, FILES, HISTORY, SETTINGS)

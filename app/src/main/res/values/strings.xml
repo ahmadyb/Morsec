@@ -121,6 +121,26 @@
     <string name="files_grant_added">Folder added: %1$s</string>
     <string name="files_remove_folder">Remove folder</string>
 
+    <!-- Internal folder browser -->
+    <string name="folder_title">Folder</string>
+    <string name="folder_root_internal">Internal storage</string>
+    <string name="folder_path">Path</string>
+    <string name="folder_current_level">Current folder</string>
+    <string name="folder_copy_path">Copy path</string>
+    <string name="folder_path_copied">Path copied</string>
+    <string name="folder_edit_path">Edit path</string>
+    <string name="folder_edit_path_title">Go to a path</string>
+    <string name="folder_edit_path_hint">Path inside this folder</string>
+    <string name="folder_edit_path_help">Type or paste a path. Only folders inside the grant you gave Morsecode can be opened.</string>
+    <string name="folder_open">Open</string>
+    <string name="folder_select_all">Select all</string>
+    <string name="folder_unavailable_title">Folder unavailable</string>
+    <string name="folder_unavailable">Morsecode can no longer read this folder. Grant it again from Files.</string>
+    <string name="folder_empty_title">Empty folder</string>
+    <string name="folder_empty_body">There is nothing in this folder yet.</string>
+    <string name="folder_path_outside">That path is outside the folder you granted</string>
+    <string name="folder_path_not_found">No folder matches that path</string>
+
     <!-- History -->
     <string name="history_title">History</string>
     <string name="history_tab_received">Received</string>

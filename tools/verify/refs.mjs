@@ -560,6 +560,9 @@ check('Kotlin visibility', 'no public member exposes an internal type', exposure
 const HILT_SUPPLIED = new Set([
   'Context', 'Application', 'Resources', 'AssetManager', 'ContentResolver',
   'PackageManager', 'SharedPreferences',
+  // Hilt's ViewModel factory binds this for every @HiltViewModel from the host's
+  // SavedStateRegistry, so it needs no module of its own.
+  'SavedStateHandle',
 ]);
 const PRIMITIVES = new Set(['String', 'Int', 'Long', 'Boolean', 'Float', 'Double', 'Byte', 'Short', 'Char']);
 

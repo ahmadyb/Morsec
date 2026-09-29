@@ -1,15 +1,19 @@
 package app.morsecode.navigation
 
+import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.navigation.NavHostController
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.navArgument
 import app.morsecode.ui.connect.ConnectScreen
 import app.morsecode.ui.crashes.CrashesScreen
 import app.morsecode.ui.doctor.DoctorScreen
 import app.morsecode.ui.files.FilesScreen
+import app.morsecode.ui.folder.FolderScreen
 import app.morsecode.ui.history.HistoryScreen
 import app.morsecode.ui.help.HelpScreen
 import app.morsecode.ui.logs.LogsScreen
@@ -47,7 +51,25 @@ public fun MorseApp(
         }
 
         composable(Routes.FILES) {
-            FilesScreen(onNavigate = navController::navigateTopLevel)
+            FilesScreen(
+                onNavigate = navController::navigateTopLevel,
+                onOpenFolder = { treeUri -> navController.openFolder(treeUri) },
+            )
+        }
+
+        // The internal folder browser: one SAF level per back-stack entry, so the
+        // system back gesture is the way up and each level keeps its own state.
+        composable(
+            route = Routes.FOLDER,
+            arguments = listOf(
+                navArgument(Routes.FOLDER_ARG) { type = NavType.StringType },
+            ),
+        ) {
+            FolderScreen(
+                onBack = navController::back,
+                onNavigate = navController::navigateTopLevel,
+                onOpenFolder = { treeUri -> navController.openFolder(treeUri) },
+            )
         }
 
         composable(Routes.HISTORY) {
@@ -95,6 +117,25 @@ private fun NavHostController.navigateTopLevel(destination: MorseDestination) {
         popUpTo(graph.findStartDestination().id) { saveState = true }
         launchSingleTop = true
         restoreState = true
+    }
+}
+
+/**
+ * Opens one folder level.
+ *
+ * A breadcrumb tap finds the level already on the back stack and pops to it,
+ * which restores that level's scroll position and selection instead of stacking a
+ * second copy of it; descending pushes a new entry.
+ */
+private fun NavHostController.openFolder(treeUri: String) {
+    val existing = currentBackStack.value.firstOrNull { entry ->
+        entry.destination.route == Routes.FOLDER &&
+            Routes.decodeFolderArg(entry.arguments?.getString(Routes.FOLDER_ARG)) == treeUri
+    }
+    if (existing != null) {
+        popBackStack(existing.destination.id, inclusive = false)
+    } else {
+        navigate(Routes.folder(Uri.encode(treeUri))) { launchSingleTop = true }
     }
 }
 
