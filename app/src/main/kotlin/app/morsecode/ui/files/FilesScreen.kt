@@ -53,6 +53,7 @@ import app.morsecode.core.design.component.MorseButtonVariant
 import app.morsecode.core.design.component.MorseCheckbox
 import app.morsecode.core.design.component.MorseEmptyState
 import app.morsecode.core.design.component.MorseIconButton
+import app.morsecode.core.design.component.MorseChip
 import app.morsecode.core.design.component.MorseListRow
 import app.morsecode.core.design.component.MorseModalSheet
 import app.morsecode.core.design.component.MorseRadioButton

@@ -287,7 +287,222 @@ for (const entry of parsed) {
 check('Kotlin imports', 'top-level extension functions are imported where used', missingImports.length === 0,
   missingImports.length ? missingImports.slice(0, 8).join('; ') : `${uniqueExtensions.size} unique top-level extensions traced`);
 
-/* ------------------------------------- 1d. internal types in public signatures */
+/* ------------------------------------------------- 1d. annotation imports */
+
+/**
+ * Annotations that must be imported. A missing `import javax.inject.Singleton`
+ * is not a compile error for Kotlin — it is a KSP/Dagger processing failure
+ * ("'Singleton' could not be resolved"), which is much harder to diagnose.
+ * `kotlin.*` annotations are default-imported and therefore not listed.
+ */
+const ANNOTATION_IMPORTS = {
+  Singleton: 'javax.inject.Singleton',
+  Inject: 'javax.inject.Inject',
+  Provides: 'dagger.Provides',
+  Binds: 'dagger.Binds',
+  Module: 'dagger.Module',
+  InstallIn: 'dagger.hilt.InstallIn',
+  ApplicationContext: 'dagger.hilt.android.qualifiers.ApplicationContext',
+  HiltViewModel: 'dagger.hilt.android.lifecycle.HiltViewModel',
+  AndroidEntryPoint: 'dagger.hilt.android.AndroidEntryPoint',
+  HiltAndroidTest: 'dagger.hilt.android.testing.HiltAndroidTest',
+  HiltWorker: 'androidx.hilt.work.HiltWorker',
+  Composable: 'androidx.compose.runtime.Composable',
+  Immutable: 'androidx.compose.runtime.Immutable',
+  Stable: 'androidx.compose.runtime.Stable',
+  Qualifier: 'javax.inject.Qualifier',
+  Entity: 'androidx.room.Entity',
+  Dao: 'androidx.room.Dao',
+  Database: 'androidx.room.Database',
+  PrimaryKey: 'androidx.room.PrimaryKey',
+  ColumnInfo: 'androidx.room.ColumnInfo',
+  Query: 'androidx.room.Query',
+  Insert: 'androidx.room.Insert',
+  Update: 'androidx.room.Update',
+  Delete: 'androidx.room.Delete',
+  Upsert: 'androidx.room.Upsert',
+  Transaction: 'androidx.room.Transaction',
+  TypeConverters: 'androidx.room.TypeConverters',
+  StringRes: 'androidx.annotation.StringRes',
+  DrawableRes: 'androidx.annotation.DrawableRes',
+  ColorInt: 'androidx.annotation.ColorInt',
+  WorkerInject: 'androidx.work.WorkerParameters',
+  Serializable: 'kotlinx.serialization.Serializable',
+  SerialName: 'kotlinx.serialization.SerialName',
+  VisibleForTesting: 'androidx.annotation.VisibleForTesting',
+  RequiresApi: 'androidx.annotation.RequiresApi',
+  SuppressLint: 'android.annotation.SuppressLint',
+  Keep: 'androidx.annotation.Keep',
+  ExperimentalCoroutinesApi: 'kotlinx.coroutines.ExperimentalCoroutinesApi',
+  FlowPreview: 'kotlinx.coroutines.FlowPreview',
+};
+
+/** Removes comments and string literals so documentation prose is not scanned. */
+function stripComments(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'''[\s\S]*?'''/g, '""');
+}
+
+const missingAnnotationImports = [];
+for (const f of kotlinFiles) {
+  const raw = read(f);
+  const text = stripComments(raw);
+  const imports = new Set([...raw.matchAll(/^import\s+([\w.]+)/gm)].map((m) => m[1]));
+  for (const m of text.matchAll(/@(\w+)/g)) {
+    const required = ANNOTATION_IMPORTS[m[1]];
+    if (!required) continue;
+    const pkg = required.slice(0, required.lastIndexOf('.'));
+    if (imports.has(required) || imports.has(`${pkg}.*`)) continue;
+    if ([...imports].some((i) => i.endsWith(`.${m[1]}`))) continue;
+    missingAnnotationImports.push(`${short(f)}:${raw.slice(0, raw.indexOf(m[0]) < 0 ? 0 : raw.indexOf(m[0])).split('\n').length} @${m[1]} needs ${required}`);
+  }
+}
+check('Kotlin imports', 'every framework annotation is imported', missingAnnotationImports.length === 0,
+  missingAnnotationImports.length
+    ? [...new Set(missingAnnotationImports)].slice(0, 10).join('; ')
+    : `${kotlinFiles.length} files scanned against ${Object.keys(ANNOTATION_IMPORTS).length} known annotations`);
+
+/* ------------------------------- 1e. cross-package names and named arguments */
+
+/**
+ * Two more things the compiler would catch that a symbol scan will not:
+ *
+ *  A. a name declared in one package and used from another without an import
+ *     ("unresolved reference"), and
+ *  B. a named argument the callee does not declare ("cannot find a parameter").
+ *
+ * Both matter because this repository is written without a local toolchain.
+ */
+
+/** Blanks comments, string literals and backtick identifiers, keeping newlines. */
+function blanked(text) {
+  const blank = (match) => match.replace(/[^\n]/g, ' ');
+  const triple = '"""';
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, blank)
+    .replace(new RegExp(triple + '[\\s\\S]*?' + triple, 'g'), blank)
+    .replace(/"(?:[^"\\]|\\.)*"/g, blank)
+    .replace(/`[^`\n]*`/g, blank)
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m, prefix) => prefix + ' '.repeat(m.length - prefix.length));
+}
+
+function balancedFrom(text, openIndex) {
+  let depth = 0;
+  for (let i = openIndex; i < text.length; i++) {
+    const c = text[i];
+    // Angle brackets are not tracked: '->' and generics make them unreliable.
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) return text.slice(openIndex + 1, i);
+    }
+  }
+  return null;
+}
+
+function splitTopLevel(argText) {
+  const parts = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of argText) {
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) parts.push(current);
+  return parts;
+}
+
+function parameterNames(argText) {
+  const names = new Set();
+  for (const part of splitTopLevel(argText || '')) {
+    const m = /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|internal|private|protected|override|val|var|vararg|crossinline|noinline|out|in)\s+)*(\w+)\s*:/.exec(part);
+    if (m) names.add(m[1]);
+  }
+  return names;
+}
+
+const typePackages = new Map();     // name -> Set<package>
+const declaredPackages = new Map(); // name -> Set<package> (types, functions, properties)
+const callableParams = new Map();   // name -> Set<parameter names>
+const parsedFiles = kotlinFiles.map((f) => {
+  const raw = read(f);
+  const code = blanked(raw);
+  const pkg = (/^package\s+([\w.]+)/m.exec(raw) || [null, ''])[1];
+  const imports = new Set([...raw.matchAll(/^import\s+([\w.]+(?:\.\*)?)/gm)].map((m) => m[1]));
+  const local = new Set([...code.matchAll(/\b(?:class|interface|object|fun|val|var)\s+(\w+)/g)].map((m) => m[1]));
+  const record = (name, target) => {
+    const set = target.get(name) ?? new Set();
+    set.add(pkg);
+    target.set(name, set);
+  };
+
+  const typePattern = /^(?:@\w+(?:\([^)]*\))?\s*)*(?:public |internal |private )*(?:abstract |open |sealed |data |value |enum |annotation )*(?:class|interface|object)\s+(\w+)/gm;
+  for (const m of code.matchAll(typePattern)) {
+    record(m[1], typePackages);
+    record(m[1], declaredPackages);
+    const from = m.index + m[0].length - 1;
+    const open = code.indexOf('(', from);
+    const brace = code.indexOf('{', from);
+    if (open !== -1 && (brace === -1 || open < brace)) {
+      const params = callableParams.get(m[1]) ?? new Set();
+      for (const name of parameterNames(balancedFrom(code, open))) params.add(name);
+      callableParams.set(m[1], params);
+    }
+  }
+  const functionPattern = /^(?:public |internal |private )*(?:inline |suspend |operator |infix )*fun\s+(?:<[^>]*>\s*)?(?:[\w.<>]+\.)?(\w+)\s*\(/gm;
+  for (const m of code.matchAll(functionPattern)) {
+    record(m[1], declaredPackages);
+    const params = callableParams.get(m[1]) ?? new Set();
+    for (const name of parameterNames(balancedFrom(code, m.index + m[0].length - 1))) params.add(name);
+    callableParams.set(m[1], params);
+  }
+  for (const m of code.matchAll(/^(?:public |internal |private )*(?:val|var)\s+(\w+)/gm)) {
+    record(m[1], declaredPackages);
+  }
+  return { rel: short(f), raw, code, pkg, imports, local };
+});
+
+const unimported = [];
+const badArguments = [];
+for (const entry of parsedFiles) {
+  for (const [name, packages] of declaredPackages) {
+    if (packages.size !== 1) continue;
+    const pkg = [...packages][0];
+    if (!pkg || pkg === entry.pkg || entry.local.has(name)) continue;
+    if ([...entry.imports].some((i) => i === `${pkg}.${name}` || i === `${pkg}.*` || i.endsWith(`.${name}`))) continue;
+    const use = new RegExp(`(?<![.\\w])${name}\\b`).exec(entry.code);
+    if (use) {
+      unimported.push(`${entry.rel}:${entry.code.slice(0, use.index).split('\n').length} uses ${name} (declared in ${pkg}) without importing it`);
+    }
+  }
+  for (const m of entry.code.matchAll(/(?<![.\w])(\w+)\s*\(/g)) {
+    const params = callableParams.get(m[1]);
+    if (!params || params.size === 0) continue;
+    const args = balancedFrom(entry.code, m.index + m[0].length - 1);
+    if (args === null) continue;
+    for (const part of splitTopLevel(args)) {
+      const named = /^\s*(\w+)\s*=(?!=)/.exec(part);
+      if (!named || params.has(named[1])) continue;
+      badArguments.push(`${entry.rel}:${entry.code.slice(0, m.index).split('\n').length} ${m[1]}(${named[1]} = …) — callee declares ${[...params].sort().join(', ')}`);
+    }
+  }
+}
+
+check('Kotlin imports', 'repo names used across packages are imported', unimported.length === 0,
+  unimported.length ? [...new Set(unimported)].slice(0, 10).join('; ') : `${declaredPackages.size} top-level declarations traced`);
+check('Call sites', 'named arguments match the callee declaration', badArguments.length === 0,
+  badArguments.length ? [...new Set(badArguments)].slice(0, 10).join('; ') : `${callableParams.size} callables checked`);
+
+/* ------------------------------------- 1f. internal types in public signatures */
 
 /**
  * `internal` visibility is per Gradle module, and the compiler rejects a public
@@ -332,6 +547,61 @@ for (const f of kotlinFiles) {
 }
 check('Kotlin visibility', 'no public member exposes an internal type', exposures.length === 0,
   exposures.length ? exposures.slice(0, 10).join('; ') : `${[...internalByModule.values()].reduce((n, s) => n + s.size, 0)} internal types kept out of public signatures`);
+
+/* ------------------------------------------------------ 1g. dependency graph */
+
+/**
+ * Every constructor dependency must be satisfiable: a concrete class with an
+ * @Inject constructor, an @Binds/@Provides target in a Hilt module, or one of
+ * the platform types Hilt supplies. A gap is not a Kotlin compile error — it is
+ * a KSP/Dagger failure ("cannot be provided without an @Provides-annotated
+ * method"), which costs a whole build to discover.
+ */
+const HILT_SUPPLIED = new Set([
+  'Context', 'Application', 'Resources', 'AssetManager', 'ContentResolver',
+  'PackageManager', 'SharedPreferences',
+]);
+const PRIMITIVES = new Set(['String', 'Int', 'Long', 'Boolean', 'Float', 'Double', 'Byte', 'Short', 'Char']);
+
+const provided = new Set();
+const bound = new Set();
+const injectable = new Set();
+const constructorDeps = [];
+
+for (const entry of parsedFiles) {
+  const code = entry.code;
+  for (const m of code.matchAll(/@Provides[\s\S]{0,300}?fun\s+(?:[\w.<>]+\.)?(\w+)\s*\([^)]*\)\s*:\s*([\w.<>]+)/g)) {
+    provided.add(m[2].split('<')[0].split('.').pop());
+  }
+  for (const m of code.matchAll(/@Binds[\s\S]{0,300}?fun\s+(\w+)\s*\([^)]*\)\s*:\s*([\w.<>]+)/g)) {
+    bound.add(m[2].split('<')[0].split('.').pop());
+  }
+  for (const m of code.matchAll(/(?:class|object)\s+(\w+)[^\n{]*@Inject\s+constructor/g)) {
+    injectable.add(m[1]);
+  }
+  for (const m of code.matchAll(/@Inject\s+constructor\s*\(/g)) {
+    const args = balancedFrom(code, m.index + m[0].length - 1);
+    if (args === null) continue;
+    const ownerLine = code.slice(0, m.index).trimEnd().split('\n').pop() || '';
+    const owner = /(?:class|object)\s+(\w+)/.exec(ownerLine);
+    const types = [...args.matchAll(/:\s*([\w.<>]+)/g)].map((x) => x[1].split('<')[0].split('.').pop());
+    constructorDeps.push({ rel: entry.rel, owner: owner ? owner[1] : '?', types });
+  }
+}
+
+const unsatisfied = [];
+for (const dep of constructorDeps) {
+  for (const type of dep.types) {
+    if (HILT_SUPPLIED.has(type) || PRIMITIVES.has(type)) continue;
+    if (provided.has(type) || bound.has(type) || injectable.has(type)) continue;
+    if (/(Dispatcher|Scope|Dispatcher\w*)$/.test(type) && provided.has('CoroutineDispatcher')) continue;
+    unsatisfied.push(`${dep.rel}: ${dep.owner} needs ${type}`);
+  }
+}
+check('Dependency graph', 'every @Inject constructor dependency is satisfiable', unsatisfied.length === 0,
+  unsatisfied.length
+    ? unsatisfied.slice(0, 10).join('; ')
+    : `${constructorDeps.length} injected constructors, ${provided.size} @Provides, ${bound.size} @Binds, ${injectable.size} injectable types`);
 
 /* ------------------------------------------------------- 2. resource refs */
 

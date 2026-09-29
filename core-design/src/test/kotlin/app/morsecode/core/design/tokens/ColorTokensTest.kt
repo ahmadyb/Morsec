@@ -11,6 +11,13 @@ import org.junit.Test
  * to the mockup. tools/verify independently re-derives the same values from the
  * reference document's CSS, so a drift fails in two places.
  */
+/**
+ * Compose packs an sRGB colour derived from a hex literal into 8 bits per
+ * channel, so a 0.42 wash reads back as 107/255 = 0.4196078. One quantisation
+ * step is the honest tolerance for an alpha assertion.
+ */
+private const val ALPHA_STEP = 1f / 255f
+
 class ColorTokensTest {
 
     private val dark = morseColorTokens(darkTheme = true, accent = Accent.SUNFLOWER)
@@ -66,14 +73,14 @@ class ColorTokensTest {
 
     @Test
     fun `alpha washes keep the source colour and only change alpha`() {
-        assertEquals(0.42f, dark.outline.alpha, 0.0001f)
+        assertEquals(0.42f, dark.outline.alpha, ALPHA_STEP)
         assertEquals(dark.textSecondary.red, dark.outline.red, 0.0001f)
-        assertEquals(0.18f, dark.chipAccentBackground.alpha, 0.0001f)
+        assertEquals(0.18f, dark.chipAccentBackground.alpha, ALPHA_STEP)
         assertEquals(dark.accent.red, dark.chipAccentBackground.red, 0.0001f)
-        assertEquals(0.08f, dark.fileTabSelected.alpha, 0.0001f)
-        assertEquals(0.62f, dark.scrim.alpha, 0.0001f)
+        assertEquals(0.08f, dark.fileTabSelected.alpha, ALPHA_STEP)
+        assertEquals(0.62f, dark.scrim.alpha, ALPHA_STEP)
         // The light theme scrim uses the reference's rgba(20,19,16,.38).
-        assertEquals(0.38f, light.scrim.alpha, 0.0001f)
+        assertEquals(0.38f, light.scrim.alpha, ALPHA_STEP)
         assertEquals(Color(0xFF141310).red, light.scrim.red, 0.0001f)
     }
 
@@ -125,7 +132,7 @@ class ColorTokensTest {
     @Test
     fun `file kind washes use twenty two percent of the kind colour`() {
         val wash = dark.kindWash(app.morsecode.core.model.MediaKind.IMAGE)
-        assertEquals(0.22f, wash.alpha, 0.0001f)
+        assertEquals(0.22f, wash.alpha, ALPHA_STEP)
         assertEquals(Color(0xFFF59E0B).red, wash.red, 0.0001f)
         assertEquals(Color(0xFFF59E0B), dark.kindColour(app.morsecode.core.model.MediaKind.IMAGE))
         assertEquals(dark.raised, dark.kindWash(app.morsecode.core.model.MediaKind.FOLDER))

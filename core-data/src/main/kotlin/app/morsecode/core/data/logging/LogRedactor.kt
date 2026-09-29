@@ -12,9 +12,20 @@ public object LogRedactor {
 
     private const val MARKER = "[redacted]"
 
-    /** `Authorization: Bearer abc…`, `?token=abc…`, `sessionId=abc…`. */
+    /**
+     * `Authorization: …` — the value is redacted whole, because a header value is
+     * `Bearer <token>` and stopping at the first space would keep the secret.
+     */
+    private val authorizationHeaders = Regex(
+        """(?i)\b(authorization)\b(\s*[=:]\s*)([^\n,;]+)""",
+    )
+
+    /** A bare `Bearer <token>` with no header name in front of it. */
+    private val bearerTokens = Regex("""(?i)\b(bearer)\s+([A-Za-z0-9_\-.+/=]{6,})""")
+
+    /** `?token=abc…`, `sessionId=abc…`, `password=abc…`. */
     private val secretAssignments = Regex(
-        """(?i)\b(bearer|token|secret|password|passwd|pin|apikey|api_key|authorization|""" +
+        """(?i)\b(token|secret|password|passwd|pin|apikey|api_key|""" +
             """session[_-]?token|session[_-]?id|upload[_-]?id)\b(\s*[=:]\s*)([^\s,&;""']+)(["']?)""",
     )
 
@@ -56,6 +67,8 @@ public object LogRedactor {
             digests += match.value
             "\u0000DIGEST${digests.size - 1}\u0000"
         }
+        working = authorizationHeaders.replace(working) { m -> "${m.groupValues[1]}${m.groupValues[2]}$MARKER" }
+        working = bearerTokens.replace(working) { m -> "${m.groupValues[1]} $MARKER" }
         working = secretAssignments.replace(working) { m -> "${m.groupValues[1]}${m.groupValues[2]}$MARKER${m.groupValues[4]}" }
         working = querySecrets.replace(working) { m -> "${m.groupValues[1]}${m.groupValues[2]}=$MARKER" }
         working = identifiers.replace(working) { m -> "${m.groupValues[1]}${m.groupValues[2]}$MARKER" }
