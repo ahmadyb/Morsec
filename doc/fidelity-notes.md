@@ -227,7 +227,11 @@ four 44 px circles on `#1A1A1A` with `#DDD` glyphs and a fifth, Send, on `var(--
   over a page count far larger than the set (`ENDLESS_PAGES`), started in the middle and aligned so
   that `page % count` is the photograph being shown. Different mechanism, same behaviour, and the
   reason for it is that a pager is what already handles the drag, the fling and the settle — the
-  reference rebuilds its triplet on every commit, which a real deck cannot do without a seam.
+  reference rebuilds its triplet on every commit, which a real deck cannot do without a seam. The
+  deck is also kept *inside* the aligned part of that range: the list arrives after the first
+  composition, when the pager is still at page 0, and a deck left below its aligned window has no
+  previous page to wrap to. Re-aligning there is a jump without animation, because the photograph on
+  screen does not change and there is nothing for the user to see move.
 * **Wrapping is also what keeps the drag off the system back gesture.** A horizontal drag in the
   middle of the screen never means the same thing as the edge swipe Android owns, and because both
   ends wrap there is no page at which a drag would have to be refused.
@@ -254,7 +258,9 @@ four 44 px circles on `#1A1A1A` with `#DDD` glyphs and a fifth, Send, on `var(--
   `RecoverableSecurityException` on API 29, `MediaStore.createDeleteRequest` from API 30), launching
   the consent intent when the platform asks and reporting `RESULT_OK` as deleted and anything else
   as cancelled — never a toast claiming a deletion the platform only offered to ask about. Info
-  shows what was reported and says *Unknown* for what was not, instead of showing `0 × 0`.
+  shows what was reported and says *Unknown* for what was not, instead of showing `0 × 0` — a kind
+  the app inferred from the file name is not a type the platform reported, so the Type row says
+  *Unknown* too rather than passing `image` off as a MIME type.
 * **Share goes to the system chooser,** as it already does from the Files selection bar. The
   reference opens an in-app sheet (`sharesheet('viewer')` → `IMG_2043.jpg` / `4.1 MB · image/jpeg`),
   which is the simulator standing in for the chooser; the app does not keep a second, private list
@@ -276,5 +282,7 @@ four 44 px circles on `#1A1A1A` with `#DDD` glyphs and a fifth, Send, on `var(--
   written to saved state as the deck settles, so a restored viewer comes back to it, and a restored
   position past the end of a list that has since changed is not honoured.
 * **A photograph that is gone is said to be gone.** If the opened id is no longer on the device the
-  viewer shows `MorseEmptyState` rather than a black screen with a header, because black is what the
-  viewer looks like while it is working.
+  viewer shows `MorseEmptyState` rather than a black screen, because black is what the viewer looks
+  like while it is working. The header stays — a viewer with nothing in it still has to be possible
+  to leave — and the action row does not, because there is nothing left to act on. For the same
+  reason the header draws no empty name and no empty metadata line.
