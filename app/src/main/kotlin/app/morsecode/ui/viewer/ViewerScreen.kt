@@ -63,6 +63,7 @@ import app.morsecode.ui.common.MediaDelete
 import app.morsecode.ui.common.MediaFullImage
 import app.morsecode.ui.common.ShareFiles
 import app.morsecode.ui.common.rememberFeatureGate
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /** `.swipe .pic` and the deck's own backdrop: the reference is literal black here. */
@@ -121,6 +122,12 @@ public fun ViewerScreen(
     val deleteFailed = stringResource(R.string.viewer_delete_failed)
     val deleteCancelled = stringResource(R.string.viewer_delete_cancelled)
 
+    // Side effects that end in a toast or an activity launch name their dispatcher.
+    // The composition's own dispatcher is the main thread on a device, but it is not
+    // guaranteed to be it in every environment, and a toast from a thread with no
+    // looper is a crash rather than a warning.
+    val main = Dispatchers.Main.immediate
+
     val gate = rememberFeatureGate()
     val items = state.items
     val count = items.size
@@ -142,7 +149,7 @@ public fun ViewerScreen(
 
             // On API 29 the answer is a permission, not a deletion: the row is still
             // there, so it is deleted now and only then reported as gone.
-            pending.deleteAfterGrant -> scope.launch {
+            pending.deleteAfterGrant -> scope.launch(main) {
                 val deleted = MediaDelete.completeAfterConsent(context, pending.uri)
                 val text = if (deleted == DeleteOutcome.Deleted) deletedText else deleteFailed
                 Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
@@ -157,19 +164,29 @@ public fun ViewerScreen(
         pageCount = { if (count > 1) ENDLESS_PAGES else count },
     )
 
-    // The list arrives after the first composition, so the deck is moved to the
-    // photograph that was tapped. Reduced motion jumps instead of animating.
+    // The list arrives after the first composition, so the deck has to be moved to
+    // the photograph that was tapped — and kept inside the aligned part of its
+    // endless range, because below it there is no previous page to wrap to.
     LaunchedEffect(count, state.index) {
         if (count == 0) return@LaunchedEffect
-        // Only move the deck when it is not already showing this photograph. After a
-        // swipe the settled page and the state agree, and re-aligning then would
-        // drag the deck back through a million pages of its endless range.
-        if (pagerState.currentPage % count == state.index) return@LaunchedEffect
+        val shown = pagerState.currentPage
         val target = if (count > 1) alignedPage(count, state.index) else state.index
-        if (motion.reduced) {
-            pagerState.scrollToPage(target)
-        } else {
-            pagerState.animateScrollToPage(target)
+        when {
+            // On this photograph, inside the aligned window: a swipe put it here, and
+            // moving the deck now would drag it back through the endless range.
+            shown % count == state.index && shown >= target -> Unit
+
+            // On this photograph but outside the window — the deck started at page 0
+            // before the list arrived, or it wrapped past the window. Re-align without
+            // animating: the photograph on screen does not change, so there is nothing
+            // for the user to see move.
+            shown % count == state.index -> pagerState.scrollToPage(target)
+
+            // A different photograph: the deck moves because the state did, which is
+            // worth animating unless the user has asked for reduced motion.
+            motion.reduced -> pagerState.scrollToPage(target)
+
+            else -> pagerState.animateScrollToPage(target)
         }
     }
 
@@ -182,33 +199,36 @@ public fun ViewerScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize().background(ViewerBlack)) {
-        when {
-            state.isEmpty -> MorseEmptyState(
-                title = stringResource(R.string.viewer_empty_title),
-                message = stringResource(R.string.viewer_empty_body),
-                iconRes = MorseIcons.image,
-                modifier = Modifier.fillMaxSize(),
+        Column(modifier = Modifier.fillMaxSize()) {
+            // The header belongs to the screen rather than to the deck's content: a
+            // viewer whose photograph has gone still has to be possible to leave, and
+            // the reference draws the header above `.swipe` whatever is inside it.
+            ViewerHeader(
+                name = current?.displayName.orEmpty(),
+                position = if (count > 0) {
+                    stringResource(R.string.viewer_position, state.index + 1, count)
+                } else {
+                    ""
+                },
+                metadata = current?.let(viewModel::metadataFor).orEmpty(),
+                backDescription = backDescription,
+                onBack = onBack,
             )
 
-            state.loading -> MorseLoading(
-                contentDescription = loadingText,
-                modifier = Modifier.fillMaxSize(),
-            )
-
-            else -> Column(modifier = Modifier.fillMaxSize()) {
-                ViewerHeader(
-                    name = current?.displayName.orEmpty(),
-                    position = if (count > 0) {
-                        stringResource(R.string.viewer_position, state.index + 1, count)
-                    } else {
-                        ""
-                    },
-                    metadata = current?.let(viewModel::metadataFor).orEmpty(),
-                    backDescription = backDescription,
-                    onBack = onBack,
+            when {
+                state.isEmpty -> MorseEmptyState(
+                    title = stringResource(R.string.viewer_empty_title),
+                    message = stringResource(R.string.viewer_empty_body),
+                    iconRes = MorseIcons.image,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                 )
 
-                Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                state.loading -> MorseLoading(
+                    contentDescription = loadingText,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                )
+
+                else -> Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                     HorizontalPager(
                         state = pagerState,
                         modifier = Modifier.fillMaxSize(),
@@ -283,6 +303,9 @@ public fun ViewerScreen(
                     }
                 }
 
+            }
+
+            if (current != null) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -295,7 +318,7 @@ public fun ViewerScreen(
                         description = shareDescription,
                         onClick = {
                             val item = current ?: return@ViewerAction
-                            scope.launch {
+                            scope.launch(main) {
                                 val uris = ShareFiles.prepare(context, listOf(item))
                                 if (uris.isEmpty()) {
                                     Toast.makeText(context, noShareTarget, Toast.LENGTH_SHORT).show()
@@ -373,7 +396,7 @@ public fun ViewerScreen(
                                     Toast.makeText(context, deleteFailed, Toast.LENGTH_SHORT).show()
                                     return@MorseButton
                                 }
-                                scope.launch {
+                                scope.launch(main) {
                                     when (val outcome = MediaDelete.request(context, uri)) {
                                         DeleteOutcome.Deleted ->
                                             Toast.makeText(context, deletedText, Toast.LENGTH_SHORT).show()
@@ -438,20 +461,27 @@ private fun ViewerHeader(
             )
         }
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = name,
-                style = MorseTextStyles.listTitle,
-                color = Color.White,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = listOf(position, metadata).filter { it.isNotEmpty() }.joinToString(" · "),
-                style = MorseTextStyles.meta,
-                color = ViewerMeta,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (name.isNotEmpty()) {
+                Text(
+                    text = name,
+                    style = MorseTextStyles.listTitle,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            // The reference's own separator, and only between values that exist: a
+            // header for a photograph that is gone is a back control and nothing else.
+            val meta = listOf(position, metadata).filter { it.isNotEmpty() }.joinToString(ViewerViewModel.META_SEPARATOR)
+            if (meta.isNotEmpty()) {
+                Text(
+                    text = meta,
+                    style = MorseTextStyles.meta,
+                    color = ViewerMeta,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -498,8 +528,10 @@ private fun ViewerInfoDialog(
     val colors = MorseTheme.colors
     val unknown = stringResource(R.string.viewer_info_unknown)
     val rows = listOf(
-        stringResource(R.string.viewer_info_type) to
-            (item.mimeType ?: item.kind.id).ifEmpty { unknown },
+        // A kind the app inferred from the file name is not a type the platform
+        // reported, so the row says Unknown rather than passing "image" off as a
+        // MIME type.
+        stringResource(R.string.viewer_info_type) to (item.mimeType?.ifEmpty { null } ?: unknown),
         stringResource(R.string.viewer_info_size) to
             if (item.sizeBytes > 0L) viewModel.formatBytes(item.sizeBytes) else unknown,
         stringResource(R.string.viewer_info_dimensions) to

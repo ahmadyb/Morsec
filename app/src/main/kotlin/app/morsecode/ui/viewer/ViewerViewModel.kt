@@ -133,7 +133,7 @@ public class ViewerViewModel @Inject constructor(
     public fun metadataFor(item: MediaItem): String = buildList {
         dimensionsFor(item)?.let { add(it) }
         if (item.sizeBytes > 0L) add(formatters.bytes(item.sizeBytes))
-    }.joinToString(SEPARATOR)
+    }.joinToString(META_SEPARATOR)
 
     /** The frame size, or null when the platform never reported one. */
     public fun dimensionsFor(item: MediaItem): String? =
@@ -147,7 +147,12 @@ public class ViewerViewModel @Inject constructor(
         /** Saved-state key for the photograph being shown. */
         public const val SAVED_INDEX: String = "app.morsecode.viewer.index"
 
+        /**
+         * The reference's metadata separator: `${n} of 15 · 4032 × 3024 · 2.4 MB`.
+         * The header joins the position with this line using the same character.
+         */
+        public const val META_SEPARATOR: String = " · "
+
         private const val STOP_TIMEOUT_MILLIS = 5_000L
-        private const val SEPARATOR = " · "
     }
 }
