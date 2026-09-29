@@ -121,6 +121,10 @@ android {
         unitTests.isReturnDefaultValues = true
         animationsDisabled = true
         unitTests.all {
+            // The lambda parameter is the unit-test task; in this DSL it is not the
+            // receiver, so it has to be named.
+            val task = it
+
             // Rendering a screen on the JVM needs an activity, and Robolectric
             // resolves one through the variant's merged manifest. The
             // ComponentActivity that createComposeRule launches is declared by
@@ -134,8 +138,8 @@ android {
             // The screen tests therefore render in debug, where every one of them
             // runs; release keeps the tests that need no window. This is a variant
             // of the platform's, not a narrowing of what is asserted.
-            if (name == "testReleaseUnitTest") {
-                exclude("**/ui/**")
+            if (task.name == "testReleaseUnitTest") {
+                task.exclude("**/ui/**")
             }
         }
     }
