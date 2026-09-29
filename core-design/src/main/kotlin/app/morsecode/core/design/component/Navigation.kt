@@ -11,13 +11,17 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -263,6 +267,64 @@ private fun RowScope.TransferActionButton(
 
 /** One Files destination category tab. */
 public data class CategoryTab(val id: String, val label: String)
+
+/**
+ * The mobile Files pattern from the reference: a pinned category strip above a
+ * horizontally swipeable pager (master prompt §4.3).
+ *
+ * The strip itself never scrolls — [CategoryTabRow] weights the tabs so all five
+ * fit the phone width, which is why there is no horizontal scrollbar — and it
+ * stays put while page content scrolls vertically underneath it.
+ *
+ * Tap and swipe drive one selection:
+ *  - a tap (or any host-driven change of [selectedId]) animates the pager;
+ *  - a swipe reports the **settled** page through [onSelect], so the host loads
+ *    the category the finger landed on and the highlight neither flickers while
+ *    the drag is in flight nor follows a category the user swipes past.
+ *
+ * Pages keep their own scroll position: the pager stores each page's
+ * `rememberSaveable` state, so returning to a category restores where the user
+ * was. [pageContent] receives the tab a page belongs to, which lets a host
+ * render a page that is not the selected one yet.
+ */
+@Composable
+public fun MorseCategoryPager(
+    tabs: List<CategoryTab>,
+    selectedId: String,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    pageContent: @Composable (CategoryTab) -> Unit,
+) {
+    val pageCount = tabs.size
+    val initialPage = tabs.indexOfFirst { it.id == selectedId }
+        .coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+    val pagerState = rememberPagerState(initialPage = initialPage) { pageCount }
+
+    // Strip -> pager.
+    LaunchedEffect(selectedId, pageCount) {
+        val page = tabs.indexOfFirst { it.id == selectedId }
+        if (page >= 0 && pagerState.settledPage != page) pagerState.animateScrollToPage(page)
+    }
+
+    // Pager -> strip, once the swipe has settled.
+    LaunchedEffect(pagerState.settledPage) {
+        val tab = tabs.getOrNull(pagerState.settledPage)
+        if (tab != null && tab.id != selectedId) onSelect(tab.id)
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        CategoryTabRow(tabs = tabs, selectedId = selectedId, onSelect = onSelect)
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            verticalAlignment = Alignment.Top,
+        ) { page ->
+            Box(modifier = Modifier.fillMaxSize()) {
+                tabs.getOrNull(page)?.let { tab -> pageContent(tab) }
+            }
+        }
+    }
+}
 
 /**
  * The `.files-tabs` category strip (v2.4):

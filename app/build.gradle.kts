@@ -192,6 +192,10 @@ dependencies {
     kspTest(libs.hilt.compiler)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.compose.ui.test.junit4)
+    // Robolectric Compose tests need the ComponentActivity this artifact declares,
+    // and unit tests run for the release variant too — where debugImplementation
+    // is not on the classpath.
+    testImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 
     androidTestImplementation(platform(libs.androidx.compose.bom))

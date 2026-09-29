@@ -45,16 +45,17 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.morsecode.R
 import app.morsecode.core.design.component.CategoryTab
-import app.morsecode.core.design.component.CategoryTabRow
 import app.morsecode.core.design.component.ChipStyle
 import app.morsecode.core.design.component.FileKindIcon
 import app.morsecode.core.design.component.MorseButton
 import app.morsecode.core.design.component.MorseButtonVariant
+import app.morsecode.core.design.component.MorseCategoryPager
 import app.morsecode.core.design.component.MorseCheckbox
 import app.morsecode.core.design.component.MorseEmptyState
 import app.morsecode.core.design.component.MorseIconButton
 import app.morsecode.core.design.component.MorseChip
 import app.morsecode.core.design.component.MorseListRow
+import app.morsecode.core.design.component.MorseLoading
 import app.morsecode.core.design.component.MorseModalSheet
 import app.morsecode.core.design.component.MorseRadioButton
 import app.morsecode.core.design.component.MorseScreenHeader
@@ -157,74 +158,28 @@ public fun FilesScreen(
             },
         )
 
-        CategoryTabRow(
+        MorseCategoryPager(
             tabs = FilesTab.ordered.map { tab -> CategoryTab(tab.id, stringResource(tabLabelRes(tab))) },
             selectedId = state.tab.id,
             onSelect = viewModel::selectTab,
-        )
-
-        val needsPermission = !state.access.canListMedia &&
-            (state.tab == FilesTab.PHOTOS || state.tab == FilesTab.VIDEOS || state.tab == FilesTab.MUSIC)
-        val needsFolder = state.tab == FilesTab.FILES && !state.access.canListDocuments
-
-        when {
-            needsPermission -> MorseEmptyState(
-                title = stringResource(R.string.files_permission_title),
-                message = stringResource(R.string.files_permission_body),
-                iconRes = MorseIcons.lock,
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                action = {
-                    MorseButton(
-                        text = stringResource(R.string.files_permission_grant),
-                        onClick = {
-                            permissionLauncher.launch(
-                                (PermissionMatrix.mediaRead() + PermissionMatrix.mediaWrite()).toTypedArray(),
-                            )
-                        },
-                        variant = MorseButtonVariant.WASH,
+            modifier = Modifier.weight(1f),
+        ) { page ->
+            // The pager knows categories by id; the screen knows them by enum.
+            FilesCategoryPage(
+                tab = FilesTab.fromId(page.id),
+                state = state,
+                viewModel = viewModel,
+                onRequestPermission = {
+                    permissionLauncher.launch(
+                        (PermissionMatrix.mediaRead() + PermissionMatrix.mediaWrite()).toTypedArray(),
                     )
                 },
-            )
-
-            state.itemCount == 0 -> MorseEmptyState(
-                title = stringResource(emptyTitleRes(state.tab)),
-                message = stringResource(emptyBodyRes(state.tab)),
-                iconRes = MorseIcons.folder,
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                action = if (needsFolder) {
-                    {
-                        MorseButton(
-                            text = stringResource(R.string.files_add_folder),
-                            onClick = { folderLauncher.launch(null) },
-                            variant = MorseButtonVariant.WASH,
-                        )
-                    }
-                } else {
-                    null
-                },
-            )
-
-            state.tab == FilesTab.PHOTOS || state.tab == FilesTab.VIDEOS -> MediaGrid(
-                state = state,
-                viewModel = viewModel,
-                modifier = Modifier.weight(1f),
+                onAddFolder = { folderLauncher.launch(null) },
                 onOpen = { item ->
                     if (!ShareFiles.open(context, item)) {
                         Toast.makeText(context, R.string.history_open_failed, Toast.LENGTH_SHORT).show()
                     }
                 },
-            )
-
-            else -> MediaList(
-                state = state,
-                viewModel = viewModel,
-                modifier = Modifier.weight(1f),
-                onOpen = { item ->
-                    if (!ShareFiles.open(context, item)) {
-                        Toast.makeText(context, R.string.history_open_failed, Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onRemoveFolder = viewModel::removeFolder,
             )
         }
 
@@ -300,8 +255,92 @@ public fun FilesScreen(
     }
 }
 
+/**
+ * One Files category page inside [MorseCategoryPager].
+ *
+ * The page renders from its own [TabContent], so what is on screen belongs to the
+ * category under the finger rather than to whichever one is selected, and a
+ * category that has never been read shows [MorseLoading] instead of claiming to
+ * be empty. Scroll position survives a category change: the pager keeps each
+ * page's `rememberSaveable` state, so the grid or list is created once per page.
+ */
+@Composable
+private fun FilesCategoryPage(
+    tab: FilesTab,
+    state: FilesUiState,
+    viewModel: FilesViewModel,
+    onRequestPermission: () -> Unit,
+    onAddFolder: () -> Unit,
+    onOpen: (MediaItem) -> Unit,
+) {
+    val content = state.contentFor(tab)
+    val needsPermission = !state.access.canListMedia &&
+        (tab == FilesTab.PHOTOS || tab == FilesTab.VIDEOS || tab == FilesTab.MUSIC)
+    val needsFolder = tab == FilesTab.FILES && !state.access.canListDocuments
+
+    when {
+        needsPermission -> MorseEmptyState(
+            title = stringResource(R.string.files_permission_title),
+            message = stringResource(R.string.files_permission_body),
+            iconRes = MorseIcons.lock,
+            modifier = Modifier.fillMaxSize(),
+            action = {
+                MorseButton(
+                    text = stringResource(R.string.files_permission_grant),
+                    onClick = onRequestPermission,
+                    variant = MorseButtonVariant.WASH,
+                )
+            },
+        )
+
+        // The category's real query has not returned yet.
+        content == null -> MorseLoading(
+            contentDescription = stringResource(R.string.files_category_loading),
+        )
+
+        content.itemCount == 0 -> MorseEmptyState(
+            title = stringResource(emptyTitleRes(tab)),
+            message = stringResource(emptyBodyRes(tab)),
+            iconRes = MorseIcons.folder,
+            modifier = Modifier.fillMaxSize(),
+            action = if (needsFolder) {
+                {
+                    MorseButton(
+                        text = stringResource(R.string.files_add_folder),
+                        onClick = onAddFolder,
+                        variant = MorseButtonVariant.WASH,
+                    )
+                }
+            } else {
+                null
+            },
+        )
+
+        tab == FilesTab.PHOTOS || tab == FilesTab.VIDEOS -> MediaGrid(
+            tab = tab,
+            content = content,
+            state = state,
+            viewModel = viewModel,
+            modifier = Modifier.fillMaxSize(),
+            onOpen = onOpen,
+        )
+
+        else -> MediaList(
+            tab = tab,
+            content = content,
+            state = state,
+            viewModel = viewModel,
+            modifier = Modifier.fillMaxSize(),
+            onOpen = onOpen,
+            onRemoveFolder = viewModel::removeFolder,
+        )
+    }
+}
+
 @Composable
 private fun MediaGrid(
+    tab: FilesTab,
+    content: TabContent,
     state: FilesUiState,
     viewModel: FilesViewModel,
     modifier: Modifier = Modifier,
@@ -310,7 +349,7 @@ private fun MediaGrid(
     val metrics = MorseTheme.metrics
     val colors = MorseTheme.colors
     val gridState = rememberLazyGridState()
-    val showVideoBadges = state.tab == FilesTab.VIDEOS
+    val showVideoBadges = tab == FilesTab.VIDEOS
 
     LazyVerticalGrid(
         columns = GridCells.Fixed(metrics.gridColumnsAtReferenceWidth),
@@ -325,7 +364,7 @@ private fun MediaGrid(
         horizontalArrangement = Arrangement.spacedBy(metrics.gridGapMedia),
         verticalArrangement = Arrangement.spacedBy(metrics.gridGapMedia),
     ) {
-        state.sections.forEach { section ->
+        content.sections.forEach { section ->
             item(span = { GridItemSpan(maxLineSpan) }, key = "header-${section.label}") {
                 SectionHeader(
                     text = if (section.label.isEmpty()) {
@@ -439,6 +478,8 @@ private fun Modifier.clickableTile(onClick: () -> Unit): Modifier = this.clickab
 
 @Composable
 private fun MediaList(
+    tab: FilesTab,
+    content: TabContent,
     state: FilesUiState,
     viewModel: FilesViewModel,
     modifier: Modifier = Modifier,
@@ -459,7 +500,7 @@ private fun MediaList(
         ),
         verticalArrangement = Arrangement.spacedBy(metrics.gridGapApps),
     ) {
-        state.sections.forEach { section ->
+        content.sections.forEach { section ->
             if (section.label.isNotEmpty()) {
                 item(key = "header-${section.label}") {
                     SectionHeader(
@@ -475,7 +516,7 @@ private fun MediaList(
                     item = item,
                     selected = item.id in state.selection,
                     selecting = selecting,
-                    subtitle = rowSubtitle(item, viewModel, state.tab),
+                    subtitle = rowSubtitle(item, viewModel, tab),
                     accent = colors.accent,
                     onClick = {
                         if (selecting) viewModel.toggleItem(item.id) else onOpen(item)

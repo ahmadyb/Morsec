@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
@@ -41,6 +42,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -391,6 +393,32 @@ public fun MorseMetaText(
         textAlign = align,
         modifier = modifier,
     )
+}
+
+/**
+ * A real load in progress: an accent spinner, centred, with an accessible label.
+ *
+ * Used where content is genuinely on its way — the Files pager shows it for a
+ * category whose query has not returned yet. It is never a stand-in for content
+ * that does not exist; that is what [MorseEmptyState] is for.
+ */
+@Composable
+public fun MorseLoading(
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .semantics { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(28.dp),
+            color = MorseTheme.colors.accent,
+            trackColor = MorseTheme.colors.line,
+        )
+    }
 }
 
 /** The `.emptyish` state used when a list has nothing real to show. */

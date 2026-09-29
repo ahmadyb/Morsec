@@ -17,7 +17,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.scan
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -43,10 +47,32 @@ public data class MediaSection(
     val items: List<MediaItem>,
 )
 
-public data class FilesUiState(
-    val tab: FilesTab = FilesTab.PHOTOS,
+/**
+ * One category's loaded content.
+ *
+ * The Files pager renders five pages but only one category is selected, so each
+ * page reads its own entry from [FilesUiState.contents] — a page being swiped
+ * towards shows that category, not the one the finger left. Entries are cached,
+ * so returning to a category is instant while its query refreshes.
+ */
+public data class TabContent(
     val sections: List<MediaSection> = emptyList(),
     val folders: List<MediaItem> = emptyList(),
+    val itemCount: Int = 0,
+)
+
+public data class FilesUiState(
+    val tab: FilesTab = FilesTab.PHOTOS,
+    /**
+     * The selected category's live values, empty while it loads. The Files pager
+     * reads [contents] instead, because it renders pages that are not selected.
+     */
+    val sections: List<MediaSection> = emptyList(),
+    val folders: List<MediaItem> = emptyList(),
+    /** Loaded content per category; absent for a category never read yet. */
+    val contents: Map<FilesTab, TabContent> = emptyMap(),
+    /** True while the selected category's query has not produced content yet. */
+    val loading: Boolean = false,
     val access: StorageAccess = StorageAccess(),
     val sortOrder: SortOrder = SortOrder(),
     val selection: Set<String> = emptySet(),
@@ -56,7 +82,14 @@ public data class FilesUiState(
     val itemCount: Int = 0,
     /** One-shot user feedback, cleared after the UI has shown it. */
     val message: FilesMessage? = null,
-)
+) {
+    /**
+     * Content for [target]: null until that category has really been read, which
+     * is what lets a pager page show a load in progress instead of claiming the
+     * category is empty.
+     */
+    public fun contentFor(target: FilesTab): TabContent? = contents[target]
+}
 
 /** Feedback the Files screen shows as a toast. */
 public sealed interface FilesMessage {
@@ -79,13 +112,29 @@ public class FilesViewModel @Inject constructor(
     private val sortSheet = MutableStateFlow(false)
     private val message = MutableStateFlow<FilesMessage?>(null)
 
-    private val items: Flow<List<MediaItem>> = tab.flatMapLatest { current ->
-        when (current) {
+    /**
+     * The selected category's items, with an explicit loading marker.
+     *
+     * Without it, `combine` would pair a freshly selected tab with the previous
+     * tab's items for as long as the new query takes, and the pager would render
+     * the wrong category's content.
+     */
+    private sealed interface CategoryItems {
+        data object Loading : CategoryItems
+        data class Loaded(val items: List<MediaItem>) : CategoryItems
+    }
+
+    private val items: Flow<CategoryItems> = tab.flatMapLatest { current ->
+        val source: Flow<List<MediaItem>> = when (current) {
             FilesTab.PHOTOS -> media.observeImages()
             FilesTab.VIDEOS -> media.observeVideos()
             FilesTab.MUSIC -> media.observeAudio()
             FilesTab.APPS -> media.observeApps()
             FilesTab.FILES -> media.observeDocuments()
+        }
+        flow {
+            emit(CategoryItems.Loading)
+            emitAll(source.map { CategoryItems.Loaded(it) })
         }
     }
 
@@ -100,13 +149,20 @@ public class FilesViewModel @Inject constructor(
     }.combine(combine(selection, selecting, sortSheet, message) { sel, isSelecting, sheet, msg ->
         SelectionState(sel, isSelecting, sheet, msg)
     }) { data, ui ->
-        val sorted = data.items.applySortOrder(data.order) { it }
-        val all = if (data.tab == FilesTab.FILES) data.folders.applySortOrder(data.order) { it } + sorted else sorted
+        val loaded = data.items as? CategoryItems.Loaded
+        val sorted = loaded?.items.orEmpty().applySortOrder(data.order) { it }
+        val folders = if (data.tab == FilesTab.FILES) {
+            data.folders.applySortOrder(data.order) { it }
+        } else {
+            emptyList()
+        }
+        val all = if (data.tab == FilesTab.FILES) folders + sorted else sorted
         val selectedItems = all.filter { it.id in ui.selection }
         FilesUiState(
             tab = data.tab,
             sections = groupByDay(all, data.tab),
-            folders = if (data.tab == FilesTab.FILES) data.folders.applySortOrder(data.order) { it } else emptyList(),
+            folders = folders,
+            loading = loaded == null,
             access = data.access,
             sortOrder = data.order,
             selection = ui.selection,
@@ -115,6 +171,17 @@ public class FilesViewModel @Inject constructor(
             selectedBytes = selectedItems.sumOf { it.sizeBytes },
             itemCount = all.size,
             message = ui.message,
+        )
+    }.scan(FilesUiState()) { previous, next ->
+        // Cache a category only once it has really loaded: while a query is in
+        // flight the pager keeps showing what it already had, so swiping back to
+        // a visited category is instant and never flickers through "empty".
+        next.copy(
+            contents = if (next.loading) {
+                previous.contents
+            } else {
+                previous.contents + (next.tab to TabContent(next.sections, next.folders, next.itemCount))
+            },
         )
     }.stateIn(
         scope = viewModelScope,
@@ -179,12 +246,17 @@ public class FilesViewModel @Inject constructor(
         sortOrder.value = sortOrder.value.copy(direction = direction)
     }
 
-    /** Items the user has selected, resolved from the current list. */
+    /**
+     * Items the user has selected, resolved from the selected category's content.
+     *
+     * Folders are already part of `sections` on the Files category, so they are
+     * not added again — doing so shared a selected folder twice.
+     */
     public suspend fun selectedItems(): List<MediaItem> {
         val ids = selection.value
         if (ids.isEmpty()) return emptyList()
-        val current = state.value.sections.flatMap { it.items } + state.value.folders
-        return current.filter { it.id in ids }
+        val content = state.value.contentFor(tab.value) ?: return emptyList()
+        return content.sections.flatMap { it.items }.filter { it.id in ids }
     }
 
     public fun addFolder(treeUri: String) {
@@ -222,7 +294,7 @@ public class FilesViewModel @Inject constructor(
         formatters.count(count.toLong()) + " · " + formatters.bytes(bytes)
 
     private data class Quintet(
-        val items: List<MediaItem>,
+        val items: CategoryItems,
         val folders: List<MediaItem>,
         val access: StorageAccess,
         val tab: FilesTab,
