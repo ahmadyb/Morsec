@@ -241,6 +241,52 @@ check('Compose API shapes', 'Modifier.padding never mixes edge and symmetric fam
 check('Compose API shapes', 'initialStartOffset is passed to infiniteRepeatable, not tween',
   misplacedOffsets.length === 0, misplacedOffsets.length ? misplacedOffsets.join(', ') : 'clean');
 
+/* ------------------------------------- 1c. internal types in public signatures */
+
+/**
+ * `internal` visibility is per Gradle module, and the compiler rejects a public
+ * declaration that exposes an internal type — an easy mistake in hand-written DI
+ * modules. Test source sets are friends of main, so they are excluded.
+ */
+const moduleOf = (path) => path.split('/')[1] ?? '.';
+const isTestSource = (path) => /\/(?:test|androidTest|testDebug|testRelease)\//.test(path);
+const INTERNAL_TYPE = /^internal\s+(?:@\w+(?:\([^)]*\))?\s+)*(?:abstract\s+|open\s+|sealed\s+|data\s+|value\s+|enum\s+|annotation\s+)*(?:class|interface|object)\s+(\w+)/gm;
+const PUBLIC_MEMBER = /^[ \t]*public\s+(?:abstract\s+|open\s+|suspend\s+|inline\s+)*(?:fun|val|var)\b/gm;
+
+const internalByModule = new Map();
+for (const f of kotlinFiles) {
+  if (isTestSource(short(f))) continue;
+  const mod = moduleOf(short(f));
+  const names = internalByModule.get(mod) ?? new Set();
+  for (const m of read(f).matchAll(INTERNAL_TYPE)) names.add(m[1]);
+  internalByModule.set(mod, names);
+}
+
+const exposures = [];
+for (const f of kotlinFiles) {
+  const rel = short(f);
+  if (isTestSource(rel)) continue;
+  const names = internalByModule.get(moduleOf(rel));
+  if (!names || names.size === 0) continue;
+  const text = read(f);
+  for (const m of text.matchAll(PUBLIC_MEMBER)) {
+    let end = m.index + m[0].length;
+    let depth = 0;
+    for (; end < text.length && end < m.index + 800; end++) {
+      const c = text[end];
+      if (c === '(' || c === '[' || c === '<') depth++;
+      else if (c === ')' || c === ']' || c === '>') depth--;
+      else if (depth === 0 && (c === '{' || c === '=')) break;
+      else if (depth === 0 && c === '\n' && text[end + 1] === '\n') break;
+    }
+    const signature = text.slice(m.index, end);
+    const hit = [...names].filter((n) => new RegExp(`\\b${n}\\b`).test(signature));
+    if (hit.length) exposures.push(`${rel}:${text.slice(0, m.index).split('\n').length} exposes ${hit.join(', ')}`);
+  }
+}
+check('Kotlin visibility', 'no public member exposes an internal type', exposures.length === 0,
+  exposures.length ? exposures.slice(0, 10).join('; ') : `${[...internalByModule.values()].reduce((n, s) => n + s.size, 0)} internal types kept out of public signatures`);
+
 /* ------------------------------------------------------- 2. resource refs */
 
 referenceCheck('Resources', /R\.string\.(\w+)/g, declaredStrings, 'R.string.* resolve to strings.xml entries');

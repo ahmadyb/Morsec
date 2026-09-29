@@ -21,37 +21,40 @@ import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
 /** Binds the Room/DataStore implementations to the ports the app depends on. */
+// internal: the implementations these bind are internal, and a public member
+// may not expose an internal type. Dagger generates its factories inside this
+// module, so the bindings stay visible to the Hilt graph.
 @Module
 @InstallIn(SingletonComponent::class)
-public abstract class RepositoryModule {
+internal abstract class RepositoryModule {
 
     @Binds
     @Singleton
-    public abstract fun bindSettingsRepository(impl: DataStoreSettingsRepository): SettingsRepository
+    internal abstract fun bindSettingsRepository(impl: DataStoreSettingsRepository): SettingsRepository
 
     @Binds
     @Singleton
-    public abstract fun bindTransferRepository(impl: RoomTransferRepository): TransferRepository
+    internal abstract fun bindTransferRepository(impl: RoomTransferRepository): TransferRepository
 
     @Binds
     @Singleton
-    public abstract fun bindHistoryRepository(impl: RoomHistoryRepository): HistoryRepository
+    internal abstract fun bindHistoryRepository(impl: RoomHistoryRepository): HistoryRepository
 
     @Binds
     @Singleton
-    public abstract fun bindDeviceRepository(impl: RoomDeviceRepository): DeviceRepository
+    internal abstract fun bindDeviceRepository(impl: RoomDeviceRepository): DeviceRepository
 
     @Binds
     @Singleton
-    public abstract fun bindDiagnosticsRepository(impl: RoomDiagnosticsRepository): DiagnosticsRepository
+    internal abstract fun bindDiagnosticsRepository(impl: RoomDiagnosticsRepository): DiagnosticsRepository
 
     @Binds
     @Singleton
-    public abstract fun bindWebShareRepository(impl: RoomWebShareRepository): WebShareRepository
+    internal abstract fun bindWebShareRepository(impl: RoomWebShareRepository): WebShareRepository
 
     @Binds
     @Singleton
-    public abstract fun bindLogger(impl: RoomMorseLogger): MorseLogger
+    internal abstract fun bindLogger(impl: RoomMorseLogger): MorseLogger
 
 }
 
