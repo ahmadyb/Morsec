@@ -21,6 +21,7 @@
     <string name="action_clear">Clear</string>
     <string name="action_search">Search</string>
     <string name="action_share">Share</string>
+    <string name="action_send">Send</string>
     <string name="action_retry">Retry</string>
     <string name="action_pause">Pause</string>
     <string name="action_resume">Resume</string>
@@ -116,11 +117,9 @@
     <string name="files_sort_type">Type</string>
     <string name="files_sort_ascending">Ascending</string>
     <string name="files_sort_descending">Descending</string>
-    <string name="files_send_selected">Send</string>
-    <string name="files_share_selected">Share</string>
     <string name="files_grant_failed">That folder could not be granted. Pick it again.</string>
     <string name="files_grant_added">Folder added: %1$s</string>
-    <string name="files_grant_removed">Folder removed</string>
+    <string name="files_remove_folder">Remove folder</string>
 
     <!-- History -->
     <string name="history_title">History</string>

@@ -10,7 +10,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
@@ -45,15 +44,12 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.morsecode.R
 import app.morsecode.core.design.component.CategoryTab
-import app.morsecode.core.design.component.ChipStyle
-import app.morsecode.core.design.component.FileKindIcon
 import app.morsecode.core.design.component.MorseButton
 import app.morsecode.core.design.component.MorseButtonVariant
 import app.morsecode.core.design.component.MorseCategoryPager
 import app.morsecode.core.design.component.MorseCheckbox
 import app.morsecode.core.design.component.MorseEmptyState
 import app.morsecode.core.design.component.MorseIconButton
-import app.morsecode.core.design.component.MorseChip
 import app.morsecode.core.design.component.MorseListRow
 import app.morsecode.core.design.component.MorseLoading
 import app.morsecode.core.design.component.MorseModalSheet
@@ -69,7 +65,10 @@ import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.SortDirection
 import app.morsecode.core.model.SortKey
 import app.morsecode.core.storage.permissions.PermissionMatrix
+import app.morsecode.core.storage.saf.SafPaths
 import app.morsecode.navigation.MorseDestination
+import app.morsecode.ui.common.MorseMediaRow
+import app.morsecode.ui.common.MorseSelectionBar
 import app.morsecode.ui.common.MorseTabScaffold
 import app.morsecode.ui.common.ShareFiles
 import app.morsecode.ui.common.rememberFeatureGate
@@ -95,6 +94,7 @@ private fun tabLabelRes(tab: FilesTab): Int = when (tab) {
 @Composable
 public fun FilesScreen(
     onNavigate: (MorseDestination) -> Unit,
+    onOpenFolder: (String) -> Unit,
     viewModel: FilesViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -169,6 +169,7 @@ public fun FilesScreen(
                 tab = FilesTab.fromId(page.id),
                 state = state,
                 viewModel = viewModel,
+                onOpenFolder = onOpenFolder,
                 onRequestPermission = {
                     permissionLauncher.launch(
                         (PermissionMatrix.mediaRead() + PermissionMatrix.mediaWrite()).toTypedArray(),
@@ -184,7 +185,7 @@ public fun FilesScreen(
         }
 
         if (state.selection.isNotEmpty()) {
-            SelectionBar(
+            MorseSelectionBar(
                 summary = stringResource(R.string.files_selected_count, state.selection.size) +
                     " · " + viewModel.formatBytes(state.selectedBytes),
                 onShare = {
@@ -199,9 +200,6 @@ public fun FilesScreen(
                 },
                 onSend = { gate.run(FeatureArea.TRANSFER_ENGINE) { } },
                 onClear = viewModel::clearSelection,
-                background = colors.card,
-                borderColor = colors.line,
-                padding = metrics.screenPaddingHorizontal,
             )
         }
 
@@ -269,6 +267,7 @@ private fun FilesCategoryPage(
     tab: FilesTab,
     state: FilesUiState,
     viewModel: FilesViewModel,
+    onOpenFolder: (String) -> Unit,
     onRequestPermission: () -> Unit,
     onAddFolder: () -> Unit,
     onOpen: (MediaItem) -> Unit,
@@ -332,6 +331,7 @@ private fun FilesCategoryPage(
             viewModel = viewModel,
             modifier = Modifier.fillMaxSize(),
             onOpen = onOpen,
+            onOpenFolder = onOpenFolder,
             onRemoveFolder = viewModel::removeFolder,
         )
     }
@@ -404,6 +404,10 @@ private fun MediaGrid(
         }
     }
 }
+
+/** True when a row is a folder the app was granted, and can therefore be browsed. */
+private fun isBrowsableFolder(item: MediaItem): Boolean =
+    item.isFolder && item.uriString?.let(SafPaths::isTreeUri) == true
 
 @Composable
 private fun MediaTile(
@@ -484,6 +488,7 @@ private fun MediaList(
     viewModel: FilesViewModel,
     modifier: Modifier = Modifier,
     onOpen: (MediaItem) -> Unit,
+    onOpenFolder: (String) -> Unit,
     onRemoveFolder: (Long) -> Unit,
 ) {
     val metrics = MorseTheme.metrics
@@ -512,14 +517,19 @@ private fun MediaList(
                 }
             }
             items(section.items, key = { it.id }) { item ->
-                MediaRow(
+                MorseMediaRow(
                     item = item,
                     selected = item.id in state.selection,
                     selecting = selecting,
                     subtitle = rowSubtitle(item, viewModel, tab),
-                    accent = colors.accent,
                     onClick = {
-                        if (selecting) viewModel.toggleItem(item.id) else onOpen(item)
+                        when {
+                            selecting -> viewModel.toggleItem(item.id)
+                            // A granted SAF folder is browsable; a MediaStore
+                            // bucket row is not, so it keeps opening as a file.
+                            isBrowsableFolder(item) -> item.uriString?.let(onOpenFolder)
+                            else -> onOpen(item)
+                        }
                     },
                     onToggleSelect = { viewModel.toggleItem(item.id) },
                     onRemove = if (item.isFolder && item.id.startsWith("saf:")) {
@@ -527,83 +537,11 @@ private fun MediaList(
                     } else {
                         null
                     },
+                    removeDescription = stringResource(R.string.files_remove_folder),
                 )
             }
         }
     }
-}
-
-@Composable
-private fun MediaRow(
-    item: MediaItem,
-    selected: Boolean,
-    selecting: Boolean,
-    subtitle: String,
-    accent: Color,
-    onClick: () -> Unit,
-    onToggleSelect: () -> Unit,
-    onRemove: (() -> Unit)?,
-) {
-    MorseListRow(
-        title = item.displayName,
-        meta = subtitle,
-        selected = selected,
-        onClick = onClick,
-        minHeight = 64.dp,
-        leading = {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (selecting) {
-                    MorseCheckbox(
-                        checked = selected,
-                        onCheckedChange = { onToggleSelect() },
-                        round = item.kind == app.morsecode.core.model.MediaKind.AUDIO,
-                        contentDescription = item.displayName,
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .background(
-                            color = if (item.kind == app.morsecode.core.model.MediaKind.AUDIO) accent
-                            else MorseTheme.colors.kindWash(item.kind),
-                            shape = RoundedCornerShape(MorseTheme.metrics.fileIconRadius),
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (item.kind == app.morsecode.core.model.MediaKind.AUDIO) {
-                        Icon(
-                            painter = painterResource(MorseIcons.music),
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    } else {
-                        FileKindIcon(kind = item.kind, size = 20.dp, transparentBackground = true)
-                    }
-                }
-            }
-        },
-        trailing = {
-            if (onRemove != null) {
-                MorseIconButton(
-                    iconRes = MorseIcons.trash,
-                    contentDescription = stringResource(R.string.files_grant_removed),
-                    onClick = onRemove,
-                    size = 40.dp,
-                    glyph = 18.dp,
-                )
-            } else if (item.splitCount > 1 && item.isFolder) {
-                MorseChip(text = stringResource(R.string.files_folder_children, item.splitCount))
-            } else {
-                MorseChip(
-                    text = item.displayName.substringAfterLast('.', "")
-                        .uppercase()
-                        .ifEmpty { item.kind.name },
-                    style = ChipStyle.NEUTRAL,
-                )
-            }
-        },
-    )
 }
 
 private fun rowSubtitle(item: MediaItem, viewModel: FilesViewModel, tab: FilesTab): String {
@@ -615,53 +553,6 @@ private fun rowSubtitle(item: MediaItem, viewModel: FilesViewModel, tab: FilesTa
         else -> listOfNotNull(item.bucket, duration, size)
     }
     return detail.joinToString(" · ")
-}
-
-@Composable
-private fun SelectionBar(
-    summary: String,
-    onShare: () -> Unit,
-    onSend: () -> Unit,
-    onClear: () -> Unit,
-    background: Color,
-    borderColor: Color,
-    padding: androidx.compose.ui.unit.Dp,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(background)
-            .border(BorderStroke(1.dp, borderColor))
-            .padding(horizontal = padding, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            text = summary,
-            style = MorseTextStyles.listTitle,
-            color = MorseTheme.colors.textPrimary,
-            modifier = Modifier.weight(1f),
-        )
-        MorseButton(
-            text = stringResource(R.string.files_share_selected),
-            onClick = onShare,
-            iconRes = MorseIcons.share,
-            variant = MorseButtonVariant.WASH,
-            small = true,
-        )
-        MorseButton(
-            text = stringResource(R.string.files_send_selected),
-            onClick = onSend,
-            iconRes = MorseIcons.send,
-            small = true,
-        )
-        MorseButton(
-            text = stringResource(R.string.action_clear),
-            onClick = onClear,
-            variant = MorseButtonVariant.GHOST,
-            small = true,
-        )
-    }
 }
 
 @StringRes
