@@ -142,3 +142,57 @@ milestones 6–7 and say so.
 
 Anything whose feature area is still gated routes to an honest dialog naming the milestone that
 delivers it. No control simulates work.
+
+## 7. Milestone 2 additions
+
+**Files category pager.** The reference drives `.files-tabs` and the swipeable content as one
+control (`data-tabswipe`, `.scr{touch-action:pan-y}`), so `MorseCategoryPager` keeps the strip
+pinned and puts a `HorizontalPager` under it. Two details are decisions rather than accidents:
+
+* A tap animates the pager; a swipe reports the **settled** page. Reporting every intermediate
+  page would make the highlight flicker mid-drag and would load categories the finger merely
+  travelled past.
+* Each page renders its own category's content from `FilesUiState.contents`, which is cached per
+  category. A page being swiped towards therefore shows that category, returning to a visited
+  category is instant, and a category whose query has not answered yet shows `MorseLoading`
+  rather than claiming to be empty.
+
+The strip itself is unchanged: equal weights, no scrolling and therefore no horizontal scrollbar,
+48 dp rather than the reference's ~34 dp for the touch floor (already recorded in §3's
+confirmation list), and the three-column grid still comes from
+`metrics.gridColumnsAtReferenceWidth`.
+
+**The internal folder browser.** The reference draws a path bar only for WebShare (`.crumb`,
+`.wsplit .crumb{position:sticky}`); the mobile app has no folder browser screen, and §4.3 states
+what one must satisfy if it shows a path bar. `MorseCrumb` takes the WebShare pill's visual
+language — `border-radius: var(--m3-r-full)`, `background: var(--raised)`, `padding: 11px 16px`,
+`gap: 6px`, a 13 px folder glyph, monospaced labels, `--t2` segments, `--t3` separators, accent on
+hover — and the differences are:
+
+* 48 dp tall instead of ~40 dp, and the vertical padding is that height, so a level meets the
+  touch floor (§11). The same call the category strip makes.
+* The label uses `monospacedAddress` (11 sp), the mobile nested address-bar size, rather than the
+  WebShare crumb's 12 px.
+* The current level is `--t1` and carries a state description; the reference colours every segment
+  `--t2` because on a desktop the cursor already shows which one you are on.
+* A path longer than the phone scrolls inside the pill and keeps its tail on screen, with no
+  scrollbar drawn. WebShare paths are short, so the reference never needs this.
+* Press feedback replaces `:hover`, as everywhere else in the app.
+
+Sticky behaviour follows the reference's structure rather than a scrolling app bar: the header and
+the crumb are siblings *above* the scrolling list, so the crumb is always below the header, is
+never behind it, and stays put while rows scroll.
+
+There is no upward-arrow control and no `..` row, per §4.3. The breadcrumb is the way up, and
+descending pushes a back-stack entry per level so the system back gesture walks the path out and
+each level keeps its own scroll position and selection.
+
+**Copying and editing a path.** §4.3 allows both "only where safe and meaningful". Copy puts the
+visible path (`Internal storage/Download/2026`) on the clipboard. Editing is offered because a deep
+tree is tedious to tap through, and it is safe because the typed text is resolved by `SafPaths`
+against the grant the user actually gave: a SAF uri, the copied display path, an absolute document
+id, the emulated-storage path, a volume-relative path and a grant-relative path are all tried, and
+only a result **inside the grant** is accepted. `..` and another scheme are refused outright rather
+than reinterpreted, and the resolved level is checked against the platform before the browser
+claims a folder exists — a level that cannot be read is reported as unavailable, which is also how
+an empty folder is told apart from a revoked grant.
