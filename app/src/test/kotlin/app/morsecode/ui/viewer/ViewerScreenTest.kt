@@ -318,7 +318,7 @@ class ViewerScreenTest {
         backPresses = 0
         owner = TestLifecycleOwner()
         savedStateHandle = SavedStateHandle(
-            buildMap {
+            buildMap<String, Any?> {
                 put(Routes.VIEWER_ARG, opened.id)
                 put(Routes.VIEWER_SORT_ARG, Routes.sortToken(SortOrder(SortKey.NAME, SortDirection.ASC)))
                 if (restoredIndex != null) put(ViewerViewModel.SAVED_INDEX, restoredIndex)

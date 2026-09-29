@@ -1,6 +1,7 @@
 package app.morsecode.ui.viewer
 
 import android.app.Activity
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -26,6 +27,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -123,12 +127,29 @@ public fun ViewerScreen(
     val current = state.current
 
     // Android asks the user before an app deletes media it did not contribute; this
-    // is that question coming back.
+    // is that question coming back, together with the photograph it was about.
+    var pendingDelete by remember { mutableStateOf<PendingDelete?>(null) }
     val consentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
-        val text = if (result.resultCode == Activity.RESULT_OK) deletedText else deleteCancelled
-        Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+        val pending = pendingDelete
+        pendingDelete = null
+        when {
+            pending == null -> Unit
+
+            result.resultCode != Activity.RESULT_OK ->
+                Toast.makeText(context, deleteCancelled, Toast.LENGTH_SHORT).show()
+
+            // On API 29 the answer is a permission, not a deletion: the row is still
+            // there, so it is deleted now and only then reported as gone.
+            pending.deleteAfterGrant -> scope.launch {
+                val deleted = MediaDelete.completeAfterConsent(context, pending.uri)
+                val text = if (deleted == DeleteOutcome.Deleted) deletedText else deleteFailed
+                Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+            }
+
+            else -> Toast.makeText(context, deletedText, Toast.LENGTH_SHORT).show()
+        }
     }
 
     val pagerState = rememberPagerState(
@@ -357,9 +378,12 @@ public fun ViewerScreen(
                                         DeleteOutcome.Deleted ->
                                             Toast.makeText(context, deletedText, Toast.LENGTH_SHORT).show()
 
-                                        is DeleteOutcome.Consent -> consentLauncher.launch(
-                                            IntentSenderRequest.Builder(outcome.sender).build(),
-                                        )
+                                        is DeleteOutcome.Consent -> {
+                                            pendingDelete = PendingDelete(uri, outcome.deleteAfterGrant)
+                                            consentLauncher.launch(
+                                                IntentSenderRequest.Builder(outcome.sender).build(),
+                                            )
+                                        }
 
                                         DeleteOutcome.Refused ->
                                             Toast.makeText(context, deleteFailed, Toast.LENGTH_SHORT).show()
@@ -530,6 +554,9 @@ private fun ViewerInfoDialog(
         }
     }
 }
+
+/** The photograph a platform consent question was about, and what its answer still requires. */
+private class PendingDelete(val uri: Uri, val deleteAfterGrant: Boolean)
 
 /**
  * A page in an endless deck that shows the photograph at [index].
