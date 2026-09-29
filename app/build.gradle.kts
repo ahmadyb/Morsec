@@ -165,6 +165,10 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // The Compose BOM only versions artifacts on the configurations it is added
+    // to; the test source sets do not inherit it, and an unversioned
+    // ui-test-junit4 fails dependency resolution (and with it lint's model task).
+    testImplementation(platform(libs.androidx.compose.bom))
     testImplementation(libs.turbine)
     testImplementation(libs.robolectric)
     testImplementation(libs.hilt.android.testing)
@@ -173,6 +177,7 @@ dependencies {
     testImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 
+    androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.hilt.android.testing)
     kspAndroidTest(libs.hilt.compiler)
     androidTestImplementation(libs.androidx.test.junit)
