@@ -16,7 +16,9 @@ ksp = "2.2.20-2.0.4"
 # Kotlin DSL this project is written against. 2.58 is the last release whose Gradle
 # plugin supports AGP 8.x — do not bump it without moving the whole toolchain.
 hilt = "2.58"
-androidxHilt = "1.4.0"
+# androidx.hilt 1.4.0 declares minCompileSdk 37 and requires AGP 9.1; 1.3.0 is the
+# newest release that builds against compileSdk 36 with AGP 8.13 (checkAarMetadata).
+androidxHilt = "1.3.0"
 composeBom = "2026.04.01"
 room = "2.8.5"
 navigation = "2.9.8"

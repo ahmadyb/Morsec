@@ -208,7 +208,7 @@ jobs:
               r"Kotlin could not compile|Could not resolve|Cannot access built-in|"
               r"java\.lang\.|GradleException|warning: )", re.IGNORECASE)
           MAX_ANNOTATIONS = 140
-          MAX_MESSAGE = 600
+          MAX_MESSAGE = 900
 
           def command(level, title, message):
               # Workflow-command escaping: %, \r and \n are special in ::commands::.
@@ -228,8 +228,8 @@ jobs:
               failures = [i for i, l in enumerate(lines) if l.startswith("FAILURE:")]
               if failures:
                   start = failures[0]
-                  block = [l for l in lines[start:start + 60] if l.strip()]
-                  message = " ⏎ ".join(block)[:4000]
+                  block = [l for l in lines[start:start + 160] if l.strip()]
+                  message = " ⏎ ".join(block)[:14000]
                   print(command("error", f"{name} — build failure", message))
                   emitted += 1
               matches = []

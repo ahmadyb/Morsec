@@ -144,7 +144,7 @@ public data class SortOrder(val key: SortKey = SortKey.DATE, val direction: Sort
  * Folders always come first, exactly as the mockup does, so a folder browser
  * never buries a directory under a thousand files.
  */
-public fun <T> List<T>.applySortOrder(order: SortOrder, selector: (T) MediaItem): List<T> {
+public fun <T> List<T>.applySortOrder(order: SortOrder, selector: (T) -> MediaItem): List<T> {
     val comparator = Comparator<T> { a, b ->
         val left = selector(a)
         val right = selector(b)
