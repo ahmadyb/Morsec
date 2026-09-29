@@ -192,6 +192,55 @@ referenceCheck('Design tokens', /\bmotion\.(\w+)/g, motionNames, 'motion.* resol
 referenceCheck('Design tokens', /MorseIcons\.(\w+)/g, iconsNames, 'MorseIcons.* resolve to generated icons');
 referenceCheck('Design tokens', /MorseTextStyles\.(\w+)/g, textStylesNames, 'MorseTextStyles.* resolve to text styles');
 
+/* ------------------------------------------------ 1b. Compose API call shapes */
+
+/**
+ * Signatures the Kotlin compiler rejects but that are easy to write by hand:
+ * `Modifier.padding` has a start/top/end/bottom family and a horizontal/vertical
+ * family and the two cannot be mixed, and `initialStartOffset` is a parameter of
+ * `infiniteRepeatable`, not of `tween`.
+ */
+function balancedArgs(text, openIndex) {
+  let depth = 0;
+  for (let i = openIndex; i < text.length; i++) {
+    if (text[i] === '(') depth++;
+    else if (text[i] === ')') {
+      depth--;
+      if (depth === 0) return text.slice(openIndex + 1, i);
+    }
+  }
+  return null;
+}
+
+const lineOf = (text, index) => text.slice(0, index).split('\n').length;
+const EDGES = new Set(['start', 'top', 'end', 'bottom']);
+const SYMMETRIC = new Set(['horizontal', 'vertical']);
+
+const mixedPadding = [];
+const misplacedOffsets = [];
+for (const f of kotlinFiles) {
+  const text = read(f);
+  for (const m of text.matchAll(/\.padding\s*\(/g)) {
+    const args = balancedArgs(text, m.index + m[0].length - 1);
+    if (!args) continue;
+    const named = new Set([...args.matchAll(/(\w+)\s*=/g)].map((x) => x[1]));
+    const hasEdge = [...named].some((n) => EDGES.has(n));
+    const hasSymmetric = [...named].some((n) => SYMMETRIC.has(n));
+    if (hasEdge && hasSymmetric) mixedPadding.push(`${short(f)}:${lineOf(text, m.index)} (${[...named].join(', ')})`);
+  }
+  for (const m of text.matchAll(/\btween\s*\(/g)) {
+    const args = balancedArgs(text, m.index + m[0].length - 1);
+    if (args && /\binitialStartOffset\s*=/.test(args)) {
+      misplacedOffsets.push(`${short(f)}:${lineOf(text, m.index)}`);
+    }
+  }
+}
+
+check('Compose API shapes', 'Modifier.padding never mixes edge and symmetric families',
+  mixedPadding.length === 0, mixedPadding.length ? mixedPadding.join(', ') : `${kotlinFiles.length} files scanned`);
+check('Compose API shapes', 'initialStartOffset is passed to infiniteRepeatable, not tween',
+  misplacedOffsets.length === 0, misplacedOffsets.length ? misplacedOffsets.join(', ') : 'clean');
+
 /* ------------------------------------------------------- 2. resource refs */
 
 referenceCheck('Resources', /R\.string\.(\w+)/g, declaredStrings, 'R.string.* resolve to strings.xml entries');

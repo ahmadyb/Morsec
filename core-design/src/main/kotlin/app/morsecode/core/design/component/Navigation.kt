@@ -64,8 +64,9 @@ public fun MorseBottomBar(
             .height(metrics.bottomNavHeight)
             .background(colors.card)
             .padding(
-                horizontal = metrics.bottomNavPaddingHorizontal,
+                start = metrics.bottomNavPaddingHorizontal,
                 top = metrics.bottomNavPaddingTop,
+                end = metrics.bottomNavPaddingHorizontal,
                 bottom = metrics.bottomNavPaddingBottom,
             ),
         verticalAlignment = Alignment.CenterVertically,

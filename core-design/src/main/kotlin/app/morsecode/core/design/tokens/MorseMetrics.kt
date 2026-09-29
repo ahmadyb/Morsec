@@ -156,6 +156,7 @@ public data class MorseMetrics(
 ) {
     public companion object {
         private fun dp(key: String): Dp = MockupTokens.metrics.getValue(key).dp
+        private fun sp(key: String): TextUnit = MockupTokens.metrics.getValue(key).sp
         private fun int(key: String): Int = MockupTokens.metrics.getValue(key).toInt()
 
         /** The single resolved metric set; dimensions do not vary by theme. */

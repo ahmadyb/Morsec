@@ -176,9 +176,9 @@ private fun RadarBlipDot(blip: RadarBlip, containerSize: Dp) {
                 animation = tween(
                     durationMillis = motion.radarBlipMillis / 2,
                     easing = FastOutSlowInEasing,
-                    initialStartOffset = StartOffset((motion.radarBlipMillis * blip.delayFraction).roundToInt()),
                 ),
                 repeatMode = RepeatMode.Reverse,
+                initialStartOffset = StartOffset((motion.radarBlipMillis * blip.delayFraction).roundToInt()),
             ),
             label = "radarBlipAlpha",
         )
@@ -189,9 +189,9 @@ private fun RadarBlipDot(blip: RadarBlip, containerSize: Dp) {
                 animation = tween(
                     durationMillis = motion.radarBlipMillis / 2,
                     easing = FastOutSlowInEasing,
-                    initialStartOffset = StartOffset((motion.radarBlipMillis * blip.delayFraction).roundToInt()),
                 ),
                 repeatMode = RepeatMode.Reverse,
+                initialStartOffset = StartOffset((motion.radarBlipMillis * blip.delayFraction).roundToInt()),
             ),
             label = "radarBlipScale",
         )
