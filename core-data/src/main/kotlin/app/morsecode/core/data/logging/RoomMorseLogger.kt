@@ -73,7 +73,7 @@ internal class RoomMorseLogger @Inject constructor(
             builder
                 .append(stamp.format(Date(row.timestamp)))
                 .append(' ')
-                .append(row.level.id.padEnd(5))
+                .append(row.level.padEnd(5))
                 .append(' ')
                 .append(row.tag.padEnd(10))
                 .append(' ')

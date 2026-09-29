@@ -86,8 +86,6 @@ public data class MorseMetrics(
     val tilePaddingHorizontal: Dp,
     val statCardRadius: Dp,
     val statCardPadding: Dp,
-    val statCardValueSize: TextUnit,
-    val statCardLabelSize: TextUnit,
     val statCardGap: Dp,
     val tileRadius: Dp,
     val gridGapMedia: Dp,
@@ -156,7 +154,6 @@ public data class MorseMetrics(
 ) {
     public companion object {
         private fun dp(key: String): Dp = MockupTokens.metrics.getValue(key).dp
-        private fun sp(key: String): TextUnit = MockupTokens.metrics.getValue(key).sp
         private fun int(key: String): Int = MockupTokens.metrics.getValue(key).toInt()
 
         /** The single resolved metric set; dimensions do not vary by theme. */
@@ -231,8 +228,6 @@ public data class MorseMetrics(
             tilePaddingHorizontal = dp("tile.paddingHorizontal"),
             statCardRadius = dp("statCard.radius"),
             statCardPadding = dp("statCard.padding"),
-            statCardValueSize = sp("statCard.valueSize"),
-            statCardLabelSize = sp("statCard.labelSize"),
             statCardGap = dp("statCard.gap"),
             tileRadius = dp("tile.radius"),
             gridGapMedia = dp("grid.gapMedia"),
@@ -361,6 +356,10 @@ public object MorseType {
     public val tabLabelSize: TextUnit = size("tab.fontSize")
     public val tabSelectedWeight: Int = weight("tab.selectedWeight")
     public val tabUnselectedWeight: Int = weight("tab.unselectedWeight")
+
+    /** `.statcard b` / `.statcard span` — the large summary cards. */
+    public val statCardValueSize: TextUnit = size("statCard.valueSize")
+    public val statCardLabelSize: TextUnit = size("statCard.labelSize")
 
     /** `.tile b` / `.tile span` — stat tiles inside a summary card. */
     public val tileValueSize: TextUnit = size("tile.valueSize")

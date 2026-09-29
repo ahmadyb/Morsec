@@ -241,7 +241,53 @@ check('Compose API shapes', 'Modifier.padding never mixes edge and symmetric fam
 check('Compose API shapes', 'initialStartOffset is passed to infiniteRepeatable, not tween',
   misplacedOffsets.length === 0, misplacedOffsets.length ? misplacedOffsets.join(', ') : 'clean');
 
-/* ------------------------------------- 1c. internal types in public signatures */
+/* --------------------------------------- 1c. imports for top-level extensions */
+
+/**
+ * A top-level extension function needs an import wherever it is used outside its
+ * own package. Missing one is an "unresolved reference" at compile time, and it is
+ * invisible to a symbol scan that only looks at declared members.
+ */
+const packageOf = (text) => (/^package\s+([\w.]+)/m.exec(text) || [null, ''])[1];
+const importsOf = (text) => new Set([...text.matchAll(/^import\s+([\w.]+(?:\.\*)?)/gm)].map((m) => m[1]));
+const TOP_LEVEL_FUN = /^(?:public |internal )?(?:inline |suspend |operator |infix )*(?:fun)\s+(?:<[^>]*>\s*)?(?:([\w.<>]+)\.)?(\w+)\s*\(/gm;
+
+const declaringPackage = new Map(); // extension name -> Set of packages
+const parsed = kotlinFiles.map((f) => {
+  const text = read(f);
+  const pkg = packageOf(text);
+  const imports = importsOf(text);
+  const extensions = new Set();
+  for (const m of text.matchAll(TOP_LEVEL_FUN)) {
+    if (m[1]) extensions.add(m[2]);
+  }
+  for (const name of extensions) {
+    const packages = declaringPackage.get(name) ?? new Set();
+    packages.add(pkg);
+    declaringPackage.set(name, packages);
+  }
+  return { file: f, rel: short(f), text, pkg, imports };
+});
+
+const uniqueExtensions = new Map(
+  [...declaringPackage].filter(([, packages]) => packages.size === 1).map(([name, packages]) => [name, [...packages][0]]),
+);
+
+const missingImports = [];
+for (const entry of parsed) {
+  for (const [name, pkg] of uniqueExtensions) {
+    if (!pkg || pkg === entry.pkg) continue;
+    if (entry.imports.has(`${pkg}.${name}`) || entry.imports.has(`${pkg}.*`)) continue;
+    const use = new RegExp(`\\.\\s*${name}\\s*\\(`).exec(entry.text);
+    if (!use) continue;
+    const line = entry.text.slice(0, use.index).split('\n').length;
+    missingImports.push(`${entry.rel}:${line} uses .${name}() declared in ${pkg} without importing it`);
+  }
+}
+check('Kotlin imports', 'top-level extension functions are imported where used', missingImports.length === 0,
+  missingImports.length ? missingImports.slice(0, 8).join('; ') : `${uniqueExtensions.size} unique top-level extensions traced`);
+
+/* ------------------------------------- 1d. internal types in public signatures */
 
 /**
  * `internal` visibility is per Gradle module, and the compiler rejects a public

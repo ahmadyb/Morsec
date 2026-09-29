@@ -2,6 +2,7 @@ package app.morsecode.core.data.repository
 
 import app.morsecode.core.data.db.MorseDatabase
 import app.morsecode.core.data.db.toDomain
+import app.morsecode.core.data.db.toEntity
 import app.morsecode.core.model.Peer
 import app.morsecode.core.model.RecentDevice
 import app.morsecode.core.model.SafGrant
