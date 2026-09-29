@@ -1,6 +1,7 @@
 package app.morsecode.core.storage.apps
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import app.morsecode.core.model.MediaItem
@@ -40,16 +41,17 @@ internal class InstalledAppsReader @Inject constructor(
             val apk = File(sourceDir)
             val label = runCatching { packageManager.getApplicationLabel(info).toString() }
                 .getOrDefault(packageName)
-            val versionName = runCatching {
-                packageManager.getPackageInfo(packageName, 0).versionName
-            }.getOrNull()
+            // One lookup serves both the version label and the install date:
+            // firstInstallTime lives on PackageInfo, not on ApplicationInfo.
+            val packageInfo = runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()
+            val versionName = packageInfo?.versionName
             MediaItem(
                 id = "app:$packageName",
                 displayName = label,
                 kind = MediaKind.APK,
                 mimeType = MIME_APK,
                 sizeBytes = if (apk.canRead()) apk.length() else 0L,
-                dateModifiedEpochMillis = if (apk.canRead()) apk.lastModified() else info.firstInstallTime,
+                dateModifiedEpochMillis = if (apk.canRead()) apk.lastModified() else packageInfo?.firstInstallTime ?: 0L,
                 uriString = Uri.fromFile(apk).toString(),
                 title = label,
                 bucket = versionName,
@@ -65,6 +67,6 @@ internal class InstalledAppsReader @Inject constructor(
         public const val MIME_APK: String = "application/vnd.android.package-archive"
 
         /** Intent filter used in the manifest so launcher apps stay visible. */
-        public const val VISIBILITY_ACTION: String = PackageManager.ACTION_MAIN
+        public const val VISIBILITY_ACTION: String = Intent.ACTION_MAIN
     }
 }

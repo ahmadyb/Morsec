@@ -165,9 +165,34 @@ jobs:
                   s = int(suite.get("skipped", 0))
                   total += t; failed += f; skipped += s
                   lines.append(f"- `{module}` — {suite.get('name', '?')}: {t} tests, {f} failed, {s} skipped")
+          failing = []
+          for path in files:
+              module = path.split("/build/")[0]
+              try:
+                  root = ET.parse(path).getroot()
+              except ET.ParseError:
+                  continue
+              for suite in ([root] if root.tag == "testsuite" else root.findall("testsuite")):
+                  for case in suite.findall("testcase"):
+                      for kind in ("failure", "error"):
+                          node = case.find(kind)
+                          if node is None:
+                              continue
+                          detail = (node.get("message") or node.text or "").strip()
+                          detail = " ⏎ ".join(l.strip() for l in detail.splitlines() if l.strip())[:900]
+                          failing.append(f"{module} {case.get('classname')}#{case.get('name')}: {detail}")
+          for entry in failing[:40]:
+              text = entry.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=failing test::{text}")
+
           if not files:
               lines.append("No unit-test reports were produced.")
-          lines += ["", f"**Total: {total} tests, {failed} failed, {skipped} skipped**", "", "## Lint", ""]
+          lines += ["", f"**Total: {total} tests, {failed} failed, {skipped} skipped**", ""]
+          if failing:
+              lines += ["### Failing tests", ""]
+              lines += [f"- `{entry}`" for entry in failing[:40]]
+              lines.append("")
+          lines += ["## Lint", ""]
           reports = sorted(set(glob.glob("**/build/reports/lint-results-debug.*", recursive=True)))
           lint_issues = 0
           for path in reports:
@@ -259,8 +284,9 @@ jobs:
                   if kept:
                       emit(name, bucket, kept[:400])
                       counts.append(f"{bucket}={len(kept)}")
-              failures = [i for i, l in enumerate(raw) if l.startswith("FAILURE:")]
-              for start in failures[:2]:
+              failures = [i for i, l in enumerate(raw)
+                          if l.startswith("FAILURE:") or re.match(r"^\d+: Task failed with an exception", l)]
+              for start in failures[:8]:
                   block = [l for l in raw[start:start + 200] if l.strip() and not l.strip().startswith("at org.gradle")]
                   emit(name, "what went wrong", [" ⏎ ".join(block)[:CHUNK]])
               tail = [l for l in raw[-30:] if l.strip()]
