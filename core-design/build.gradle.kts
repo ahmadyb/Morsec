@@ -3,8 +3,9 @@
  *
  * Every colour, radius, type scale, spacing step, motion curve and icon in this
  * module is derived from doc/morsecode_material3_mockup.html. The parity harness
- * (tools/verify) re-reads the mockup and fails the build if a token drifts, so
- * the design system cannot silently diverge from the approved reference.
+ * (node tools/verify/token-parity.mjs) re-reads the mockup and fails on any token
+ * drift, so the design system cannot silently diverge from the approved
+ * reference; Android CI runs the Gradle build, lint and tests.
  */
 plugins {
     alias(libs.plugins.android.library)

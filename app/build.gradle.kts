@@ -3,6 +3,8 @@
  * graph root, foreground services and the platform integrations (permissions,
  * notifications, WebShare asset hosting) that the pure modules cannot own.
  */
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -35,7 +37,9 @@ android {
         create("release") {
             val props = rootProject.file("keystore.properties")
             if (props.exists()) {
-                val keystoreProperties = java.util.Properties().apply { props.inputStream().use { load(it) } }
+                // `java` is shadowed by the project's java extension inside this
+                // block, hence the explicit import at the top of the file.
+                val keystoreProperties = Properties().apply { props.inputStream().use { load(it) } }
                 storeFile = file(keystoreProperties.getProperty("storeFile"))
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")

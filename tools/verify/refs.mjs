@@ -103,6 +103,57 @@ const declaredDrawables = new Set(drawableDirs.map((f) => f.split('/').pop().rep
 const mipmapFiles = files.filter((f) => f.includes('/res/mipmap'));
 const declaredMipmaps = new Set(mipmapFiles.map((f) => f.split('/').pop().replace(/\.(png|webp|xml)$/, '')));
 
+/* ------------------------------------------------- 0. version-catalog aliases */
+
+// Every `libs.x.y` accessor in a build script must exist in the catalog: Kotlin
+// DSL turns '-' and '_' into '.', so an accessor resolves when some alias
+// normalises to it. A typo here is a script-compilation failure in CI.
+const catalogFile = join(ROOT, 'gradle', 'libs.versions.toml');
+if (existsSync(catalogFile)) {
+  const catalog = read(catalogFile);
+  const sectionOf = (index) => {
+    const before = catalog.slice(0, index);
+    const sections = [...before.matchAll(/^\[([\w-]+)\]/gm)];
+    return sections.length ? sections[sections.length - 1][1] : null;
+  };
+  const aliases = { libraries: new Set(), plugins: new Set(), versions: new Set() };
+  for (const m of catalog.matchAll(/^([\w.-]+)\s*=\s*(.+)$/gm)) {
+    const section = sectionOf(m.index);
+    if (section && aliases[section]) aliases[section].add(m[1]);
+  }
+  const normalize = (alias) => alias.replace(/[-_]/g, '.');
+  const libraries = new Set([...aliases.libraries].map(normalize));
+  const plugins = new Set([...aliases.plugins].map(normalize));
+
+  const buildFiles = files.filter((f) => f.endsWith('.gradle.kts'));
+  const unresolvedLibs = [];
+  const unresolvedPlugins = [];
+  for (const f of buildFiles) {
+    const text = read(f);
+    for (const m of text.matchAll(/\blibs\.([\w.]+)/g)) {
+      if (m[1].startsWith('plugins.')) continue; // checked against the plugin aliases below
+      if (!libraries.has(m[1])) unresolvedLibs.push(`${short(f)}: libs.${m[1]}`);
+    }
+    for (const m of text.matchAll(/\blibs\.plugins\.([\w.]+)/g)) {
+      if (!plugins.has(m[1])) unresolvedPlugins.push(`${short(f)}: libs.plugins.${m[1]}`);
+    }
+  }
+  check('Version catalog', 'every libs.* accessor exists', unresolvedLibs.length === 0,
+    unresolvedLibs.length ? unresolvedLibs.slice(0, 8).join(', ') : `${libraries.size} library aliases, ${buildFiles.length} build scripts scanned`);
+  check('Version catalog', 'every libs.plugins.* accessor exists', unresolvedPlugins.length === 0,
+    unresolvedPlugins.length ? unresolvedPlugins.slice(0, 8).join(', ') : `${plugins.size} plugin aliases resolve`);
+
+  // version.ref / version.refs must point at a declared version.
+  const badVersionRefs = [];
+  for (const m of catalog.matchAll(/version(?:\.refs)?\s*=\s*\[?"?([\w.,\s-]+?)"?\]?\s*$/gm)) {
+    for (const ref of m[1].split(',').map((s) => s.trim().replace(/"/g, '')).filter(Boolean)) {
+      if (!aliases.versions.has(ref)) badVersionRefs.push(ref);
+    }
+  }
+  check('Version catalog', 'every version.ref resolves', badVersionRefs.length === 0,
+    badVersionRefs.length ? `unknown versions: ${badVersionRefs.join(', ')}` : `${aliases.versions.size} version entries`);
+}
+
 /* ------------------------------------------------------------ 1. token refs */
 
 /**
