@@ -140,6 +140,15 @@ jobs:
           mkdir -p ci-logs
           ./gradlew --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee ci-logs/40-assemble.log
 
+      # The instrumentation runner lives in src/androidTest, which the tasks above
+      # never compile, so the androidTest APK is assembled explicitly.
+      - name: Assemble the instrumentation APK
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --stacktrace :app:assembleDebugAndroidTest 2>&1 | tee ci-logs/45-android-test.log
+
       - name: Summarise test and lint results
         if: always()
         env:

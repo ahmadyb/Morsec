@@ -112,7 +112,8 @@ public fun FilesScreen(
     ) { uri -> uri?.let { viewModel.addFolder(it.toString()) } }
 
     LaunchedEffect(state.message) {
-        when (val message = state.message) {
+        val message = state.message
+        when (message) {
             is FilesMessage.FolderAdded ->
                 Toast.makeText(context, context.getString(R.string.files_grant_added, message.displayName), Toast.LENGTH_SHORT).show()
 

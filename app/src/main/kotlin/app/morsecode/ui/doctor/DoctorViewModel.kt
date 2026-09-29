@@ -99,7 +99,8 @@ public class DoctorViewModel @Inject constructor(
     private fun wifiCheck(): DiagnosticCheck {
         val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val network = runCatching { manager?.activeNetwork }.getOrNull()
-        val capabilities = network?.let { runCatching { manager.getNetworkCapabilities(it) }.getOrNull() }
+        // getSystemService returns a nullable, so the lookup stays null-safe end to end.
+        val capabilities = network?.let { runCatching { manager?.getNetworkCapabilities(it) }.getOrNull() }
         val onWifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ||
             capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
         return DiagnosticCheck(

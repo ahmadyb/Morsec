@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
@@ -433,9 +434,18 @@ public fun MorseEmptyState(
  *
  * Native Android scroll indicators are not used because they cannot be tinted or
  * narrowed to the approved 2 dp on API 23.
+ *
+ * The geometry is read at draw time from lambdas, so the same drawing code serves
+ * both a [LazyListState] (rows) and a [LazyGridState] (the photo and video grids).
  */
 @Composable
-public fun Modifier.morseScrollbar(state: LazyListState): Modifier {
+private fun Modifier.scrollbarOverlay(
+    readTotal: () -> Int,
+    readFirstIndex: () -> Int,
+    readLastIndex: () -> Int,
+    readViewportStart: () -> Int,
+    readViewportEnd: () -> Int,
+): Modifier {
     val colors = MorseTheme.colors
     val metrics = MorseTheme.metrics
     val density = LocalDensity.current
@@ -444,24 +454,23 @@ public fun Modifier.morseScrollbar(state: LazyListState): Modifier {
     val minThumb = with(density) { metrics.scrollbarMinThumbLength.toPx() }
     return this.drawWithContent {
         drawContent()
-        val layoutInfo = state.layoutInfo
-        val total = layoutInfo.totalItemsCount
-        val visible = layoutInfo.visibleItemsInfo
-        if (total <= 0 || visible.isEmpty()) return@drawWithContent
-        val viewport = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+        val total = readTotal()
+        val first = readFirstIndex()
+        val last = readLastIndex()
+        if (total <= 0 || first < 0 || last < first) return@drawWithContent
+        val viewportStart = readViewportStart()
+        val viewport = readViewportEnd() - viewportStart
         if (viewport <= 0) return@drawWithContent
-        val first = visible.first().index.toFloat()
-        val last = visible.last().index.toFloat()
-        val span = (last - first + 1f) / total.toFloat()
+        val visibleCount = last - first + 1f
+        val span = visibleCount / total.toFloat()
         if (span >= 0.999f) return@drawWithContent
         val thumbLength = (viewport * span).coerceAtLeast(minThumb)
-        val scrollFraction = if (total - (last - first + 1f) <= 0f) {
+        val scrollFraction = if (total - visibleCount <= 0f) {
             0f
         } else {
-            (first / (total - (last - first + 1f))).coerceIn(0f, 1f)
+            (first / (total - visibleCount)).coerceIn(0f, 1f)
         }
-        val top = layoutInfo.viewportStartOffset +
-            (viewport - thumbLength) * scrollFraction
+        val top = viewportStart + (viewport - thumbLength) * scrollFraction
         val left = if (isRtl) 0f else size.width - thickness
         drawRect(
             color = colors.scrollThumb,
@@ -470,6 +479,26 @@ public fun Modifier.morseScrollbar(state: LazyListState): Modifier {
         )
     }
 }
+
+/** Hairline scrollbar for a lazy list (`.li` rows). */
+@Composable
+public fun Modifier.morseScrollbar(state: LazyListState): Modifier = scrollbarOverlay(
+    readTotal = { state.layoutInfo.totalItemsCount },
+    readFirstIndex = { state.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: -1 },
+    readLastIndex = { state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 },
+    readViewportStart = { state.layoutInfo.viewportStartOffset },
+    readViewportEnd = { state.layoutInfo.viewportEndOffset },
+)
+
+/** Hairline scrollbar for a lazy grid (`.grid3` photos and videos). */
+@Composable
+public fun Modifier.morseScrollbar(state: LazyGridState): Modifier = scrollbarOverlay(
+    readTotal = { state.layoutInfo.totalItemsCount },
+    readFirstIndex = { state.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: -1 },
+    readLastIndex = { state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 },
+    readViewportStart = { state.layoutInfo.viewportStartOffset },
+    readViewportEnd = { state.layoutInfo.viewportEndOffset },
+)
 
 /** Provides [LocalContentColor] for a subtree, matching the CSS `color` cascade. */
 @Composable
