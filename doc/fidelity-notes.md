@@ -208,3 +208,73 @@ only a result **inside the grant** is accepted. `..` and another scheme are refu
 than reinterpreted, and the resolved level is checked against the platform before the browser
 claims a folder exists — a level that cannot be read is reported as unavailable, which is also how
 an empty folder is told apart from a revoked grant.
+
+**The image viewer (§4.5).** The reference is `SC.viewer` plus the `.swipe` block, which carries
+its own comment — `/* photo viewer: an edge-to-edge swipe deck, no arrow buttons */` — and
+`endSwipe()`, which is where the deck's behaviour actually lives. The screen is literal black
+(`.screen{background:#000}`), the header is `padding:4px 16px 10px` with the back control on
+`rgba(255,255,255,.08)` in white, the name in white bold and the metadata line in `#8A8A8A` as
+`${n} of 15 · 4032 × 3024 · 2.4 MB`. Slides are `padding:0 6px` with a 6 px radius picture, the
+hint is `‹ swipe to browse ›` in the mono face at 10 px on `rgba(0,0,0,.45)`, `bottom:34px`, and
+the dots are `bottom:14px` — idle 5 px on `rgba(255,255,255,.3)`, current `var(--acc)` at
+`width:14px; border-radius:3px`. The action row is centred, `gap:14px`, `padding:18px 0 26px`:
+four 44 px circles on `#1A1A1A` with `#DDD` glyphs and a fifth, Send, on `var(--acc)` with
+`var(--accInk)`. All of those numbers are transcribed as they stand, in dp.
+
+* **The deck wraps.** `endSwipe` takes each end modulo the set (`go_>0?(n<15?n+1:1):(n>1?n-1:15)`)
+  and the track is built as three slides — previous, current, next — with the same modulo, so the
+  reference has no first photograph and no last one. The app does this with a `HorizontalPager`
+  over a page count far larger than the set (`ENDLESS_PAGES`), started in the middle and aligned so
+  that `page % count` is the photograph being shown. Different mechanism, same behaviour, and the
+  reason for it is that a pager is what already handles the drag, the fling and the settle — the
+  reference rebuilds its triplet on every commit, which a real deck cannot do without a seam.
+* **Wrapping is also what keeps the drag off the system back gesture.** A horizontal drag in the
+  middle of the screen never means the same thing as the edge swipe Android owns, and because both
+  ends wrap there is no page at which a drag would have to be refused.
+* **The commit threshold is not re-implemented.** The reference commits past
+  `max(46px, width*0.22)`; the pager uses its own touch slop and fling velocity, which is the same
+  decision expressed in the platform's units. The animation is the pager's rather than the
+  reference's `.22s cubic-bezier(.22,.61,.36,1)`, and `MorseTheme.motion.reduced` replaces the
+  animation with a jump — a preference the reference, being a document, has no way to express.
+* **Dots are drawn for 2 to 20 photographs.** The reference always has exactly 15, which is the one
+  set size its dots are designed for; a device with 4 000 photographs would draw 4 000 dots across
+  a 411 dp screen, and 4 000 dots are not an indicator. Past that the "n of m" line in the header
+  carries the position, which is where the reference puts it too.
+* **The picture is the real file.** The reference paints `linear-gradient(160deg, …)` because a
+  document has no photographs. The app has no image-loading dependency and does not add one for a
+  screen that shows one frame at a time: the file is measured with `inJustDecodeBounds`, then
+  decoded at the largest power-of-two `inSampleSize` that still leaves the frame at least as long
+  as the screen, on IO, with the last few frames in a byte-sized `LruCache` so swiping back is
+  instant. A frame that has not decoded shows `MorseLoading` on black rather than a gradient that
+  would claim to be the photograph.
+* **Edit, Delete and Info are real.** In the reference all three are `data-act="toast"` — the
+  simulator's way of having no platform. The app asks the platform: Edit sends `ACTION_EDIT` with
+  read and write grants and reports honestly when nothing on the device can edit the image; Delete
+  confirms first and then follows the storage APIs (a resolver delete up to API 28,
+  `RecoverableSecurityException` on API 29, `MediaStore.createDeleteRequest` from API 30), launching
+  the consent intent when the platform asks and reporting `RESULT_OK` as deleted and anything else
+  as cancelled — never a toast claiming a deletion the platform only offered to ask about. Info
+  shows what was reported and says *Unknown* for what was not, instead of showing `0 × 0`.
+* **Share goes to the system chooser,** as it already does from the Files selection bar. The
+  reference opens an in-app sheet (`sharesheet('viewer')` → `IMG_2043.jpg` / `4.1 MB · image/jpeg`),
+  which is the simulator standing in for the chooser; the app does not keep a second, private list
+  of share targets next to the platform's.
+* **Send is gated.** `sendone` queues the photograph and navigates to the sending screen, which is
+  the transfer engine — milestone 5. Until then the control is present, named "Send this photo", and
+  routes to the honest gated dialog, per §17's rule that nothing is simulated in a gated feature's
+  place.
+* **There is no overflow button and nothing clickable over the image,** which §4.5 states and the
+  `.swipe` comment states again. The viewer screen test asserts both: `action_more` does not exist,
+  and no node with a click action has the current page as an ancestor.
+* **Insets.** The reference is drawn inside a fixed bezel with a painted status bar, so its header
+  starts at the top of the screen. The app is full-bleed and puts `statusBarsPadding()` on the
+  header and `navigationBarsPadding()` on the action row: still edge to edge, but no control under
+  a system one.
+* **The order travels with the route.** The Files sort is not persisted, so the viewer is told which
+  order to read the same list in (`viewer/{itemId}?sort=name.asc`) — otherwise "3 of 15" would be a
+  different 3 of 15 from the one the user counted before tapping. The photograph being shown is
+  written to saved state as the deck settles, so a restored viewer comes back to it, and a restored
+  position past the end of a list that has since changed is not honoured.
+* **A photograph that is gone is said to be gone.** If the opened id is no longer on the device the
+  viewer shows `MorseEmptyState` rather than a black screen with a header, because black is what the
+  viewer looks like while it is working.

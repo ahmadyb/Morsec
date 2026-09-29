@@ -141,6 +141,31 @@
     <string name="folder_path_outside">That path is outside the folder you granted</string>
     <string name="folder_path_not_found">No folder matches that path</string>
 
+    <!-- Image viewer -->
+    <string name="viewer_position">%1$d of %2$d</string>
+    <string name="viewer_hint">‹ swipe to browse ›</string>
+    <string name="viewer_edit">Edit</string>
+    <string name="viewer_delete">Delete</string>
+    <string name="viewer_info">Info</string>
+    <string name="viewer_send">Send this photo</string>
+    <string name="viewer_image_description">%1$s, photo %2$d of %3$d</string>
+    <string name="viewer_loading">Loading photo</string>
+    <string name="viewer_empty_title">No photos to show</string>
+    <string name="viewer_empty_body">The photo that was opened is not on this device any more.</string>
+    <string name="viewer_edit_failed">No app can edit that image</string>
+    <string name="viewer_info_title">File information</string>
+    <string name="viewer_info_type">Type</string>
+    <string name="viewer_info_size">Size</string>
+    <string name="viewer_info_dimensions">Dimensions</string>
+    <string name="viewer_info_modified">Modified</string>
+    <string name="viewer_info_location">Location</string>
+    <string name="viewer_info_unknown">Unknown</string>
+    <string name="viewer_delete_title">Delete this photo?</string>
+    <string name="viewer_delete_body">%1$s will be deleted from this device. Android may ask you to confirm it first.</string>
+    <string name="viewer_deleted">Photo deleted</string>
+    <string name="viewer_delete_failed">That photo could not be deleted.</string>
+    <string name="viewer_delete_cancelled">Delete cancelled</string>
+
     <!-- History -->
     <string name="history_title">History</string>
     <string name="history_tab_received">Received</string>

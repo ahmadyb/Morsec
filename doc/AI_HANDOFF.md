@@ -218,12 +218,16 @@ well-formedness, milestone hygiene). Docs: `README.md`, `doc/architecture.md`,
 
 ### 7. Known issues
 
-1. **Two approved-UI behaviours are still missing in Files:** horizontal swipe
-   between the five categories (no `HorizontalPager` anywhere yet), and the
-   internal folder browser — `Routes.FOLDER` (`folder/{treeUri}`) is declared but
-   has no `composable(...)` registration and no screen, so the breadcrumb /
-   no-up-arrow decisions are not implemented yet. `Routes.WEBSHARE` is likewise
-   unregistered, correctly, until milestone 11–12.
+1. **Delivered since this list was written:** horizontal swipe between the five
+   Files categories (`MorseCategoryPager` — one piece of state drives a tap and a
+   swipe), the internal folder browser (`Routes.FOLDER` registered, `FolderScreen`,
+   the breadcrumb as the way up and no upward-arrow control), and the image viewer
+   (`Routes.VIEWER` registered, `ViewerScreen` — a deck that wraps both ways, no
+   overflow button, nothing clickable over the photograph). `doc/fidelity-notes.md`
+   §7 records the decisions behind each. `Routes.WEBSHARE` is still unregistered,
+   correctly, until milestones 11–12. The milestone 2 handoff itself is written at
+   the end of milestone 2, per the plan; this item is corrected here only so that
+   nothing in this document claims delivered work is missing.
 2. **41 lint warnings**, all with a verdict in `doc/qa/lint-and-warnings.md`:
    27 `UnusedResources` (mockup tokens reserved for later milestones — do not
    delete them, `token-parity` asserts them), 11 `PluralsCandidate` (single-locale

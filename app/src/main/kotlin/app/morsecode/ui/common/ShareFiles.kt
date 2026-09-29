@@ -75,4 +75,29 @@ public object ShareFiles {
             true
         }.getOrDefault(false)
     }
+
+    /**
+     * Hands one image to an external editor, which is what §4.5 asks for: editing
+     * through a compatible editor intent *where available*.
+     *
+     * The intent is started rather than resolved first, because from API 30 an app
+     * cannot see the editors on the device without declaring queries for them. A
+     * start that throws says the same thing a resolve would: nothing here can edit
+     * this file, and the caller says so instead of pretending otherwise.
+     */
+    public fun edit(context: Context, item: MediaItem): Boolean {
+        val uri = item.uriString?.let { runCatching { it.toUri() }.getOrNull() } ?: return false
+        val intent = Intent(Intent.ACTION_EDIT).apply {
+            setDataAndType(uri, item.mimeType ?: "image/*")
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_ACTIVITY_NEW_TASK,
+            )
+        }
+        return runCatching {
+            context.startActivity(intent)
+            true
+        }.getOrDefault(false)
+    }
 }

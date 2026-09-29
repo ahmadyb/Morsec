@@ -19,6 +19,7 @@ import app.morsecode.ui.help.HelpScreen
 import app.morsecode.ui.logs.LogsScreen
 import app.morsecode.ui.onboarding.OnboardingScreen
 import app.morsecode.ui.settings.SettingsScreen
+import app.morsecode.ui.viewer.ViewerScreen
 
 /**
  * The navigation graph.
@@ -56,7 +57,25 @@ public fun MorseApp(
                 onOpenFolder = { treeUri ->
                     navController.navigateSimple(Routes.folder(Uri.encode(treeUri)))
                 },
+                onOpenViewer = { item, sort ->
+                    navController.navigateSimple(Routes.viewer(Uri.encode(item.id), sort))
+                },
             )
+        }
+
+        // The image viewer: an endless deck of the device's photographs, opened at
+        // the one that was tapped, in the order the grid was showing them.
+        composable(
+            route = Routes.VIEWER,
+            arguments = listOf(
+                navArgument(Routes.VIEWER_ARG) { type = NavType.StringType },
+                navArgument(Routes.VIEWER_SORT_ARG) {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+            ),
+        ) {
+            ViewerScreen(onBack = navController::back)
         }
 
         // The internal folder browser. One entry holds the whole walk: the browser

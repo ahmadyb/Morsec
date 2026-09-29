@@ -1,6 +1,9 @@
 package app.morsecode.navigation
 
 import android.net.Uri
+import app.morsecode.core.model.SortDirection
+import app.morsecode.core.model.SortKey
+import app.morsecode.core.model.SortOrder
 
 /**
  * Navigation graph routes.
@@ -30,17 +33,48 @@ public object Routes {
     /** Route for one granted SAF folder, ready to hand to `navigate`. */
     public fun folder(encodedTreeUri: String): String = "folder/$encodedTreeUri"
 
+    /** Argument names for [VIEWER]. */
+    public const val VIEWER_ARG: String = "itemId"
+    public const val VIEWER_SORT_ARG: String = "sort"
+    public const val VIEWER: String = "viewer/{$VIEWER_ARG}?$VIEWER_SORT_ARG={$VIEWER_SORT_ARG}"
+
     /**
-     * The tree uri a [FOLDER] destination was opened with.
+     * Route for one image in the viewer.
      *
+     * The id says which photo was tapped; the sort token says which order the grid
+     * was showing it in, so "3 of 15" in the viewer is the same 3 of 15 the user
+     * counted on screen rather than a second, differently ordered list.
+     */
+    public fun viewer(encodedItemId: String, sort: SortOrder): String =
+        "viewer/$encodedItemId?$VIEWER_SORT_ARG=${sortToken(sort)}"
+
+    /** The tree uri a [FOLDER] destination was opened with. */
+    public fun decodeFolderArg(value: String?): String = decodedArg(value)
+
+    /** The media id a [VIEWER] destination was opened with. */
+    public fun decodeViewerArg(value: String?): String = decodedArg(value)
+
+    /**
      * Navigation decodes a path argument on the way in, but a restored or
      * deep-linked value can still carry the encoding, so the rule lives here
      * rather than being re-derived in each destination: a value that is already a
      * uri is used as it is, anything else is decoded once.
      */
-    public fun decodeFolderArg(value: String?): String {
+    private fun decodedArg(value: String?): String {
         val text = value.orEmpty()
         return if (text.startsWith("content://")) text else Uri.decode(text)
+    }
+
+    /** A sort order as one route-safe token: `date.desc`, `name.asc`. */
+    public fun sortToken(order: SortOrder): String = "${order.key.id}.${order.direction.id}"
+
+    /** The order a token names, or the app's default when it is absent or malformed. */
+    public fun parseSortToken(value: String?): SortOrder {
+        val parts = value.orEmpty().split('.')
+        if (parts.size != 2) return SortOrder()
+        val key = SortKey.entries.firstOrNull { it.id == parts[0] } ?: return SortOrder()
+        val direction = SortDirection.entries.firstOrNull { it.id == parts[1] } ?: return SortOrder()
+        return SortOrder(key, direction)
     }
 
     /** Routes that render the bottom navigation bar, and which item is lit. */

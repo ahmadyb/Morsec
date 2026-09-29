@@ -64,13 +64,16 @@ import app.morsecode.core.model.FeatureArea
 import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.SortDirection
 import app.morsecode.core.model.SortKey
+import app.morsecode.core.model.SortOrder
 import app.morsecode.core.storage.permissions.PermissionMatrix
 import app.morsecode.core.storage.saf.SafPaths
 import app.morsecode.navigation.MorseDestination
 import app.morsecode.ui.common.MorseMediaRow
 import app.morsecode.ui.common.MorseSelectionBar
+import app.morsecode.ui.common.MediaOpen
 import app.morsecode.ui.common.MorseTabScaffold
 import app.morsecode.ui.common.ShareFiles
+import app.morsecode.ui.common.mediaOpenFor
 import app.morsecode.ui.common.rememberFeatureGate
 import kotlinx.coroutines.launch
 
@@ -95,6 +98,13 @@ private fun tabLabelRes(tab: FilesTab): Int = when (tab) {
 public fun FilesScreen(
     onNavigate: (MorseDestination) -> Unit,
     onOpenFolder: (String) -> Unit,
+    /**
+     * Opens the image viewer at [item].
+     *
+     * The sort order travels with it: the viewer shows the same list in the same
+     * order, so its "3 of 15" is the 3 of 15 the user counted in the grid.
+     */
+    onOpenViewer: (MediaItem, SortOrder) -> Unit,
     viewModel: FilesViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -177,8 +187,15 @@ public fun FilesScreen(
                 },
                 onAddFolder = { folderLauncher.launch(null) },
                 onOpen = { item ->
-                    if (!ShareFiles.open(context, item)) {
-                        Toast.makeText(context, R.string.history_open_failed, Toast.LENGTH_SHORT).show()
+                    when (val target = mediaOpenFor(item)) {
+                        // §4.5: photographs open in the viewer the app draws.
+                        is MediaOpen.Viewer -> onOpenViewer(target.item, state.sortOrder)
+
+                        is MediaOpen.HandOff -> {
+                            if (!ShareFiles.open(context, target.item)) {
+                                Toast.makeText(context, R.string.history_open_failed, Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     }
                 },
             )

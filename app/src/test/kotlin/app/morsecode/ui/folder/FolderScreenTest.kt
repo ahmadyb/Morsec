@@ -2,8 +2,6 @@ package app.morsecode.ui.folder
 
 import android.app.Application
 import android.content.Context
-import androidx.activity.OnBackPressedDispatcher
-import androidx.activity.OnBackPressedDispatcherOwner
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.annotation.StringRes
 import androidx.compose.runtime.CompositionLocalProvider
@@ -18,8 +16,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.test.core.app.ApplicationProvider
@@ -28,14 +24,11 @@ import app.morsecode.core.design.theme.MorseTheme
 import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.MediaKind
 import app.morsecode.core.model.MorseFormatters
-import app.morsecode.core.model.SafGrant
-import app.morsecode.core.storage.MediaRepository
-import app.morsecode.core.storage.StorageAccess
 import app.morsecode.core.storage.saf.SafPaths
+import app.morsecode.ui.FakeMediaRepository
 import app.morsecode.navigation.MorseDestination
 import app.morsecode.navigation.Routes
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flowOf
+import app.morsecode.ui.TestBackOwner
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -458,67 +451,4 @@ class FolderScreenTest {
         composeTestRule.onNodeWithText(string(R.string.folder_open)).performClick()
         settle()
     }
-}
-
-/**
- * The lifecycle and back-dispatcher owner the browser composes under.
- *
- * Robolectric resolves an activity through the merged manifest, and only the debug
- * variant carries the one `androidx.compose.ui.test.manifest` declares, so no
- * activity is launched here at all. These are the two things this screen reads from
- * one: a resumed lifecycle, to collect its state, and a back dispatcher, to turn the
- * system gesture into "up one level".
- */
-private class TestBackOwner : OnBackPressedDispatcherOwner {
-
-    private val lifecycleRegistry = LifecycleRegistry(this)
-
-    override val onBackPressedDispatcher: OnBackPressedDispatcher = OnBackPressedDispatcher()
-    override val lifecycle: Lifecycle get() = lifecycleRegistry
-
-    init {
-        lifecycleRegistry.currentState = Lifecycle.State.RESUMED
-    }
-}
-
-/**
- * The storage layer, narrowed to what the browser reads: the children of a level
- * and whether a level resolves at all. Nothing here simulates work — a level that
- * is not in the map is a level the platform would not open.
- */
-private class FakeMediaRepository(
-    private val children: Map<String, List<MediaItem>>,
-    private val folders: Map<String, MediaItem?>,
-) : MediaRepository {
-
-    override fun observeAccess(): Flow<StorageAccess> =
-        flowOf(StorageAccess(mediaReadGranted = true))
-
-    override fun observeImages(): Flow<List<MediaItem>> = flowOf(emptyList())
-
-    override fun observeVideos(): Flow<List<MediaItem>> = flowOf(emptyList())
-
-    override fun observeAudio(): Flow<List<MediaItem>> = flowOf(emptyList())
-
-    override fun observeApps(): Flow<List<MediaItem>> = flowOf(emptyList())
-
-    override fun observeDocuments(): Flow<List<MediaItem>> = flowOf(emptyList())
-
-    override fun observeFolders(): Flow<List<MediaItem>> = flowOf(emptyList())
-
-    override suspend fun childrenOf(treeUri: String): List<MediaItem> =
-        children[treeUri].orEmpty()
-
-    override suspend fun folderAt(uriString: String): MediaItem? = folders[uriString]
-
-    override suspend fun itemById(id: String): MediaItem? =
-        children.values.flatten().firstOrNull { it.id == id }
-
-    override suspend fun refresh() = Unit
-
-    override suspend fun addFolder(treeUri: String): SafGrant? = null
-
-    override suspend fun removeFolder(grantId: Long) = Unit
-
-    override suspend fun pruneRevokedGrants(): Int = 0
 }
