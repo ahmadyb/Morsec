@@ -120,6 +120,24 @@ android {
         unitTests.isIncludeAndroidResources = true
         unitTests.isReturnDefaultValues = true
         animationsDisabled = true
+        unitTests.all {
+            // Rendering a screen on the JVM needs an activity, and Robolectric
+            // resolves one through the variant's merged manifest. The
+            // ComponentActivity that createComposeRule launches is declared by
+            // androidx.compose.ui:ui-test-manifest, which reaches the debug manifest
+            // through debugImplementation — and must never reach the release APK's.
+            // For an application module a testImplementation manifest is not merged
+            // into either, so the release unit-test variant has no activity to
+            // resolve. (A library module does merge test manifests, which is why
+            // core-design's own Robolectric tests run in both variants.)
+            //
+            // The screen tests therefore render in debug, where every one of them
+            // runs; release keeps the tests that need no window. This is a variant
+            // of the platform's, not a narrowing of what is asserted.
+            if (name == "testReleaseUnitTest") {
+                exclude("**/ui/**")
+            }
+        }
     }
 
     dependenciesInfo {
