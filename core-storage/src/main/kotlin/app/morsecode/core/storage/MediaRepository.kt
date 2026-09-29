@@ -69,6 +69,15 @@ public interface MediaRepository {
     /** Children of one SAF folder, for the folder browser screen. */
     public suspend fun childrenOf(treeUri: String): List<MediaItem>
 
+    /**
+     * The folder itself, or null when the platform will not resolve it.
+     *
+     * The folder browser uses this for a level's real name and to tell an empty
+     * folder from a path that does not exist or is no longer granted — an empty
+     * child list alone cannot make that distinction.
+     */
+    public suspend fun folderAt(uriString: String): MediaItem?
+
     /** Resolves a single item by its opaque id, for the viewer and players. */
     public suspend fun itemById(id: String): MediaItem?
 

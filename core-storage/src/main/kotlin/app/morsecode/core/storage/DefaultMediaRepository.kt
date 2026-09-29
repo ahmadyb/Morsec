@@ -82,6 +82,10 @@ internal class DefaultMediaRepository @Inject constructor(
         saf.children(treeUri)
     }
 
+    override suspend fun folderAt(uriString: String): MediaItem? = withContext(io) {
+        saf.byUri(uriString)?.takeIf { it.isFolder }
+    }
+
     override suspend fun itemById(id: String): MediaItem? = withContext(io) {
         when {
             id.startsWith("app:") -> installedApps.byPackage(id.removePrefix("app:"))
