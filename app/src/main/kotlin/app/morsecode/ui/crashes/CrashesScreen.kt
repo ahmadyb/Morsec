@@ -60,6 +60,10 @@ public fun CrashesScreen(
     val metrics = MorseTheme.metrics
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Resolved during composition rather than from LocalContext inside the click
+    // lambda: the string then follows locale and configuration changes, which is
+    // what lint's LocalContextGetResourceValueCall check enforces.
+    val sharedSubject = stringResource(R.string.crashes_shared_subject)
 
     MorseTabScaffold(selected = MorseDestination.SETTINGS, onNavigate = onNavigate) {
         MorseScreenHeader(
@@ -104,11 +108,7 @@ public fun CrashesScreen(
                             if (uri == null) {
                                 Toast.makeText(context, R.string.error_export_failed, Toast.LENGTH_SHORT).show()
                             } else {
-                                Exports.shareUri(
-                                    context,
-                                    uri,
-                                    context.getString(R.string.crashes_shared_subject),
-                                )
+                                Exports.shareUri(context, uri, sharedSubject)
                             }
                         }
                     },

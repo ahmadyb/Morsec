@@ -102,6 +102,9 @@ public fun FilesScreen(
     val metrics = MorseTheme.metrics
     val gate = rememberFeatureGate()
     val scope = rememberCoroutineScope()
+    // Chooser title for "share outside Morsecode"; resolved in composition so the
+    // click lambda never reads resources through LocalContext.
+    val appName = stringResource(R.string.app_name)
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -111,20 +114,22 @@ public fun FilesScreen(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri -> uri?.let { viewModel.addFolder(it.toString()) } }
 
-    LaunchedEffect(state.message) {
-        val message = state.message
-        when (message) {
-            is FilesMessage.FolderAdded ->
-                Toast.makeText(context, context.getString(R.string.files_grant_added, message.displayName), Toast.LENGTH_SHORT).show()
+    // The one-shot message text is resolved in composition: the effect below is a
+    // coroutine, not a composable scope, and reading a string through
+    // LocalContext there is what lint's LocalContextGetResourceValueCall rejects.
+    val message = state.message
+    val messageText: String? = when (message) {
+        is FilesMessage.FolderAdded -> stringResource(R.string.files_grant_added, message.displayName)
+        FilesMessage.GrantFailed -> stringResource(R.string.files_grant_failed)
+        FilesMessage.PermissionDeclined -> stringResource(R.string.files_permission_body)
+        null -> null
+    }
+    val messageDuration =
+        if (message is FilesMessage.PermissionDeclined) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
 
-            FilesMessage.GrantFailed ->
-                Toast.makeText(context, R.string.files_grant_failed, Toast.LENGTH_SHORT).show()
-
-            FilesMessage.PermissionDeclined ->
-                Toast.makeText(context, R.string.files_permission_body, Toast.LENGTH_LONG).show()
-
-            null -> Unit
-        }
+    LaunchedEffect(message) {
+        val text = messageText
+        if (text != null) Toast.makeText(context, text, messageDuration).show()
         if (message != null) viewModel.consumeMessage()
     }
 
@@ -233,7 +238,7 @@ public fun FilesScreen(
                         if (uris.isEmpty()) {
                             Toast.makeText(context, R.string.error_share_no_app, Toast.LENGTH_SHORT).show()
                         } else {
-                            ShareFiles.share(context, uris, context.getString(R.string.app_name))
+                            ShareFiles.share(context, uris, appName)
                         }
                     }
                 },

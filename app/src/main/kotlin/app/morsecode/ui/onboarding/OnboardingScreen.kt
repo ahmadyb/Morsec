@@ -26,7 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
@@ -100,7 +99,6 @@ public fun OnboardingScreen(
     viewModel: OnboardingViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     val colors = MorseTheme.colors
     val metrics = MorseTheme.metrics
 
@@ -113,6 +111,10 @@ public fun OnboardingScreen(
 
     val slide = slides[state.slide.coerceIn(0, slides.lastIndex)]
     val gradient = colors.onboardingBadgeGradients[state.slide.coerceIn(0, slides.lastIndex)]
+    // The slide title is a resource id, so it is resolved here in composition;
+    // the semantics block below is not a composable scope and must not read
+    // resources through LocalContext (lint: LocalContextGetResourceValueCall).
+    val slideTitle = stringResource(slide.titleRes)
 
     MorseScreen {
         Column(
@@ -135,9 +137,7 @@ public fun OnboardingScreen(
                         brush = Brush.linearGradient(listOf(gradient.first, gradient.second)),
                         shape = RoundedCornerShape(metrics.onboardingBadgeRadius),
                     )
-                    .semantics {
-                        contentDescription = context.getString(slide.titleRes)
-                    },
+                    .semantics { contentDescription = slideTitle },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(

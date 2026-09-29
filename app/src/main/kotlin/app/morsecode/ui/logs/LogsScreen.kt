@@ -61,6 +61,9 @@ public fun LogsScreen(
     val metrics = MorseTheme.metrics
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Read in composition, not from LocalContext in the click lambda (see
+    // CrashesScreen): lint rejects context.getString inside a composable.
+    val sharedSubject = stringResource(R.string.logs_shared_subject)
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
     MorseTabScaffold(selected = MorseDestination.SETTINGS, onNavigate = onNavigate) {
@@ -102,7 +105,7 @@ public fun LogsScreen(
                         if (uri == null) {
                             Toast.makeText(context, R.string.error_export_failed, Toast.LENGTH_SHORT).show()
                         } else {
-                            Exports.shareUri(context, uri, context.getString(R.string.logs_shared_subject))
+                            Exports.shareUri(context, uri, sharedSubject)
                         }
                     }
                 },

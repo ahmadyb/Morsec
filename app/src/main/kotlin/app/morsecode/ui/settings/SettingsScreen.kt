@@ -81,7 +81,10 @@ public fun SettingsScreen(
     ) { viewModel.refreshBatteryState() }
 
     val prefs = state.settings
-    val deviceName = prefs.deviceName?.takeIf { it.isNotBlank() } ?: context.getString(R.string.app_name)
+    // Fallback device name resolved in composition, not via LocalContext
+    // (lint: LocalContextGetResourceValueCall).
+    val appName = stringResource(R.string.app_name)
+    val deviceName = prefs.deviceName?.takeIf { it.isNotBlank() } ?: appName
 
     MorseTabScaffold(selected = MorseDestination.SETTINGS, onNavigate = onNavigate) {
         MorseScreenHeader(title = stringResource(R.string.settings_title))
