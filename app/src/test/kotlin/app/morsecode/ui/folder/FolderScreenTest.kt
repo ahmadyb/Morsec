@@ -2,11 +2,12 @@ package app.morsecode.ui.folder
 
 import android.app.Application
 import android.content.Context
+import androidx.activity.ComponentActivity
 import androidx.annotation.StringRes
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -30,27 +31,29 @@ import app.morsecode.navigation.Routes
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadows.ShadowLooper
 import org.robolectric.shadows.ShadowToast
 
 /**
  * The internal folder browser, rendered for real on the JVM.
  *
  * The view model is constructed with a fake repository over one granted SAF tree,
- * so what is asserted is the screen a user would see: the breadcrumb under the
- * sticky header, the folder's real rows, no upward-arrow control, descent into a
- * subfolder, breadcrumb navigation, selection, and a typed path that is only
- * honoured when it lands inside the grant.
+ * so what is asserted is the screen a user would see and the levels it walks
+ * through: the breadcrumb under the sticky header, the folder's real rows, no
+ * upward-arrow control, descent into a subfolder, breadcrumb navigation, the
+ * grant's ceiling, both ways of going back, selection, and a typed path that is
+ * only honoured when it lands inside the grant.
  *
  * Robolectric runs the app module's own manifest, so the Hilt application is
  * replaced with a plain one — nothing here needs injection, and the point of the
- * test is the screen, not the graph.
+ * test is the screen, not the graph. The activity rule is what makes the system
+ * back gesture reachable: the browser turns it into "up one level".
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -58,19 +61,20 @@ import org.robolectric.shadows.ShadowToast
 class FolderScreenTest {
 
     @get:Rule
-    val composeTestRule = createComposeRule()
+    val composeTestRule = createAndroidComposeRule<ComponentActivity>()
 
     private val context: Context = ApplicationProvider.getApplicationContext()
 
     private val authority = "com.android.externalstorage.documents"
+
+    /** The grant: everything the browser may open is at or below this level. */
     private val tree = "content://$authority/tree/primary%3ADownload"
     private val rootLabel = "Internal storage"
 
-    /** Levels this fake grant really has, so a typed path can be checked. */
-    private val marchUri = level("primary:Download/2026/March")
+    /** Levels this fake grant really has, so a typed path can be checked against them. */
     private val yearUri = level("primary:Download/2026")
+    private val marchUri = level("primary:Download/2026/March")
 
-    private val opened = mutableListOf<String>()
     private var backPresses = 0
 
     private fun string(@StringRes id: Int) = context.getString(id)
@@ -104,22 +108,35 @@ class FolderScreenTest {
         fileItem("photo.jpg", 1_048_576L, "primary:Download/photo.jpg"),
     )
 
+    private val yearChildren = listOf(
+        folderItem("March", "primary:Download/2026/March"),
+        fileItem("report.pdf", 4_096L, "primary:Download/2026/report.pdf"),
+    )
+
+    private val marchChildren = listOf(
+        fileItem("signed.zip", 8_192L, "primary:Download/2026/March/signed.zip"),
+    )
+
     /**
      * Shows the browser for [tree]. Everything the platform would answer with is
-     * supplied up front, so the first frame is already the loaded one.
+     * supplied up front, so a level is either readable or it is not — nothing here
+     * stands in for work the storage layer has not done.
      */
     private fun showFolder(
-        children: List<MediaItem> = downloadChildren,
+        children: Map<String, List<MediaItem>> = mapOf(
+            tree to downloadChildren,
+            yearUri to yearChildren,
+            marchUri to marchChildren,
+        ),
         folders: Map<String, MediaItem?> = mapOf(
             tree to folderItem("Download", "primary:Download"),
             yearUri to folderItem("2026", "primary:Download/2026"),
             marchUri to folderItem("March", "primary:Download/2026/March"),
         ),
     ) {
-        opened.clear()
         backPresses = 0
         val viewModel = FolderViewModel(
-            media = FakeMediaRepository(children = mapOf(tree to children), folders = folders),
+            media = FakeMediaRepository(children = children, folders = folders),
             formatters = MorseFormatters.forDefaultLocale(),
             savedStateHandle = SavedStateHandle(mapOf(Routes.FOLDER_ARG to tree)),
         )
@@ -128,12 +145,36 @@ class FolderScreenTest {
                 FolderScreen(
                     onBack = { backPresses += 1 },
                     onNavigate = { _: MorseDestination -> },
-                    onOpenFolder = { opened += it },
                     viewModel = viewModel,
                 )
             }
         }
+        settle()
+    }
+
+    /** Runs whatever the view model posted to the main looper, then the frame it causes. */
+    private fun settle() {
+        ShadowLooper.idleMainLooper()
         composeTestRule.waitForIdle()
+        ShadowLooper.idleMainLooper()
+        composeTestRule.waitForIdle()
+    }
+
+    /** The granted level: its own rows, and a breadcrumb that ends at it. */
+    private fun assertAtDownload() {
+        composeTestRule.onNodeWithText("notes.txt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("photo.jpg").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("2026").assertCountEquals(1)
+    }
+
+    private fun assertAtYear() {
+        composeTestRule.onNodeWithText("report.pdf").assertIsDisplayed()
+        // "2026" is now the header's title and the breadcrumb's current level.
+        composeTestRule.onAllNodesWithText("2026").assertCountEquals(2)
+    }
+
+    private fun assertAtMarch() {
+        composeTestRule.onNodeWithText("signed.zip").assertIsDisplayed()
     }
 
     @Test
@@ -158,13 +199,14 @@ class FolderScreenTest {
     }
 
     @Test
-    fun `tapping a subfolder opens that level`() {
+    fun `tapping a subfolder shows that level`() {
         showFolder()
 
         composeTestRule.onNodeWithText("2026").performClick()
-        composeTestRule.waitForIdle()
+        settle()
 
-        assertEquals(listOf(yearUri), opened)
+        assertAtYear()
+        composeTestRule.onNodeWithText("signed.zip").assertDoesNotExist()
     }
 
     @Test
@@ -172,31 +214,86 @@ class FolderScreenTest {
         showFolder()
 
         composeTestRule.onNodeWithText("notes.txt").performClick()
-        composeTestRule.waitForIdle()
+        settle()
 
-        assertTrue("a file must not be opened as a folder: $opened", opened.isEmpty())
         assertEquals(string(R.string.history_open_failed), ShadowToast.getTextOfLatestToast())
+        assertAtDownload()
     }
 
     @Test
-    fun `tapping a breadcrumb level opens that level`() {
+    fun `tapping a breadcrumb level shows that level`() {
+        showFolder()
+        composeTestRule.onNodeWithText("2026").performClick()
+        settle()
+        assertAtYear()
+
+        composeTestRule.onNodeWithText("Download").performClick()
+        settle()
+
+        assertAtDownload()
+        composeTestRule.onNodeWithText("report.pdf").assertDoesNotExist()
+    }
+
+    @Test
+    fun `a level above the grant is shown but is not a target`() {
         showFolder()
 
+        // The volume is part of an honest path, and it is not inside what the user
+        // granted, so tapping it must not move the browser anywhere.
         composeTestRule.onNodeWithText(rootLabel).performClick()
-        composeTestRule.waitForIdle()
+        settle()
 
-        assertEquals(listOf(level("primary:")), opened)
+        assertAtDownload()
+        assertEquals("nothing above the grant may be opened", 0, backPresses)
     }
 
     @Test
-    fun `the back control leaves the browser`() {
+    fun `the back control climbs a level and then leaves the browser`() {
         showFolder()
+        composeTestRule.onNodeWithText("2026").performClick()
+        settle()
+        assertAtYear()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.action_back)).performClick()
-        composeTestRule.waitForIdle()
+        settle()
+        assertAtDownload()
+        assertEquals("a level was still above this one", 0, backPresses)
 
+        composeTestRule.onNodeWithContentDescription(string(R.string.action_back)).performClick()
+        settle()
+        assertEquals("the grant is the ceiling, so back leaves the browser", 1, backPresses)
+    }
+
+    @Test
+    fun `the system back gesture climbs a level before closing`() {
+        showFolder()
+        composeTestRule.onNodeWithText("2026").performClick()
+        settle()
+
+        composeTestRule.activity.onBackPressedDispatcher.onBackPressed()
+        settle()
+        assertAtDownload()
+        assertEquals(0, backPresses)
+
+        composeTestRule.activity.onBackPressedDispatcher.onBackPressed()
+        settle()
         assertEquals(1, backPresses)
-        assertTrue(opened.isEmpty())
+    }
+
+    @Test
+    fun `a selection belongs to the level it was made in`() {
+        showFolder()
+        composeTestRule.onNodeWithContentDescription(string(R.string.files_select)).performClick()
+        settle()
+        composeTestRule.onNodeWithText("notes.txt").performClick()
+        settle()
+        composeTestRule.onNodeWithText("1 selected", substring = true).assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("2026").performClick()
+        settle()
+
+        assertAtYear()
+        composeTestRule.onNodeWithText("selected", substring = true).assertDoesNotExist()
     }
 
     @Test
@@ -204,9 +301,9 @@ class FolderScreenTest {
         showFolder()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.files_select)).performClick()
-        composeTestRule.waitForIdle()
+        settle()
         composeTestRule.onNodeWithText("notes.txt").performClick()
-        composeTestRule.waitForIdle()
+        settle()
 
         composeTestRule.onNodeWithText("1 selected", substring = true).assertIsDisplayed()
         composeTestRule.onNodeWithText(string(R.string.action_share)).assertIsDisplayed()
@@ -218,15 +315,15 @@ class FolderScreenTest {
     fun `sending a selection stays gated until the transfer engine exists`() {
         showFolder()
         composeTestRule.onNodeWithContentDescription(string(R.string.files_select)).performClick()
-        composeTestRule.waitForIdle()
+        settle()
         composeTestRule.onNodeWithText("notes.txt").performClick()
-        composeTestRule.waitForIdle()
+        settle()
 
         composeTestRule.onNodeWithText(string(R.string.action_send)).performClick()
-        composeTestRule.waitForIdle()
+        settle()
 
         composeTestRule.onNodeWithText(string(R.string.gated_title)).assertIsDisplayed()
-        assertTrue("nothing may be sent in this milestone: $opened", opened.isEmpty())
+        assertAtDownload()
     }
 
     @Test
@@ -234,11 +331,11 @@ class FolderScreenTest {
         showFolder()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.folder_select_all)).performClick()
-        composeTestRule.waitForIdle()
+        settle()
         composeTestRule.onNodeWithText("3 selected", substring = true).assertIsDisplayed()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.folder_select_all)).performClick()
-        composeTestRule.waitForIdle()
+        settle()
         composeTestRule.onNodeWithText("selected", substring = true).assertDoesNotExist()
     }
 
@@ -247,13 +344,9 @@ class FolderScreenTest {
         showFolder()
         openPathEditor()
 
-        composeTestRule.onNode(hasSetTextAction())
-            .performTextClearance()
-            .performTextInput("2026/March")
-        composeTestRule.onNodeWithText(string(R.string.folder_open)).performClick()
-        composeTestRule.waitForIdle()
+        typePath("2026/March")
 
-        assertEquals(listOf(marchUri), opened)
+        assertAtMarch()
     }
 
     @Test
@@ -261,14 +354,10 @@ class FolderScreenTest {
         showFolder()
         openPathEditor()
 
-        composeTestRule.onNode(hasSetTextAction())
-            .performTextClearance()
-            .performTextInput("primary:Pictures")
-        composeTestRule.onNodeWithText(string(R.string.folder_open)).performClick()
-        composeTestRule.waitForIdle()
+        typePath("primary:Pictures")
 
-        assertTrue("the grant is the ceiling: $opened", opened.isEmpty())
         assertEquals(string(R.string.folder_path_outside), ShadowToast.getTextOfLatestToast())
+        assertAtDownload()
     }
 
     @Test
@@ -276,14 +365,10 @@ class FolderScreenTest {
         showFolder()
         openPathEditor()
 
-        composeTestRule.onNode(hasSetTextAction())
-            .performTextClearance()
-            .performTextInput("Nowhere")
-        composeTestRule.onNodeWithText(string(R.string.folder_open)).performClick()
-        composeTestRule.waitForIdle()
+        typePath("Nowhere")
 
-        assertTrue(opened.isEmpty())
         assertEquals(string(R.string.folder_path_not_found), ShadowToast.getTextOfLatestToast())
+        assertAtDownload()
     }
 
     @Test
@@ -292,18 +377,14 @@ class FolderScreenTest {
         openPathEditor()
 
         // What "Copy path" puts on the clipboard is what the editor accepts.
-        composeTestRule.onNode(hasSetTextAction())
-            .performTextClearance()
-            .performTextInput("$rootLabel/Download/2026")
-        composeTestRule.onNodeWithText(string(R.string.folder_open)).performClick()
-        composeTestRule.waitForIdle()
+        typePath("$rootLabel/Download/2026")
 
-        assertEquals(listOf(yearUri), opened)
+        assertAtYear()
     }
 
     @Test
     fun `a folder that can no longer be read says so instead of looking empty`() {
-        showFolder(children = emptyList(), folders = emptyMap())
+        showFolder(children = emptyMap(), folders = emptyMap())
 
         composeTestRule.onNodeWithText(string(R.string.folder_unavailable_title)).assertIsDisplayed()
         composeTestRule.onNodeWithText(string(R.string.folder_unavailable)).assertIsDisplayed()
@@ -312,7 +393,7 @@ class FolderScreenTest {
 
     @Test
     fun `an empty folder says it is empty`() {
-        showFolder(children = emptyList())
+        showFolder(children = mapOf(tree to emptyList()))
 
         composeTestRule.onNodeWithText(string(R.string.folder_empty_title)).assertIsDisplayed()
         composeTestRule.onNodeWithText(string(R.string.folder_unavailable_title)).assertDoesNotExist()
@@ -320,10 +401,20 @@ class FolderScreenTest {
 
     private fun openPathEditor() {
         composeTestRule.onNodeWithContentDescription(string(R.string.folder_edit_path)).performClick()
-        composeTestRule.waitForIdle()
+        settle()
         composeTestRule.onNodeWithText(string(R.string.folder_edit_path_title)).assertIsDisplayed()
     }
 
+    /** Types into the path field and presses Open. */
+    private fun typePath(path: String) {
+        val field = composeTestRule.onNode(hasSetTextAction())
+        // Cleared and typed as two statements: the editor opens showing the level
+        // the user is standing in, and what is typed replaces it.
+        field.performTextClearance()
+        field.performTextInput(path)
+        composeTestRule.onNodeWithText(string(R.string.folder_open)).performClick()
+        settle()
+    }
 }
 
 /**

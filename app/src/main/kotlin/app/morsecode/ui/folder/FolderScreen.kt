@@ -3,6 +3,7 @@ package app.morsecode.ui.folder
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -53,9 +54,12 @@ import kotlinx.coroutines.launch
  *
  * The header stays put, the breadcrumb sits directly below it and never scrolls
  * away with the rows, and there is no upward-arrow control — every level of the
- * path is a target instead. Going down pushes a destination, so the system back
- * gesture walks the path out one level at a time and each level keeps its own
- * scroll position and selection.
+ * path is a target instead. Levels are walked in place, so back means the same
+ * thing whichever way it is triggered: the header chevron and the system gesture
+ * both climb one level, and both leave the browser once the granted level is
+ * reached, because a SAF grant does not cover anything above it. For the same
+ * reason the breadcrumb shows the levels above the grant without making them
+ * targets.
  *
  * The path can be copied and pasted back. Editing it is offered because it is
  * genuinely useful in a deep tree, and it is safe because [FolderViewModel] only
@@ -66,7 +70,6 @@ import kotlinx.coroutines.launch
 public fun FolderScreen(
     onBack: () -> Unit,
     onNavigate: (MorseDestination) -> Unit,
-    onOpenFolder: (String) -> Unit,
     viewModel: FolderViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -76,6 +79,12 @@ public fun FolderScreen(
     val gate = rememberFeatureGate()
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    // Back inside the browser climbs a level; back at the granted level leaves it.
+    BackHandler { if (!viewModel.goUp()) onBack() }
+
+    // A scroll position belongs to the rows it was for, so each level starts at its top.
+    LaunchedEffect(state.uri) { listState.scrollToItem(0) }
 
     // Resolved in composition: the click lambdas below must not read resources
     // through LocalContext, which is what lint's resource-in-lambda check rejects.
@@ -111,7 +120,7 @@ public fun FolderScreen(
                 MorseIconButton(
                     iconRes = MorseIcons.back,
                     contentDescription = stringResource(R.string.action_back),
-                    onClick = onBack,
+                    onClick = { if (!viewModel.goUp()) onBack() },
                 )
             },
             actions = {
@@ -125,7 +134,8 @@ public fun FolderScreen(
 
         MorseCrumb(
             levels = labels.ifEmpty { listOf(title) },
-            onLevelClick = { index -> viewModel.levelUri(index)?.let(onOpenFolder) },
+            onLevelClick = viewModel::openLevelAt,
+            navigableFrom = state.navigableFrom,
             iconDescription = pathLabel,
             currentDescription = stringResource(R.string.folder_current_level),
             modifier = Modifier
@@ -203,7 +213,7 @@ public fun FolderScreen(
                         onClick = {
                             when {
                                 selecting -> viewModel.toggleItem(item.id)
-                                item.isFolder -> item.uriString?.let(onOpenFolder)
+                                item.isFolder -> item.uriString?.let(viewModel::openLevel)
                                 else -> {
                                     if (!ShareFiles.open(context, item)) {
                                         Toast.makeText(
@@ -275,7 +285,7 @@ public fun FolderScreen(
                     MorseButton(
                         text = stringResource(R.string.folder_open),
                         onClick = {
-                            scope.launch { viewModel.submitPath(rootLabel)?.let(onOpenFolder) }
+                            scope.launch { viewModel.submitPath(rootLabel)?.let(viewModel::openLevel) }
                         },
                         modifier = Modifier.weight(1f),
                     )

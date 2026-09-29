@@ -53,12 +53,15 @@ public fun MorseApp(
         composable(Routes.FILES) {
             FilesScreen(
                 onNavigate = navController::navigateTopLevel,
-                onOpenFolder = { treeUri -> navController.openFolder(treeUri) },
+                onOpenFolder = { treeUri ->
+                    navController.navigateSimple(Routes.folder(Uri.encode(treeUri)))
+                },
             )
         }
 
-        // The internal folder browser: one SAF level per back-stack entry, so the
-        // system back gesture is the way up and each level keeps its own state.
+        // The internal folder browser. One entry holds the whole walk: the browser
+        // changes level in place and turns the back gesture into "up one level"
+        // until the granted folder is reached, so nothing is stacked per level.
         composable(
             route = Routes.FOLDER,
             arguments = listOf(
@@ -68,7 +71,6 @@ public fun MorseApp(
             FolderScreen(
                 onBack = navController::back,
                 onNavigate = navController::navigateTopLevel,
-                onOpenFolder = { treeUri -> navController.openFolder(treeUri) },
             )
         }
 
@@ -117,25 +119,6 @@ private fun NavHostController.navigateTopLevel(destination: MorseDestination) {
         popUpTo(graph.findStartDestination().id) { saveState = true }
         launchSingleTop = true
         restoreState = true
-    }
-}
-
-/**
- * Opens one folder level.
- *
- * A breadcrumb tap finds the level already on the back stack and pops to it,
- * which restores that level's scroll position and selection instead of stacking a
- * second copy of it; descending pushes a new entry.
- */
-private fun NavHostController.openFolder(treeUri: String) {
-    val existing = currentBackStack.value.firstOrNull { entry ->
-        entry.destination.route == Routes.FOLDER &&
-            Routes.decodeFolderArg(entry.arguments?.getString(Routes.FOLDER_ARG)) == treeUri
-    }
-    if (existing != null) {
-        popBackStack(existing.destination.id, inclusive = false)
-    } else {
-        navigate(Routes.folder(Uri.encode(treeUri))) { launchSingleTop = true }
     }
 }
 

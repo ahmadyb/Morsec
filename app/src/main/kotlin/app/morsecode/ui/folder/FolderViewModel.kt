@@ -15,6 +15,7 @@ import app.morsecode.core.storage.saf.PathResolution
 import app.morsecode.core.storage.saf.SafPaths
 import app.morsecode.navigation.Routes
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -36,10 +37,12 @@ public sealed interface FolderMessage {
 }
 
 public data class FolderUiState(
-    /** The SAF uri this back-stack entry shows. */
+    /** The SAF uri of the level being shown. */
     val uri: String = "",
     /** Breadcrumb levels of [uri], volume first. */
     val levels: List<FolderLevel> = emptyList(),
+    /** The first breadcrumb index the platform can open: the granted level's depth. */
+    val navigableFrom: Int = 0,
     /** The folder's real name, empty until the platform answers. */
     val title: String = "",
     val items: List<MediaItem> = emptyList(),
@@ -56,23 +59,39 @@ public data class FolderUiState(
 )
 
 /**
- * One level of the internal folder browser.
+ * The internal folder browser: which level is open, what is really in it, and what
+ * is selected there.
  *
- * Going down pushes a destination rather than mutating this state, so the system
- * back gesture is the way up and every level keeps its own scroll position and
- * selection — the breadcrumb taps into the same back stack. What this view model
- * owns is the level it was created for: reading it, naming it, selecting inside
- * it, and turning a typed path into a uri that is provably inside the grant.
+ * Levels are walked in place rather than by stacking destinations. A SAF grant
+ * reaches *down* from the folder the user picked and never up, so that folder is
+ * the browser's ceiling: descending changes the level, a breadcrumb tap changes it
+ * to that level, and [goUp] climbs one — which is what the system back gesture does
+ * until the ceiling is reached, where leaving the browser is the right answer and
+ * [goUp] says so by returning false.
+ *
+ * Walking in place keeps the whole path in one piece of state, which is what makes
+ * the level savable: it is written to [SavedStateHandle] as it moves, so a browser
+ * restored after process death comes back to the level being read instead of the
+ * one it started at. Selection belongs to the level being shown, so a level change
+ * starts from nothing selected.
  */
 @HiltViewModel
 public class FolderViewModel @Inject constructor(
     private val media: MediaRepository,
     private val formatters: MorseFormatters,
-    savedStateHandle: SavedStateHandle,
+    private val savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
 
-    /** The level being browsed, as the platform granted it. */
-    public val uri: String = Routes.decodeFolderArg(savedStateHandle.get<String>(Routes.FOLDER_ARG))
+    /** The level the user granted: the ceiling of the browser, and the frame a typed path is read in. */
+    private val grantUri: String = Routes.decodeFolderArg(savedStateHandle.get<String>(Routes.FOLDER_ARG))
+
+    /** Where the granted level sits in a breadcrumb, so levels above it can be told apart. */
+    private val ceiling: Int = levelsOf(grantUri).size - 1
+
+    /** The level being shown, saved as it moves. */
+    private val level = MutableStateFlow(
+        savedStateHandle.get<String>(KEY_LEVEL)?.takeIf { it.isNotEmpty() } ?: grantUri,
+    )
 
     private val folder = MutableStateFlow<MediaItem?>(null)
     private val children = MutableStateFlow<List<MediaItem>?>(null)
@@ -82,30 +101,34 @@ public class FolderViewModel @Inject constructor(
     private val draft = MutableStateFlow("")
     private val message = MutableStateFlow<FolderMessage?>(null)
 
+    private var readJob: Job? = null
+
     public val state: StateFlow<FolderUiState> = combine(
+        level,
         folder,
         children,
         selection,
         selecting,
-    ) { self, kids, selected, isSelecting ->
-        Level(self, kids, selected, isSelecting)
+    ) { shown, self, kids, selected, isSelecting ->
+        Level(shown, self, kids, selected, isSelecting)
     }.combine(combine(editor, draft, message) { open, text, note ->
         Editing(open, text, note)
-    }) { level, editing ->
-        val items = level.children
+    }) { shown, editing ->
+        val items = shown.children
         FolderUiState(
-            uri = uri,
-            levels = SafPaths.levelsOf(SafPaths.documentIdOf(uri).orEmpty()),
-            title = level.folder?.displayName.orEmpty(),
+            uri = shown.uri,
+            levels = levelsOf(shown.uri),
+            navigableFrom = ceiling,
+            title = shown.folder?.displayName.orEmpty(),
             items = items.orEmpty(),
             loading = items == null,
             // An empty child list is only an empty folder if the folder itself
             // still resolves; otherwise the grant is gone.
-            accessible = level.folder != null || !items.isNullOrEmpty(),
-            selection = level.selection,
-            selecting = level.isSelecting,
+            accessible = shown.folder != null || !items.isNullOrEmpty(),
+            selection = shown.selection,
+            selecting = shown.isSelecting,
             selectedBytes = items.orEmpty()
-                .filter { it.id in level.selection }
+                .filter { it.id in shown.selection }
                 .sumOf { it.sizeBytes },
             pathEditorVisible = editing.open,
             pathDraft = editing.text,
@@ -115,30 +138,58 @@ public class FolderViewModel @Inject constructor(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
         initialValue = FolderUiState(
-            uri = uri,
-            levels = SafPaths.levelsOf(SafPaths.documentIdOf(uri).orEmpty()),
+            uri = level.value,
+            levels = levelsOf(level.value),
+            navigableFrom = ceiling,
         ),
     )
 
     init {
-        load()
+        read(level.value)
     }
 
-    private fun load() {
-        viewModelScope.launch {
-            val self = media.folderAt(uri)
-            val kids = media.childrenOf(uri)
-            folder.value = self
-            children.value = kids.applySortOrder(BROWSE_ORDER) { it }
-            if (self == null && kids.isEmpty()) message.value = FolderMessage.Unavailable
-        }
+    /**
+     * Shows [target] — a folder row, a breadcrumb level, or a path that resolved.
+     *
+     * Tapping the level already open is not a navigation, so it is not one.
+     */
+    public fun openLevel(target: String) {
+        if (target.isEmpty() || target == level.value) return
+        read(target)
+        level.value = target
+        savedStateHandle[KEY_LEVEL] = target
     }
 
-    /** The uri of one breadcrumb level, or null if the index is not ours. */
+    /** Shows the breadcrumb level at [index], or nothing when the grant cannot reach it. */
+    public fun openLevelAt(index: Int) {
+        levelUri(index)?.let(::openLevel)
+    }
+
+    /**
+     * The uri of one breadcrumb level, or null when the platform cannot open it.
+     *
+     * Levels above the granted folder are shown for orientation but are not
+     * targets: the grant does not cover them, so opening one would be a dead end.
+     */
     public fun levelUri(index: Int): String? {
-        val levels = SafPaths.levelsOf(SafPaths.documentIdOf(uri).orEmpty())
-        val level = levels.getOrNull(index) ?: return null
-        return SafPaths.uriFor(uri, level.documentId)
+        if (index < ceiling) return null
+        val target = levelsOf(level.value).getOrNull(index) ?: return null
+        return SafPaths.uriFor(level.value, target.documentId)
+    }
+
+    /**
+     * Climbs one level, which is what the back gesture means inside the browser.
+     *
+     * @return false at the granted level, where the caller should leave the
+     *   browser instead of pretending there is something above it.
+     */
+    public fun goUp(): Boolean {
+        val levels = levelsOf(level.value)
+        val parent = levels.getOrNull(levels.size - 2) ?: return false
+        if (levels.size - 2 < ceiling) return false
+        val target = SafPaths.uriFor(level.value, parent.documentId) ?: return false
+        openLevel(target)
+        return true
     }
 
     public fun toggleSelecting() {
@@ -183,8 +234,7 @@ public class FolderViewModel @Inject constructor(
     public fun openPathEditor(visible: Boolean) {
         editor.value = visible
         if (visible && draft.value.isEmpty()) {
-            val levels = SafPaths.levelsOf(SafPaths.documentIdOf(uri).orEmpty())
-            draft.value = levels.lastOrNull()?.name.orEmpty()
+            draft.value = levelsOf(level.value).lastOrNull()?.name.orEmpty()
         }
     }
 
@@ -197,11 +247,13 @@ public class FolderViewModel @Inject constructor(
      *
      * [rootLabel] is the localised name of the volume level, supplied by the
      * screen because only the UI knows it; a pasted copy of the breadcrumb starts
-     * with it. The result is always inside the grant, and it is checked against
-     * the platform before the browser claims a folder exists.
+     * with it. Paths are read against the grant rather than the level being shown,
+     * which is what makes a pasted path land where it says. The result is always
+     * inside the grant, and it is checked against the platform before the browser
+     * claims a folder exists.
      */
     public suspend fun submitPath(rootLabel: String): String? {
-        val resolution = SafPaths.resolve(draft.value, uri, rootLabel)
+        val resolution = SafPaths.resolve(draft.value, grantUri, rootLabel)
         if (resolution !is PathResolution.Inside) {
             message.value = if (resolution == PathResolution.Outside) {
                 FolderMessage.PathOutsideGrant
@@ -210,7 +262,7 @@ public class FolderViewModel @Inject constructor(
             }
             return null
         }
-        val target = SafPaths.uriFor(uri, resolution.documentId)
+        val target = SafPaths.uriFor(grantUri, resolution.documentId)
         if (target == null || media.folderAt(target) == null) {
             message.value = FolderMessage.PathNotFound
             return null
@@ -223,7 +275,33 @@ public class FolderViewModel @Inject constructor(
         message.value = null
     }
 
+    /** Breadcrumb levels of a uri, volume first. */
+    private fun levelsOf(uri: String): List<FolderLevel> =
+        SafPaths.levelsOf(SafPaths.documentIdOf(uri).orEmpty())
+
+    /** Reads one level, dropping a read that is no longer wanted. */
+    private fun read(uri: String) {
+        readJob?.cancel()
+        // Cleared before the read, not inside it: a level change must never be
+        // composed with the rows of the level that was there before it.
+        folder.value = null
+        children.value = null
+        selection.value = emptySet()
+        selecting.value = false
+        editor.value = false
+        draft.value = ""
+        message.value = null
+        readJob = viewModelScope.launch {
+            val self = media.folderAt(uri)
+            val kids = media.childrenOf(uri)
+            folder.value = self
+            children.value = kids.applySortOrder(BROWSE_ORDER) { it }
+            if (self == null && kids.isEmpty()) message.value = FolderMessage.Unavailable
+        }
+    }
+
     private data class Level(
+        val uri: String,
         val folder: MediaItem?,
         val children: List<MediaItem>?,
         val selection: Set<String>,
@@ -240,5 +318,8 @@ public class FolderViewModel @Inject constructor(
         /** Folders first, then names — the order a file browser is read in. */
         private val BROWSE_ORDER = SortOrder(key = SortKey.NAME, direction = SortDirection.ASC)
         private const val STOP_TIMEOUT_MILLIS = 5_000L
+
+        /** Saved-state key for the level being shown. */
+        private const val KEY_LEVEL = "app.morsecode.folder.level"
     }
 }

@@ -183,9 +183,21 @@ Sticky behaviour follows the reference's structure rather than a scrolling app b
 the crumb are siblings *above* the scrolling list, so the crumb is always below the header, is
 never behind it, and stays put while rows scroll.
 
-There is no upward-arrow control and no `..` row, per §4.3. The breadcrumb is the way up, and
-descending pushes a back-stack entry per level so the system back gesture walks the path out and
-each level keeps its own scroll position and selection.
+There is no upward-arrow control and no `..` row, per §4.3. The breadcrumb is the way up, and the
+browser walks its levels in place: one destination holds the whole walk, the level being shown is
+written to saved state as it moves, and back — the header chevron and the system gesture alike —
+means "up one level" until the granted folder is reached, where it means "leave the browser".
+Walking in place rather than stacking a destination per level is what keeps the path in one piece
+of state, so a restored browser comes back to the level that was being read.
+
+A SAF grant reaches *down* from what the user picked and never up, so the granted folder is the
+browser's ceiling. The breadcrumb still shows the levels above it, because a path without them is
+not honest, but they are not targets: `MorseCrumb` draws them as text rather than as controls. For
+the same reason a typed path is read against the grant, not against the level being shown, which is
+what makes a pasted copy of the path land where it says it does.
+
+Selection belongs to the level it was made in: changing level starts from nothing selected, and
+each level starts at its top, because a scroll position belongs to the rows it was for.
 
 **Copying and editing a path.** §4.3 allows both "only where safe and meaningful". Copy puts the
 visible path (`Internal storage/Download/2026`) on the clipboard. Editing is offered because a deep
