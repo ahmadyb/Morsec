@@ -22,25 +22,31 @@ tasks.register("checkMilestoneHygiene") {
         "TODO(", "TODO:", "FIXME", "XXX", "HACK", "NotImplementedError",
         "coming soon", "not implemented yet",
     )
-    val roots = listOf(
+    val extensions = setOf("kt", "kts", "xml", "ts", "css")
+    // Resolved while the build is configured: the configuration cache forbids
+    // touching the Project object from doLast.
+    val baseDir = layout.projectDirectory.asFile
+    val sourceRoots = listOf(
         "app/src", "core-model/src", "core-design/src", "core-data/src",
         "core-storage/src", "core-transfer/src", "transport-lan/src",
         "transport-nearby/src", "webshare-server/src", "media/src",
-    )
+    ).map { layout.projectDirectory.dir(it).asFile }
     doLast {
         val offenders = mutableListOf<String>()
-        roots.map { rootProject.file(it) }.filter { it.isDirectory }
-            .flatMap { dir -> dir.walkTopDown().filter { f -> f.isFile && f.extension in setOf("kt", "kts", "xml", "ts", "css") } }
+        sourceRoots.filter { it.isDirectory }
+            .flatMap { dir -> dir.walkTopDown().filter { f -> f.isFile && f.extension in extensions } }
             .forEach { f ->
                 f.readLines().forEachIndexed { index, line ->
                     forbidden.firstOrNull { line.contains(it, ignoreCase = true) }?.let { marker ->
-                        offenders += "${f.relativeTo(rootProject)}:${index + 1} contains \"$marker\""
+                        offenders += "${f.relativeTo(baseDir)}:${index + 1} contains \"$marker\""
                     }
                 }
             }
         if (offenders.isNotEmpty()) {
             throw GradleException("Milestone hygiene violations:\n  " + offenders.joinToString("\n  "))
         }
-        logger.lifecycle("Milestone hygiene OK — no forbidden markers in ${roots.size} source roots.")
+        logger.lifecycle(
+            "Milestone hygiene OK — no forbidden markers in ${sourceRoots.size} source roots.",
+        )
     }
 }
