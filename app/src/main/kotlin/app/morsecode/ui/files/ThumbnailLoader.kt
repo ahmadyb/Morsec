@@ -79,7 +79,7 @@ public fun MediaThumbnail(
             null
         } else {
             ThumbnailCache.get("$uriString@$pixels")?.asImageBitmap()
-                ?: loadThumbnail(context, uriString, item.id, pixels)?.also { decoded ->
+                ?: loadThumbnail(context, item, pixels)?.also { decoded ->
                     ThumbnailCache.put("$uriString@$pixels", decoded)
                 }?.asImageBitmap()
         }
@@ -103,20 +103,32 @@ public fun MediaThumbnail(
     }
 }
 
-private suspend fun loadThumbnail(
+/**
+ * One bitmap from the platform's own thumbnail source.
+ *
+ * From API 29 `ContentResolver.loadThumbnail` answers for images, video *and* audio —
+ * for a track it returns the embedded album art, which is what the music player's
+ * artwork is made of. On API 23-28 the MediaStore thumbnail tables hold images and
+ * video only, so a track gets no bitmap there and shows its placeholder instead:
+ * those tables are keyed per table, and asking the image table for an audio row id
+ * could answer with somebody else's picture.
+ */
+internal suspend fun loadThumbnail(
     context: Context,
-    uriString: String,
-    itemId: String,
+    item: MediaItem,
     pixels: Int,
 ): Bitmap? = withContext(Dispatchers.IO) {
+    val uriString = item.uriString ?: return@withContext null
     val uri = runCatching { uriString.toUri() }.getOrNull() ?: return@withContext null
     val resolver = context.contentResolver
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         runCatching {
             resolver.loadThumbnail(uri, android.util.Size(pixels, pixels), null)
         }.getOrNull()
+    } else if (item.isAudio) {
+        null
     } else {
-        legacyThumbnail(resolver, itemId, pixels)
+        legacyThumbnail(resolver, item.id, pixels)
     }
 }
 

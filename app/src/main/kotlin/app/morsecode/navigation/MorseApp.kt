@@ -13,6 +13,7 @@ import app.morsecode.ui.connect.ConnectScreen
 import app.morsecode.ui.crashes.CrashesScreen
 import app.morsecode.ui.doctor.DoctorScreen
 import app.morsecode.ui.files.FilesScreen
+import app.morsecode.ui.music.MusicPlayerScreen
 import app.morsecode.ui.folder.FolderScreen
 import app.morsecode.ui.history.HistoryScreen
 import app.morsecode.ui.help.HelpScreen
@@ -60,6 +61,9 @@ public fun MorseApp(
                 onOpenViewer = { item, sort ->
                     navController.navigateSimple(Routes.viewer(Uri.encode(item.id), sort))
                 },
+                onOpenMusic = { item, sort ->
+                    navController.navigateSimple(Routes.music(Uri.encode(item.id), sort))
+                },
             )
         }
 
@@ -76,6 +80,24 @@ public fun MorseApp(
             ),
         ) {
             ViewerScreen(onBack = navController::back)
+        }
+
+        // The music player: the tapped track inside the queue Files was showing, with
+        // the transport, scrubber and queue of §4.6 above the bottom nav.
+        composable(
+            route = Routes.MUSIC,
+            arguments = listOf(
+                navArgument(Routes.MUSIC_ARG) { type = NavType.StringType },
+                navArgument(Routes.MUSIC_SORT_ARG) {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+            ),
+        ) {
+            MusicPlayerScreen(
+                onBack = navController::back,
+                onNavigate = navController::navigateTopLevel,
+            )
         }
 
         // The internal folder browser. One entry holds the whole walk: the browser

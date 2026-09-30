@@ -141,6 +141,36 @@
     <string name="folder_path_outside">That path is outside the folder you granted</string>
     <string name="folder_path_not_found">No folder matches that path</string>
 
+    <!-- Music player: artwork, transport, scrubber, strip and queue (§4.6) -->
+    <string name="music_now_playing">NOW PLAYING</string>
+    <string name="music_playback_info">About playback in this build</string>
+    <string name="music_play">Play</string>
+    <string name="music_pause">Pause</string>
+    <string name="music_previous">Previous track</string>
+    <string name="music_next">Next track</string>
+    <string name="music_shuffle">Shuffle</string>
+    <string name="music_shuffle_on">Shuffle is on</string>
+    <string name="music_shuffle_off">Shuffle is off</string>
+    <string name="music_repeat">Repeat</string>
+    <string name="music_repeat_all">Repeat the queue</string>
+    <string name="music_repeat_one">Repeat this track</string>
+    <string name="music_repeat_off">Repeat is off</string>
+    <string name="music_seek">Seek position in track</string>
+    <string name="music_position">%1$s of %2$s</string>
+    <string name="music_save">Save</string>
+    <string name="music_saved">Saved</string>
+    <string name="music_liked">Liked</string>
+    <string name="music_not_liked">Not liked</string>
+    <string name="music_queue">Queue</string>
+    <string name="music_queue_jump">Jump to the queue</string>
+    <string name="music_loading">Loading music</string>
+    <string name="music_empty_title">No music to play</string>
+    <string name="music_empty_body">Audio files on this device appear here once media access is granted.</string>
+    <plurals name="music_queue_header">
+        <item quantity="one">Up next · %1$d song</item>
+        <item quantity="other">Up next · %1$d songs</item>
+    </plurals>
+
     <!-- Image viewer -->
     <string name="viewer_position">%1$d of %2$d</string>
     <string name="viewer_hint">‹ swipe to browse ›</string>

@@ -290,3 +290,76 @@ four 44 px circles on `#1A1A1A` with `#DDD` glyphs and a fifth, Send, on `var(--
   like while it is working. The header stays — a viewer with nothing in it still has to be possible
   to leave — and the action row does not, because there is nothing left to act on. For the same
   reason the header draws no empty name and no empty metadata line.
+
+### Music player (§4.6)
+
+The screen is transcribed cell for cell from `SC.music`: a header whose label is the mono
+`NOW PLAYING` (`MorseTextStyles.nowPlayingLabel`, already reserved in milestone 1), the 190 dp
+artwork on an 18 dp radius with 6/22 dp margins, the title at `music.titleSize` over its
+"artist · album" line, `scrub('music','big')` with `margin:16px 0 2px`, elapsed and remaining at
+the two ends of one `.meta` line, the transport with `gap:22px;margin:18px 0 20px` and the 64 dp
+accent play circle with its 30 dp glow, the four-cell strip of `height:56px` cells with 10 px
+labels and hairlines above and below, `.sec` "Up next · N songs", and the `.li` queue rows — all
+of it above `bottomNav('files')`, because a track is opened from Files and belongs to it.
+
+* **One scrubber, in the design system.** The reference's own comment is "one scrubber for every
+  player", so `MorseScrubber` lives in `core-design` with the `big` (5 dp bar) and `dark`
+  (white-at-20% track) variants the video player will need, and the seek arithmetic —
+  fraction ↔ position, clamped at both ends — is `ScrubberMath`, asserted as arithmetic rather
+  than as whichever gesture a test happened to perform. It fills with `progressStart →
+  progressEnd` on `progressTrack` at `progressRadius`, and the knob is
+  `progress.knob` inside a 3 dp ring of accent at 26%, which is the `box-shadow` the reference
+  spreads around it.
+* **The knob appears under the finger, not before it.** `.scrub:hover .knob{opacity:1}` has no
+  answer on a phone, so the knob is drawn while dragging and not otherwise — the same
+  `.scrub.drag .bar>i{transition:none}` rule is honoured by switching the fill's animation off
+  under the finger and under reduced motion.
+* **Two sizes are the transcribed ones, not the CSS ones.** `progress.knob` is 14 dp where the CSS
+  says 13 px, and `progress.scrubberPadding` is 10 dp where `.scrub` says `padding:7px 0`. Both
+  were transcribed in milestone 1 as touch-floor enlargements and are asserted by the token
+  harness, so the player follows the tokens.
+* **There is no clock, and nothing pretends to be one.** The reference advances `S.music.pos` in
+  its ticker; this build has no audio engine, so the position moves only when the user seeks it,
+  and a track ends only when `MusicPlayerViewModel.trackEnded()` is called. That method exists now
+  rather than in milestone 10 because "repeat this track", "repeat the queue" and "stop at the end
+  of the queue" are three different answers and the repeat control would otherwise be a switch
+  that switches nothing; all three are tested. Media3, MediaSession, audio focus and the
+  notification remain milestone 10, and `FeatureArea.MEDIA_PLAYBACK` stays gated until then.
+* **The header's third cell.** The reference ends its header with an overflow button that has no
+  action. This one ends with the app's gate for `MEDIA_PLAYBACK` — the same idiom as the viewer's
+  Send, which says plainly that playback arrives in milestone 10 and that nothing has been
+  simulated in its place — and becomes a spacer of the same size once the gate opens, so the label
+  stays centred either way. A menu with nothing in it would have been the placeholder the product
+  forbids.
+* **The transport and the strip do their jobs.** In the reference, shuffle, previous, next, repeat
+  and all four strip cells are toasts. Here they are state: shuffle and repeat change what next
+  and end-of-track mean, previous and next walk the queue and wrap at both ends, Save and Liked
+  answer one like state, Share hands the file to the platform, and Queue scrolls to the queue.
+* **Save and Liked are one idea drawn twice.** The reference gives both cells a heart and no
+  behaviour; the master prompt has no favourites store. So one per-track state answers both, is
+  restored with the player, and does not outlive it — persisting likes belongs with the milestone
+  that owns saved tracks, not with a screen. The Liked cell carries the accent while the state is
+  on, where the reference hardcodes it on.
+* **Artwork is the platform's or the reference's stand-in.** From API 29 `ContentResolver
+  .loadThumbnail` returns a track's embedded album art, decoded through the same `ThumbnailCache`
+  the Files grid uses. Below that, the MediaStore thumbnail tables hold images and video only —
+  their row ids are per table, so asking the image table for an audio row could answer with
+  somebody else's picture — and a track shows the reference's own gradient tile with its black
+  note. The artwork is decorative to a screen reader: the title and its artist line are the next
+  things on screen and naming the file again would say it twice.
+* **The queue is the list Files was showing.** The route carries the tapped track's id *and* the
+  sort token (`music/{itemId}?sort=name.asc`), so "Up next · 9 songs" counts the nine the user was
+  looking at. The count is a plurals resource: the reference prints "9 songs" from a raw number
+  and would print "1 songs".
+* **Queue rows are tappable; the reference's are inert.** Selecting a row shows that track from
+  its start and deliberately does not begin playing: the transport keeps whatever the user last
+  asked of it. The shown track's row carries the accent title the reference gives it, on
+  `MorseListRow`'s selected wash.
+* **The playing row's tile is the accent, not the gradient.** The reference paints the playing
+  row's 34 px tile with the artwork's amber gradient; that gradient is a stand-in for a picture,
+  and at row size the app's accent says "this is the one" without borrowing artwork that may not
+  exist. Other rows keep `--raised` and `--t3`, as drawn.
+* **A selected list row is not yet announced as selected.** `MorseListRow` draws selection but sets
+  no `SemanticsProperties.Selected`, anywhere in the app. Adding it is a design-system change that
+  belongs with the multi-select work in milestones 3–4 rather than with this screen; the test
+  asserts the row the model selects is the one drawn, and that the shown track is exactly one row.

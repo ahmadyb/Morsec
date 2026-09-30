@@ -105,6 +105,7 @@ public fun FilesScreen(
      * order, so its "3 of 15" is the 3 of 15 the user counted in the grid.
      */
     onOpenViewer: (MediaItem, SortOrder) -> Unit,
+    onOpenMusic: (MediaItem, SortOrder) -> Unit,
     viewModel: FilesViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -190,6 +191,10 @@ public fun FilesScreen(
                     when (val target = mediaOpenFor(item)) {
                         // §4.5: photographs open in the viewer the app draws.
                         is MediaOpen.Viewer -> onOpenViewer(target.item, state.sortOrder)
+
+                        // §4.6: tracks open in the player the app draws, in the
+                        // order this list was showing them.
+                        is MediaOpen.MusicPlayer -> onOpenMusic(target.item, state.sortOrder)
 
                         is MediaOpen.HandOff -> {
                             if (!ShareFiles.open(context, target.item)) {

@@ -54,6 +54,24 @@ public object Routes {
     /** The media id a [VIEWER] destination was opened with. */
     public fun decodeViewerArg(value: String?): String = decodedArg(value)
 
+    /** Argument names for [MUSIC]. */
+    public const val MUSIC_ARG: String = "itemId"
+    public const val MUSIC_SORT_ARG: String = "sort"
+    public const val MUSIC: String = "music/{$MUSIC_ARG}?$MUSIC_SORT_ARG={$MUSIC_SORT_ARG}"
+
+    /**
+     * Route for one track in the music player.
+     *
+     * The same contract as [viewer]: the id says which track was tapped and the sort
+     * token says which order the Music tab was showing, so the player's queue is the
+     * list the user tapped into rather than a second, differently ordered one.
+     */
+    public fun music(encodedItemId: String, sort: SortOrder): String =
+        "music/$encodedItemId?$MUSIC_SORT_ARG=${sortToken(sort)}"
+
+    /** The media id a [MUSIC] destination was opened with. */
+    public fun decodeMusicArg(value: String?): String = decodedArg(value)
+
     /**
      * Navigation decodes a path argument on the way in, but a restored or
      * deep-linked value can still carry the encoding, so the rule lives here
