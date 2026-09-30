@@ -1,6 +1,7 @@
 package app.morsecode.ui.transfer
 
 import androidx.lifecycle.SavedStateHandle
+import app.morsecode.core.model.MediaKind
 import app.morsecode.core.model.MorseFormatters
 import app.morsecode.navigation.Routes
 import org.junit.Assert.assertEquals
@@ -182,13 +183,17 @@ class TransferViewModelTest {
             id = "s",
             peer = TransferPeer("r", "Ravi's Redmi", "R", "LAN", "192.168.1.42"),
             outbound = listOf(finished()),
+            inbound = listOf(finished(direction = TransferDirection.INCOMING, id = "done-2")),
         )
 
         val cleared = TransferRules.clearCompleted(onlyDone, TransferDirection.OUTGOING)
         val state = transferUiStateTo(cleared, TransferLayout.SENDING_FIRST, formatters)
 
         assertTrue("the section is empty, which is what the screen says next", state.outbound.isEmpty())
-        assertTrue("and its neighbour is untouched", state.inbound.isNotEmpty())
+        assertTrue(
+            "and its neighbour still has the file that arrived",
+            state.inbound.any { it.item.state.isComplete },
+        )
     }
 
     @Test
@@ -257,12 +262,15 @@ class TransferViewModelTest {
         assertFalse(stillDone.item.actions.any)
     }
 
-    private fun finished() = TransferItem(
-        id = "done-1",
+    private fun finished(
+        direction: TransferDirection = TransferDirection.OUTGOING,
+        id: String = "done-1",
+    ) = TransferItem(
+        id = id,
         sessionId = "s",
-        direction = TransferDirection.OUTGOING,
+        direction = direction,
         fileName = "notes_backup.zip",
-        kind = app.morsecode.core.model.MediaKind.ZIP,
+        kind = MediaKind.ZIP,
         totalBytes = 18_200_000L,
         transferredBytes = 18_200_000L,
         state = TransferState.DONE,

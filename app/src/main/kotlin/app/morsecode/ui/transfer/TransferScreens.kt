@@ -170,9 +170,11 @@ internal fun DuplexTransferScreen(
 
             spec.sections.forEachIndexed { index, section ->
                 val rows = state.items(section.direction)
-                val sectionLabel = stringResource(section.labelRes)
 
                 item(key = "section-${section.direction.id}") {
+                    // Read inside the item rather than above it: this lambda composes and the
+                    // loop around it does not, so a resource read belongs in here.
+                    val sectionLabel = stringResource(section.labelRes)
                     SectionHeader(
                         text = pluralStringResource(
                             R.plurals.transfer_section_files,

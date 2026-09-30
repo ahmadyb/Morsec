@@ -21,7 +21,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.test.core.app.ApplicationProvider
 import app.morsecode.R
-import app.morsecode.core.design.theme.ThemeMode
+import app.morsecode.core.model.ThemeMode
 import app.morsecode.core.design.theme.MorseTheme
 import app.morsecode.core.model.MediaKind
 import app.morsecode.core.model.MorseFormatters
@@ -113,7 +113,13 @@ class TransferScreensTest {
 
     @Test
     fun `a queued row offers cancel alone and says it is waiting`() {
-        showStateless(session(outbound = listOf(row("a", TransferState.QUEUED, kind = MediaKind.DOC))))
+        showStateless(
+            session(
+                outbound = listOf(
+                    row("a", TransferState.QUEUED, kind = MediaKind.DOC, totalBytes = 4_100_000L),
+                ),
+            ),
+        )
 
         assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = true, retry = false)
         composeTestRule.onNodeWithText("4.1 MB · waiting").assertIsDisplayed()
@@ -135,44 +141,73 @@ class TransferScreensTest {
         showStateless(
             session(
                 outbound = listOf(
-                    row("a", TransferState.DONE, kind = MediaKind.APK, totalBytes = 100L, transferredBytes = 100L)
-                        .copy(verification = VerificationOutcome.VERIFIED),
+                    row(
+                        "a",
+                        TransferState.DONE,
+                        kind = MediaKind.APK,
+                        totalBytes = 1_800_000L,
+                        transferredBytes = 1_800_000L,
+                    ).copy(verification = VerificationOutcome.VERIFIED),
                 ),
             ),
         )
 
         assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = false)
-        composeTestRule.onNodeWithText("100 B · CRC verified").assertIsDisplayed()
+        composeTestRule.onNodeWithText("1.8 MB · CRC verified").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.APK.id).assertIsDisplayed()
     }
 
     @Test
     fun `a verifying row offers nothing, because verification is not cancellable here`() {
-        showStateless(session(outbound = listOf(row("a", TransferState.VERIFYING, kind = MediaKind.FOLDER, transferredBytes = 100L))))
+        showStateless(
+            session(
+                outbound = listOf(
+                    row("a", TransferState.VERIFYING, kind = MediaKind.FOLDER, totalBytes = 64_000_000L),
+                ),
+            ),
+        )
 
         assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = false)
-        composeTestRule.onNodeWithText("100 B · verifying").assertIsDisplayed()
+        composeTestRule.onNodeWithText("64 MB · verifying").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.FOLDER.id).assertIsDisplayed()
     }
 
     @Test
     fun `a cancelled row offers nothing and says who stopped it`() {
-        showStateless(session(outbound = listOf(row("a", TransferState.CANCELLED, kind = MediaKind.OTHER, transferredBytes = 40L))))
+        showStateless(
+            session(
+                outbound = listOf(
+                    row(
+                        "a",
+                        TransferState.CANCELLED,
+                        kind = MediaKind.OTHER,
+                        totalBytes = 1_800_000L,
+                        transferredBytes = 600_000L,
+                    ),
+                ),
+            ),
+        )
 
         assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = false)
-        composeTestRule.onNodeWithText("40 B / 100 B · cancelled").assertIsDisplayed()
+        composeTestRule.onNodeWithText("600 KB / 1.8 MB · cancelled").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.OTHER.id).assertIsDisplayed()
     }
 
     @Test
     fun `a skipped row offers nothing and says it was skipped`() {
-        showStateless(session(outbound = listOf(row("a", TransferState.SKIPPED, kind = MediaKind.VIDEO))))
+        showStateless(
+            session(
+                outbound = listOf(
+                    row("a", TransferState.SKIPPED, kind = MediaKind.VIDEO, totalBytes = 4_100_000L),
+                ),
+            ),
+        )
 
         assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = false)
-        composeTestRule.onNodeWithText("100 B · skipped").assertIsDisplayed()
+        composeTestRule.onNodeWithText("4.1 MB · skipped").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.VIDEO.id).assertIsDisplayed()
     }
@@ -182,13 +217,17 @@ class TransferScreensTest {
         showStateless(
             session(
                 outbound = listOf(
-                    row("a", TransferState.DONE, totalBytes = 100L, transferredBytes = 100L)
-                        .copy(verification = VerificationOutcome.MISMATCH),
+                    row(
+                        "a",
+                        TransferState.DONE,
+                        totalBytes = 1_800_000L,
+                        transferredBytes = 1_800_000L,
+                    ).copy(verification = VerificationOutcome.MISMATCH),
                 ),
             ),
         )
 
-        composeTestRule.onNodeWithText("100 B · checksum differs").assertIsDisplayed()
+        composeTestRule.onNodeWithText("1.8 MB · checksum differs").assertIsDisplayed()
     }
 
     @Test
@@ -228,10 +267,16 @@ class TransferScreensTest {
 
     @Test
     fun `a row's progress is a range a screen reader can read`() {
-        showStateless(session(outbound = listOf(row("a", TransferState.SENDING, transferredBytes = 50L))))
+        showStateless(
+            session(
+                outbound = listOf(
+                    row("a", TransferState.SENDING, totalBytes = 1_800_000L, transferredBytes = 900_000L),
+                ),
+            ),
+        )
 
         val node = composeTestRule
-            .onNodeWithContentDescription("50 B of 100 B, 50%")
+            .onNodeWithContentDescription("900 KB of 1.8 MB, 50%")
             .fetchSemanticsNode()
 
         assertEquals(0.5f, node.config[SemanticsProperties.ProgressBarRangeInfo].current, 0f)
@@ -272,7 +317,7 @@ class TransferScreensTest {
         composeTestRule.onNodeWithContentDescription(string(R.string.transfer_pause_file, "b.bin")).performClick()
         settle()
 
-        assertEquals(listOf("b"), rowActions)
+        assertEquals("the control reported the row it belongs to", listOf("b.bin"), rowActions)
     }
 
     @Test

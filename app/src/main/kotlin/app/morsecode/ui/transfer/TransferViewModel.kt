@@ -145,9 +145,9 @@ public class TransferViewModel @Inject constructor(
     public fun toggleAll() {
         mutate { current ->
             if (current.allAction.label == TransferAllLabel.RESUME_ALL) {
-                TransferRules.resumeAll(current.session)
+                TransferRules.resumeAll(current)
             } else {
-                TransferRules.pauseAll(current.session)
+                TransferRules.pauseAll(current)
             }
         }
     }
@@ -159,7 +159,7 @@ public class TransferViewModel @Inject constructor(
      * been sent leaves what has been received exactly where it was.
      */
     public fun clearCompleted(direction: TransferDirection) {
-        mutate { current -> TransferRules.clearCompleted(current.session, direction) }
+        mutate { current -> TransferRules.clearCompleted(current, direction) }
     }
 
     /** Ask to end the session. Nothing changes until the question is answered. */
@@ -184,15 +184,15 @@ public class TransferViewModel @Inject constructor(
      */
     public fun confirmEnd() {
         endConfirmationVisible.value = false
-        mutate { current -> TransferRules.end(current.session) }
+        mutate { current -> TransferRules.end(current) }
     }
 
     private fun row(id: String, action: TransferRowAction) {
-        mutate { current -> TransferRules.apply(current.session, id, action) }
+        mutate { current -> TransferRules.apply(current, id, action) }
     }
 
     /** Applies one transition to the session and re-publishes what the views draw. */
-    private fun mutate(transition: (TransferUiState) -> TransferSession) {
+    private fun mutate(transition: (TransferSession) -> TransferSession) {
         session.update(transition)
         publishCurrent()
     }
