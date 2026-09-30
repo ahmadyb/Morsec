@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -115,7 +116,7 @@ public fun MorseScrubber(
     // The fraction under the finger, or null when the finger is up: while dragging,
     // the bar follows the finger rather than the position the player reported.
     var dragging by remember { mutableStateOf<Float?>(null) }
-    var trackWidth by remember { mutableStateOf(0) }
+    var trackWidth by remember { mutableIntStateOf(0) }
     val seekTo by rememberUpdatedState(onSeek)
 
     val fraction = dragging ?: ScrubberMath.fraction(positionMillis, durationMillis)
