@@ -171,6 +171,33 @@
         <item quantity="other">Up next · %1$d songs</item>
     </plurals>
 
+    <!-- Video player (§4.7). The two mute toasts are the reference's own wording. Its
+         nudge toast also printed the time it landed on; here the nudge says what it did
+         and the elapsed time above the scrubber is the answer, because that label moves
+         on the same rule the toast would have quoted. -->
+    <string name="video_play">Play</string>
+    <string name="video_pause">Pause</string>
+    <string name="video_playback_info">About playback in this build</string>
+    <string name="video_seek">Seek position in clip</string>
+    <string name="video_position">%1$s of %2$s</string>
+    <string name="video_skip_back">Back 10 seconds</string>
+    <string name="video_skip_forward">Forward 10 seconds</string>
+    <string name="video_volume">Volume</string>
+    <string name="video_mute">Mute</string>
+    <string name="video_unmute">Unmute</string>
+    <string name="video_volume_muted">mute</string>
+    <string name="video_muted_done">Muted — level remembered</string>
+    <string name="video_unmuted_done">Unmuted · %1$s</string>
+    <string name="video_subtitles_unavailable">Subtitles · none in this file</string>
+    <string name="video_subtitles_off">Subtitles · off</string>
+    <string name="video_subtitles_on">Subtitles · on</string>
+    <string name="video_no_subtitles">No subtitles in this file</string>
+    <string name="video_fullscreen">Fullscreen</string>
+    <string name="video_exit_fullscreen">Exit fullscreen</string>
+    <string name="video_loading">Loading video</string>
+    <string name="video_empty_title">No video to play</string>
+    <string name="video_empty_body">The clip that was opened is not on this device any more.</string>
+
     <!-- Image viewer -->
     <string name="viewer_position">%1$d of %2$d</string>
     <string name="viewer_hint">‹ swipe to browse ›</string>
