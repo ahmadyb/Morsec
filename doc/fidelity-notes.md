@@ -438,3 +438,81 @@ and nowhere else; the two colours it runs between are tokens.
   `mutableStateOf` boxes it on every size change. It is held in `mutableIntStateOf` now, so the count is back
   to the 41 the viewer left behind and the video player's own code adds none — the volume metrics and the
   glow token that this group added are read through `MockupTokens` like every other token.
+
+### Duplex transfer screens (§4.8)
+
+The reference writes `SC.sending` and `SC.receiving` as two blocks that call the same helpers —
+`peerCard`, `txRow`, `summaryCard`, `actionBar`, `chipFor`, `rowMeta`. The app does the same thing one
+level up rather than two: `DuplexTransferScreen` is stateless and draws whatever session it is handed, and
+`TransferScreen` composes it from the view model using the layout the route named (`session/sending`,
+`session/receiving`). The two views differ only in `TransferLayout`: which section leads, which words its
+headings use, and which directions own a batch line. A row, a control, a chip and the bar are the same code
+in both, so a fix lands in both, and the stateless half is what lets a test hand it one row in one state —
+the whole per-file matrix — without a fixture or a scrolling list in the way.
+
+The differences from the reference, each a decision:
+
+* **Cancel and failure are two different things, and the reference conflates them.** Its cancel and End
+  paths set a row's status to `failed`, so a file the user stopped reads FAILED and offers Retry. The master
+  prompt treats them separately, and the matrix's rule for a stopped row is that it offers nothing
+  inappropriate. `CANCELLED` therefore sits beside `FAILED`: no controls, a neutral chip rather than the
+  failed chip's red, and `TransferRules.end` maps unfinished rows to it while leaving a row that failed
+  earlier still failed — the user ended a session; they did not retry a broken file.
+* **Three states the reference only gestures at.** It prints "Verify" on a row and counts "skipped" in its
+  summary text, but has no state behind either. §4.8's matrix names VERIFYING, CANCELLED and SKIPPED, so
+  each has its own facts: a verifying row states the bytes reached (the file is all there, the check is
+  not), a skipped one states the total (the file was never wanted), a cancelled one states where it was
+  abandoned. Verification is not cancellable in this model, so a verifying row offers no control rather
+  than a wrong one, and a test pins that.
+* **A delivered file's line reports what the checksum said rather than asserting it.** Done plus VERIFIED
+  reads "CRC verified"; a done row whose check did not match reads "checksum differs" — that the file
+  arrived is one fact and what the checksum made of it is another, and both matter to someone deciding
+  whether to open it. Retrying a failed file clears the outcome, so a second attempt never inherits the
+  first one's verdict.
+* **No Queue sheet.** `SC.queue` sits in the reference with its "Send now" ordering and its own screen, and
+  nothing in the accepted behaviour opens it: the master prompt keeps queue management inside these two
+  views. There is no queue route and no queue control, and two tests say so — one beside the routes, one on
+  the screen — because the cheapest way to keep a dormant screen dormant is to make its absence fail a test
+  when someone wires it back.
+* **Background, not Minimise.** The reference's floating-window wording ("Minimised") describes a behaviour
+  this app does not have. The bar's third action is Background, and pressing it opens the
+  `BACKGROUND_SERVICE` gate naming milestone 8: keeping a session alive is a foreground service's job and
+  this build has none, so the control says what is missing instead of shrinking a window that does not
+  exist. Add files opens the same kind of gate for `TRANSFER_ENGINE`, and the tests press both and assert
+  the dialog rather than a counter — a fixture row must never look like a transfer that started.
+* **Pause all is one control, over the whole session, and it is not in a heading.** The reference's bar
+  pauses the list it belongs to. The master prompt asks for a single Pause all / Resume all whose effect is
+  "change only eligible active rows of the displayed session", so the bar's cell drives
+  `TransferRules.pauseAll`/`resumeAll` across both directions, skips rows the engine says cannot be held,
+  and never touches queued, held, finished, failed or verifying rows. The cell reads Resume all exactly when
+  something is held and nothing needs pausing, keeps its place when disabled, and the label is the only
+  thing about it that changes. Two tests count the label: one above, one below.
+* **Clear completed is a heading action, and it is section-scoped.** Each section may carry one clear icon
+  aligned with its own heading; it removes that section's delivered rows and leaves the other direction
+  alone, asserted both ways round — clearing the outbound section keeps the inbound delivered file and the
+  reverse. When there was nothing to clear the action says so, because a control that silently does nothing
+  reads as broken.
+* **The average speed is the average of what is moving, or it is absent.** The reference's summary prints
+  its sample figure even when nothing in the sample is moving. `TransferSummary.hasAverageSpeed` is false
+  then and the card prints its counts alone; when rows are moving, the mean is over the moving rows, so a
+  held file does not drag the figure down. Nothing on either screen counts up: the fixtures are
+  deterministic, and a test idles the looper and reads the same bytes, speeds and labels twice — which is
+  the only form of "no simulated engine" a test can actually check.
+* **The direction arrow is dropped before the file's name is.** The reference puts a direction arrow before
+  the kind icon at every width. Below the row's width need the arrow goes, because which way a file is going
+  is the section's job and the screen has exactly two sections; the kind icon, the name, the chip and the
+  controls all stay, asserted at 360 dp. The row's need is ScreenPadding × 2 + directionGlyph 30 +
+  fileIcon 34 + four 12 dp gaps + a 96 dp floor for the name + a 72 dp floor for the chip + four 48 dp
+  controls, which is what the 30 dp token added for the glyph is measured against.
+* **Rows are named for anything that reads them.** Every per-file control carries a content description
+  naming its file ("Pause holiday_2019.mp4"), the progress bar exposes a range and a "48.9 MB of 144 MB,
+  34%" description, and the bottom bar's cells are named by their own words. The one thing deliberately
+  silent is the file-kind glyph: `FileKindIcon` draws with no description because the file's name is
+  announced immediately beside it, and a row that says "Video, holiday_2019.mp4" says the same thing twice.
+  That left the glyph invisible to a test, so the row tags it (`transfer-kind-<kind>`); there is no
+  user-facing text for a file kind anywhere in the app, and inventing seven labels to make one assertion
+  possible would be inventing copy.
+* **Dark and light are smoke-tested, not screenshot-compared.** The repository has no screenshot
+  infrastructure — no Paparazzi, no Roborazzi, no golden images — so theme fidelity is asserted the only way
+  it can be here: both themes render the same rows, chips, controls and bar, from the same `MorseTheme`
+  tokens every other screen uses. This is a gap, recorded as one rather than implied to be covered.
