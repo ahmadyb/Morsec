@@ -98,7 +98,9 @@ class TransferActionsMatrixTest(
 
     @Test
     fun `pause holds the row where it is and stops the speed`() {
-        val moving = item(state = TransferState.SENDING, direction = direction)
+        // The row is in the parameter's state: this test is about what a state permits,
+        // so building it in some other state would be asking a different question.
+        val moving = item(state = state, direction = direction)
         val held = TransferRules.pause(moving)
 
         if (state.isPausable) {
@@ -112,7 +114,7 @@ class TransferActionsMatrixTest(
 
     @Test
     fun `resume returns the row to the state that matches its direction`() {
-        val held = item(state = TransferState.PAUSED, direction = direction)
+        val held = item(state = state, direction = direction)
         val resumed = TransferRules.resume(held)
 
         if (state.isResumable) {
@@ -139,7 +141,7 @@ class TransferActionsMatrixTest(
 
     @Test
     fun `retry restarts from the beginning, which resume is not`() {
-        val failed = item(state = TransferState.FAILED, direction = direction)
+        val failed = item(state = state, direction = direction)
         val retried = TransferRules.retry(failed)
 
         if (state.isRetryable) {

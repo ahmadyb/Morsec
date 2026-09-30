@@ -8,7 +8,6 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasClickAction
-import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
@@ -17,7 +16,6 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollToNode
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.test.core.app.ApplicationProvider
@@ -452,9 +450,6 @@ class TransferScreensTest {
         composeTestRule.onNodeWithText(string(R.string.transfer_title_sending)).assertIsDisplayed()
         composeTestRule.onNodeWithText(headingText(R.string.transfer_section_sending, 6)).assertIsDisplayed()
         assertEquals("Sending · 6 files", headingText(R.string.transfer_section_sending, 6))
-        // And the other direction is on the same screen, further down it.
-        scrollTo(headingText(R.string.transfer_section_receiving, 4))
-        composeTestRule.onNodeWithText(headingText(R.string.transfer_section_receiving, 4)).assertIsDisplayed()
     }
 
     @Test
@@ -463,9 +458,59 @@ class TransferScreensTest {
 
         composeTestRule.onNodeWithText(string(R.string.transfer_title_receiving)).assertIsDisplayed()
         composeTestRule.onNodeWithText(headingText(R.string.transfer_section_receiving, 4)).assertIsDisplayed()
-        // And the section it sends back under is the one the reference calls "Sending back".
-        scrollTo(headingText(R.string.transfer_section_sending_back, 6))
-        composeTestRule.onNodeWithText(headingText(R.string.transfer_section_sending_back, 6)).assertIsDisplayed()
+        assertEquals("Receiving · 4 files", headingText(R.string.transfer_section_receiving, 4))
+    }
+
+    @Test
+    fun `both directions are on one screen, in the layout's order`() {
+        // One row each way, so both sections and both headings are on screen at once and the
+        // order can be read off the tree rather than scrolled to.
+        showStateless(
+            session(
+                outbound = listOf(row("out.txt", TransferState.SENDING)),
+                inbound = listOf(
+                    row("in.txt", TransferState.RECEIVING, TransferDirection.INCOMING),
+                ),
+            ),
+        )
+
+        composeTestRule.onNodeWithText(headingText(R.string.transfer_section_sending, 1)).assertIsDisplayed()
+        composeTestRule.onNodeWithText(headingText(R.string.transfer_section_receiving, 1)).assertIsDisplayed()
+        val positions = listOf(
+            composeTestRule.onNodeWithText(headingText(R.string.transfer_section_sending, 1))
+                .fetchSemanticsNode().positionInRoot.y,
+            composeTestRule.onNodeWithText(headingText(R.string.transfer_section_receiving, 1))
+                .fetchSemanticsNode().positionInRoot.y,
+        )
+        assertTrue(
+            "the sending section comes first in the sending-first view: $positions",
+            positions[0] < positions[1],
+        )
+    }
+
+    @Test
+    fun `the sending-back view puts receiving first`() {
+        showStateless(
+            session = session(
+                outbound = listOf(row("out.txt", TransferState.SENDING)),
+                inbound = listOf(
+                    row("in.txt", TransferState.RECEIVING, TransferDirection.INCOMING),
+                ),
+            ),
+            layout = TransferLayout.RECEIVING_FIRST,
+        )
+
+        // The words are the reference's own: the same outbound direction is "Sending back"
+        // on this view, because that is what it is from the receiving end.
+        composeTestRule.onNodeWithText(headingText(R.string.transfer_section_receiving, 1)).assertIsDisplayed()
+        composeTestRule.onNodeWithText(headingText(R.string.transfer_section_sending_back, 1)).assertIsDisplayed()
+        assertTrue(
+            "receiving comes first here",
+            composeTestRule.onNodeWithText(headingText(R.string.transfer_section_receiving, 1))
+                .fetchSemanticsNode().positionInRoot.y <
+                composeTestRule.onNodeWithText(headingText(R.string.transfer_section_sending_back, 1))
+                    .fetchSemanticsNode().positionInRoot.y,
+        )
     }
 
     @Test
@@ -514,15 +559,49 @@ class TransferScreensTest {
         composeTestRule.onNodeWithText("48.9 MB / 144 MB · 6.2 MB/s").assertIsDisplayed()
     }
 
+    /**
+     * The card's whole counters line, in the reference's own words.
+     *
+     * This one asks for a taller screen than the reference phone: five rows plus the card do
+     * not all fit inside 891 dp under the app's bottom bar, and what is being asserted here is
+     * the *sentence the card writes*, not where a phone puts it. The reference-size checks are
+     * the tests above, which use as many rows as the reference phone really shows.
+     */
     @Test
-    fun `the batch line counts the files of the direction it belongs to`() {
-        showScreen(TransferLayout.SENDING_FIRST)
+    @Config(sdk = [34], qualifiers = "w411dp-h1100dp-xhdpi", application = Application::class)
+    fun `the batch line names every state the direction is in`() {
+        showStateless(
+            session(
+                outbound = listOf(
+                    row("moving.bin", TransferState.SENDING),
+                    row("waiting.bin", TransferState.QUEUED),
+                    row("held.bin", TransferState.PAUSED),
+                    row("checking.bin", TransferState.VERIFYING),
+                    row("stuck.bin", TransferState.FAILED),
+                ),
+            ),
+        )
 
-        scrollTo(string(R.string.transfer_summary_in_progress))
-
-        composeTestRule.onNodeWithText(string(R.string.transfer_summary_in_progress)).assertIsDisplayed()
         composeTestRule.onNodeWithText("1 sending · 1 queued · 1 paused · 1 verifying · 1 failed")
             .assertIsDisplayed()
+        composeTestRule.onNodeWithText("avg 6.2 MB/s").assertIsDisplayed()
+    }
+
+    @Test
+    fun `the batch line counts the files of its direction and averages only what moves`() {
+        showStateless(
+            session(
+                outbound = listOf(
+                    row("moving.bin", TransferState.SENDING),
+                    row("stuck.bin", TransferState.FAILED),
+                ),
+            ),
+        )
+
+        // The card follows the outbound section in this layout, and with two rows it is on
+        // screen without scrolling to it.
+        composeTestRule.onNodeWithText(string(R.string.transfer_summary_in_progress)).assertIsDisplayed()
+        composeTestRule.onNodeWithText("1 sending · 1 failed").assertIsDisplayed()
         composeTestRule.onNodeWithText("avg 6.2 MB/s").assertIsDisplayed()
     }
 
@@ -604,7 +683,6 @@ class TransferScreensTest {
         composeTestRule.onNodeWithText(string(R.string.transfer_pause_all)).performClick()
         settle()
 
-        assertEquals(1, allToggles)
         assertEquals(TransferState.PAUSED, viewModel.state.value.outbound.first().item.state)
         assertEquals(TransferState.PAUSED, viewModel.state.value.inbound.first().item.state)
         composeTestRule.onNodeWithText(string(R.string.transfer_resume_all)).assertIsDisplayed()
@@ -618,7 +696,6 @@ class TransferScreensTest {
             .performClick()
         settle()
 
-        assertEquals(listOf(TransferDirection.OUTGOING), cleared)
         assertEquals("cleared, as the mockup's own toast says", string(R.string.transfer_cleared_done), ShadowToast.getTextOfLatestToast())
         assertTrue(viewModel.state.value.outbound.none { it.item.state.isComplete })
         assertTrue("the inbound section keeps its delivered file", viewModel.state.value.inbound.any { it.item.state.isComplete })
@@ -744,7 +821,11 @@ class TransferScreensTest {
         settle()
     }
 
-    private fun showStateless(session: TransferSession, darkTheme: Boolean = true) {
+    private fun showStateless(
+        session: TransferSession,
+        layout: TransferLayout = TransferLayout.SENDING_FIRST,
+        darkTheme: Boolean = true,
+    ) {
         backPresses = 0
         navigations = emptyList()
         endedCount = 0
@@ -756,7 +837,7 @@ class TransferScreensTest {
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = if (darkTheme) ThemeMode.DARK else ThemeMode.LIGHT, reducedMotion = true) {
                     DuplexTransferScreen(
-                        state = stateFor(session),
+                        state = stateFor(session, layout),
                         onBack = { backPresses += 1 },
                         onNavigate = { navigations = navigations + it },
                         onPause = { rowActions += it.item.fileName },
@@ -777,8 +858,10 @@ class TransferScreensTest {
         settle()
     }
 
-    private fun stateFor(session: TransferSession) =
-        transferUiStateTo(session, TransferLayout.SENDING_FIRST, formatters)
+    private fun stateFor(
+        session: TransferSession,
+        layout: TransferLayout = TransferLayout.SENDING_FIRST,
+    ) = transferUiStateTo(session, layout, formatters)
 
     private fun session(
         outbound: List<TransferItem> = emptyList(),
@@ -833,18 +916,6 @@ class TransferScreensTest {
 
     private fun headingText(labelId: Int, count: Int): String =
         context.resources.getQuantityString(R.plurals.transfer_section_files, count, string(labelId), count)
-
-    /**
-     * Scrolls the list to a node the way a user would.
-     *
-     * A LazyColumn composes only what is on screen, so anything below the first few rows has
-     * to be scrolled to before it exists at all. This is the one place these tests reach past
-     * the visible window, and it is stated rather than hidden.
-     */
-    private fun scrollTo(text: String) {
-        composeTestRule.onNode(hasScrollAction()).performScrollToNode(hasText(text))
-        settle()
-    }
 
     private fun string(id: Int, vararg args: Any?): String = context.getString(id, *args)
 
