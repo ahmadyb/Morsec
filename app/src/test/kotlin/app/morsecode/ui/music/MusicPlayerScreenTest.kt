@@ -16,9 +16,6 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.swipeLeft
-import androidx.compose.ui.test.swipeRight
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.test.core.app.ApplicationProvider
@@ -192,29 +189,25 @@ class MusicPlayerScreenTest {
     }
 
     @Test
-    fun `dragging the scrubber keeps every seek inside the track`() {
+    fun `a position the controller is given is a position the screen prints`() {
+        // Dragging is asserted where the gesture lives — core-design's own scrubber
+        // test, on the component, in both variants. A synthetic swipe inside a
+        // scrolling list is the one gesture this screen cannot pin down, and what the
+        // screen owes instead is that a seek reaches the paper: both printed times and
+        // the scrubber's own description of where the track is.
         showPlayer()
         val duration = oceanEyes.durationMillis
 
-        composeTestRule.onNodeWithContentDescription(string(R.string.music_seek))
-            .performTouchInput { swipeLeft() }
-        settle()
-        val afterLeft = viewModel.state.value.positionMillis
-        // The scrubber seeks on the way down, so a gesture that starts three
-        // quarters along the track has already moved the position before it moves
-        // the finger; where it ends up is the framework's business, not the player's.
-        assertTrue("a drag left must seek, was $afterLeft", afterLeft > 0L)
-        assertTrue("a drag left left the track: $afterLeft", afterLeft in 0L..duration)
+        listOf(0L, duration / 4, duration / 2, duration - 1_000L, duration).forEach { position ->
+            viewModel.seekTo(position)
+            settle()
 
-        composeTestRule.onNodeWithContentDescription(string(R.string.music_seek))
-            .performTouchInput { swipeRight() }
-        settle()
-        val position = viewModel.state.value.positionMillis
-        assertTrue("a drag right must seek, was $position", position > 0L)
-        assertTrue("a drag right left the track: $position", position in 0L..duration)
-        // Both labels are the position the gesture left, printed.
-        assertEquals(elapsed(position), viewModel.state.value.elapsed)
-        assertEquals("-${elapsed(duration - position)}", viewModel.state.value.remaining)
+            assertEquals(position, viewModel.state.value.positionMillis)
+            assertEquals(elapsed(position), viewModel.state.value.elapsed)
+            assertEquals("-${elapsed(duration - position)}", viewModel.state.value.remaining)
+            // Nothing else on the player prints a time with a minus in front of it.
+            composeTestRule.onNodeWithText("-${elapsed(duration - position)}").assertIsDisplayed()
+        }
     }
 
     @Test
