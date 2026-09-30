@@ -33,6 +33,7 @@ import app.morsecode.core.model.SortOrder
 import app.morsecode.core.storage.DeleteOutcome
 import app.morsecode.navigation.Routes
 import app.morsecode.ui.FakeMediaRepository
+import app.morsecode.ui.awaitStartedActivity
 import app.morsecode.ui.TestLifecycleOwner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -40,7 +41,6 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowLooper
@@ -260,7 +260,7 @@ class ViewerScreenTest {
         composeTestRule.onNodeWithContentDescription(string(R.string.viewer_edit)).performClick()
         settle()
 
-        val intent = shadowOf(context.applicationContext as Application).nextStartedActivity
+        val intent = awaitStartedActivity(context) { settle() }
         assertNotNull("an edit intent must reach the platform", intent)
         assertEquals(Intent.ACTION_EDIT, intent!!.action)
         assertEquals(photos[2].uriString, intent.data.toString())

@@ -30,6 +30,7 @@ import app.morsecode.core.model.SortOrder
 import app.morsecode.navigation.MorseDestination
 import app.morsecode.navigation.Routes
 import app.morsecode.ui.FakeMediaRepository
+import app.morsecode.ui.awaitStartedActivity
 import app.morsecode.ui.TestLifecycleOwner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -39,7 +40,6 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowLooper
@@ -361,7 +361,10 @@ class MusicPlayerScreenTest {
         composeTestRule.onNodeWithContentDescription(string(R.string.action_share)).performClick()
         settle()
 
-        val intent = shadowOf(context.applicationContext as Application).nextStartedActivity
+        // The share stages its file on an IO dispatcher before it starts a chooser, so
+        // the intent arrives after the click's own main-loop work is done. Wait for it:
+        // how long that takes is the machine's business, not the player's.
+        val intent = awaitStartedActivity(context) { settle() }
         assertNotNull("sharing must hand an intent to the platform", intent)
         // ShareFiles wraps a single file in a chooser, so look through it if it did.
         val shared = intent?.extras?.get(Intent.EXTRA_INTENT) as? Intent ?: intent

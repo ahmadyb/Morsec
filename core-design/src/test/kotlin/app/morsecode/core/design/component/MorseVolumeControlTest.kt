@@ -10,8 +10,6 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.swipeLeft
-import androidx.compose.ui.test.swipeRight
 import app.morsecode.core.design.icon.MorseIcons
 import app.morsecode.core.design.theme.MorseTheme
 import org.junit.Assert.assertEquals
@@ -112,10 +110,13 @@ class MorseVolumeControlTest {
         show()
         val strip = composeTestRule.onNodeWithContentDescription(VOLUME)
 
-        strip.performTouchInput { click(Offset(center.x * 0.1f, center.y)) }
+        // `center` is the middle of the strip, so twice it is the far edge. A tap at a
+        // fifth of the centre is a tenth of the width: the middle of the first bar, not
+        // its edge, which is the one place this mapping is a coin toss.
+        strip.performTouchInput { click(Offset(center.x * 0.2f, center.y)) }
         assertEquals(1, levels.last())
 
-        strip.performTouchInput { click(Offset(center.x * 0.9f, center.y)) }
+        strip.performTouchInput { click(Offset(center.x * 1.8f, center.y)) }
         assertEquals(9, levels.last())
     }
 
@@ -134,8 +135,13 @@ class MorseVolumeControlTest {
     fun `dragging up the strip keeps reporting the bar under the finger`() {
         show()
 
-        composeTestRule.onNodeWithContentDescription(VOLUME)
-            .performTouchInput { swipeRight(startX = 0.2f, endX = 0.8f) }
+        composeTestRule.onNodeWithContentDescription(VOLUME).performTouchInput {
+            down(Offset(center.x * 0.4f, center.y))
+            moveTo(Offset(center.x * 0.6f, center.y))
+            moveTo(Offset(center.x * 1.2f, center.y))
+            moveTo(Offset(center.x * 1.6f, center.y))
+            up()
+        }
 
         assertTrue("a drag reports more than one level", levels.size > 1)
         assertEquals(8, levels.last())
@@ -149,8 +155,13 @@ class MorseVolumeControlTest {
     fun `dragging back down the strip lowers the level`() {
         show()
 
-        composeTestRule.onNodeWithContentDescription(VOLUME)
-            .performTouchInput { swipeLeft(startX = 0.8f, endX = 0.2f) }
+        composeTestRule.onNodeWithContentDescription(VOLUME).performTouchInput {
+            down(Offset(center.x * 1.6f, center.y))
+            moveTo(Offset(center.x * 1.2f, center.y))
+            moveTo(Offset(center.x * 0.6f, center.y))
+            moveTo(Offset(center.x * 0.4f, center.y))
+            up()
+        }
 
         assertEquals(2, levels.last())
         assertTrue(
@@ -170,12 +181,17 @@ class MorseVolumeControlTest {
     }
 
     @Test
-    fun `the button says which of mute and unmute it is`() {
-        show()
+    fun `an audible control offers to mute`() {
+        show(volumeInForce = 0.7f, label = "70%")
+
         composeTestRule.onNodeWithContentDescription(MUTE).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(UNMUTE).assertDoesNotExist()
+    }
 
+    @Test
+    fun `a silent control offers to unmute`() {
         show(volumeInForce = 0f, label = "mute")
+
         composeTestRule.onNodeWithContentDescription(UNMUTE).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(MUTE).assertDoesNotExist()
     }
