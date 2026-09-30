@@ -1,7 +1,7 @@
 package app.morsecode.ui.video
 
 import app.morsecode.core.design.component.ScrubberMath
-import kotlin.math.roundToInt
+import app.morsecode.core.design.component.VolumeMath
 
 /**
  * What a subtitle control can honestly say about one file.
@@ -74,9 +74,14 @@ public data class VideoTransport(
     public val effectiveVolume: Float
         get() = if (muted) 0f else volume
 
-    /** How many of the ten bars are lit, rounded the way the reference rounds. */
+    /**
+     * How many of the ten bars are lit.
+     *
+     * Asked of [VolumeMath], the same rounding the shared volume control uses, so the
+     * bars this state reports and the bars that control draws cannot disagree.
+     */
     public val levelOfTen: Int
-        get() = (effectiveVolume * VOLUME_STEPS).roundToInt().coerceIn(0, VOLUME_STEPS)
+        get() = VolumeMath.levelForVolume(effectiveVolume, VOLUME_STEPS)
 
     /** True when nothing would be heard: muted, or the level itself is nothing. */
     public val isSilent: Boolean

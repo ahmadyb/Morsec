@@ -150,6 +150,12 @@ public data class MorseMetrics(
     val volumeStepWidth: Dp,
     val volumeStepHeight: Dp,
     val volumeSteps: Int,
+    val volumeControlGap: Dp,
+    val volumeMuteButton: Dp,
+    val volumeGap: Dp,
+    val volumePaddingVertical: Dp,
+    val volumeStepRadius: Dp,
+    val volumeLabelWidth: Dp,
     val addressBarMinHeight: Dp,
     val addressBarPadding: Dp,
     val addressBarNestedPaddingHorizontal: Dp,
@@ -297,6 +303,12 @@ public data class MorseMetrics(
             volumeStepWidth = dp("video.volumeStepWidth"),
             volumeStepHeight = dp("video.volumeStepHeight"),
             volumeSteps = int("video.volumeSteps"),
+            volumeControlGap = dp("video.volumeControlGap"),
+            volumeMuteButton = dp("video.volumeMuteButton"),
+            volumeGap = dp("video.volumeGap"),
+            volumePaddingVertical = dp("video.volumePaddingVertical"),
+            volumeStepRadius = dp("video.volumeStepRadius"),
+            volumeLabelWidth = dp("video.volumeLabelWidth"),
             addressBarMinHeight = dp("addressBar.minHeight"),
             addressBarPadding = dp("addressBar.padding"),
             addressBarNestedPaddingHorizontal = dp("addressBar.nestedPaddingHorizontal"),
@@ -384,6 +396,9 @@ public object MorseType {
     public val musicTitleSize: TextUnit = size("music.titleSize")
     public val nowPlayingLabelSize: TextUnit = 12.sp
     public val nowPlayingLetterSpacing: TextUnit = 1.44.sp
+
+    /** The volume control's percentage readout: `.volc .pc` at 10px monospaced. */
+    public val volumeLabelSize: TextUnit = size("video.volumeLabelSize")
 
     /** Dialog title, toast, log rows and the address bar. */
     public val dialogTitleSize: TextUnit = size("dialog.titleSize")

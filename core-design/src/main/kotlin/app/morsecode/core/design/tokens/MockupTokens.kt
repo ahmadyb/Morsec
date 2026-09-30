@@ -373,6 +373,15 @@ public object MockupTokens {
         "video.volumeStepWidth" to 5f,
         "video.volumeStepHeight" to 15f,
         "video.volumeSteps" to 10f,
+        // .volc / .volbar / .volc .pc, at the phone width the reference overrides
+        // them to (`.volbar i{width:5px;border-radius:3px}`).
+        "video.volumeControlGap" to 5f,
+        "video.volumeMuteButton" to 30f,
+        "video.volumeGap" to 3f,
+        "video.volumePaddingVertical" to 4f,
+        "video.volumeStepRadius" to 3f,
+        "video.volumeLabelWidth" to 30f,
+        "video.volumeLabelSize" to 10f,
 
         // Address / breadcrumb bars.
         "addressBar.minHeight" to 44f,
