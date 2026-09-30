@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -379,7 +380,14 @@ private fun TransferRowView(
         ) {
             if (roomForDirection) DirectionGlyph(item)
 
-            FileKindIcon(kind = item.kind, size = metrics.fileIconSize)
+            // Tagged so a test can assert which glyph a row drew. The icon itself carries no
+            // description: the file's name is announced beside it, and "Video" said twice adds
+            // nothing to a screen reader reading the row in order.
+            FileKindIcon(
+                kind = item.kind,
+                size = metrics.fileIconSize,
+                modifier = Modifier.testTag(TransferKindTagPrefix + item.kind.id),
+            )
 
             Column(
                 modifier = Modifier.weight(1f),
@@ -819,6 +827,13 @@ private val NameBudget = 96.dp
 
 /** The longest status chip ("VERIFYING"), measured at the chip's own type. */
 private val ChipBudget = 72.dp
+
+/**
+ * The prefix a transfer row's file-kind icon is tagged with, so a test can say which glyph a
+ * given kind draws. There is no user-facing text for a kind anywhere in the app yet, and
+ * inventing seven labels to make one assertion possible would be inventing copy.
+ */
+internal const val TransferKindTagPrefix = "transfer-kind-"
 
 /**
  * What separates one item from the next in a line.
