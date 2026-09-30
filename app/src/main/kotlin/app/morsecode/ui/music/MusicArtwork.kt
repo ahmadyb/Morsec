@@ -65,7 +65,7 @@ public fun MusicArtwork(
         modifier = modifier
             .size(metrics.musicArtwork)
             .clip(RoundedCornerShape(metrics.musicArtworkRadius))
-            .background(brush = Brush.linearGradient(colorStops = PlaceholderStops)),
+            .background(brush = Brush.linearGradient(*PlaceholderStops)),
         contentAlignment = Alignment.Center,
     ) {
         val image = bitmap
@@ -96,10 +96,10 @@ public fun MusicArtwork(
  * It is a picture rather than a theme colour, so it deliberately does not follow the
  * accent: a track's own artwork would not either.
  */
-private val PlaceholderStops = listOf(
-    Color(0xFFF59E0B) to 0f,
-    Color(0xFFEA580C) to 0.6f,
-    Color(0xFF84CC16) to 1f,
+private val PlaceholderStops = arrayOf(
+    0f to Color(0xFFF59E0B),
+    0.6f to Color(0xFFEA580C),
+    1f to Color(0xFF84CC16),
 )
 
 /** `color:#0B0B0B` — the note glyph on that gradient. */
