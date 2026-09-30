@@ -1,5 +1,6 @@
 package app.morsecode.core.storage
 
+import android.content.IntentSender
 import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.SafGrant
 import kotlinx.coroutines.flow.Flow
@@ -30,6 +31,34 @@ public data class StorageAccess(
     public val canListDocuments: Boolean get() = mediaReadGranted || grants.isNotEmpty()
 
     public val isFullyBlocked: Boolean get() = !mediaReadGranted && grants.isEmpty()
+}
+
+/**
+ * What the platform said when Morsecode asked it to delete a file.
+ *
+ * Deletion is not one answer on Android. Up to API 28 a resolver delete is the whole
+ * story; on API 29 the platform answers with a consent intent **and expects the app to
+ * delete again afterwards**, because the grant is a permission; from API 30 it asks the
+ * user and performs the deletion itself. Reporting any of those as "deleted" before it
+ * has happened would be a claim the user cannot check, so the three stay distinguishable
+ * all the way to the screen.
+ */
+public sealed interface DeleteOutcome {
+    /** The row is gone. */
+    public data object Deleted : DeleteOutcome
+
+    /**
+     * The platform will not delete it without asking the user first: launch [sender],
+     * and when [deleteAfterGrant] is set, perform the deletion the grant allowed with
+     * [MediaRepository.deleteAfterConsent] before reporting anything.
+     */
+    public data class Consent(
+        public val sender: IntentSender,
+        public val deleteAfterGrant: Boolean,
+    ) : DeleteOutcome
+
+    /** Refused, or nothing was deleted, with no way to ask. */
+    public data object Refused : DeleteOutcome
 }
 
 /**
@@ -92,4 +121,23 @@ public interface MediaRepository {
 
     /** Drops recorded grants the platform no longer honours. */
     public suspend fun pruneRevokedGrants(): Int
+
+    /**
+     * Asks the platform to delete the file at [uriString].
+     *
+     * Returns what the platform said, following whichever consent flow this API level
+     * wants. A uri that cannot be parsed, a row that is not there and a deletion the
+     * platform refuses are all [DeleteOutcome.Refused]: nothing was deleted, and the
+     * caller must not report otherwise.
+     */
+    public suspend fun delete(uriString: String): DeleteOutcome
+
+    /**
+     * Performs the deletion that a consent grant allowed.
+     *
+     * On API 29 the platform's own dialog grants permission and leaves the row in
+     * place, so the deletion still has to be performed and its result reported. From
+     * API 30 the platform deletes the row itself and this is not called.
+     */
+    public suspend fun deleteAfterConsent(uriString: String): DeleteOutcome
 }

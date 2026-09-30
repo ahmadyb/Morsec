@@ -1,11 +1,13 @@
 package app.morsecode.ui.viewer
 
+import android.content.IntentSender
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.MorseFormatters
 import app.morsecode.core.model.applySortOrder
+import app.morsecode.core.storage.DeleteOutcome
 import app.morsecode.core.storage.MediaRepository
 import app.morsecode.navigation.Routes
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -27,12 +29,40 @@ public data class ViewerUiState(
     val loading: Boolean = true,
     val infoVisible: Boolean = false,
     val deleteConfirmVisible: Boolean = false,
+    /** One-shot user feedback, cleared once the viewer has shown it. */
+    val message: ViewerMessage? = null,
+    /** The platform's own deletion question, for the viewer to put on screen. */
+    val consent: ViewerConsent? = null,
 ) {
     /** The image being shown, or null while the list is empty. */
     public val current: MediaItem? get() = items.getOrNull(index)
     public val count: Int get() = items.size
     public val isEmpty: Boolean get() = !loading && items.isEmpty()
 }
+
+/** What the viewer tells the user after a deletion, once, and then clears. */
+public sealed interface ViewerMessage {
+    /** The platform deleted the file. */
+    public data object Deleted : ViewerMessage
+
+    /** The platform refused, or deleted nothing. */
+    public data object DeleteFailed : ViewerMessage
+
+    /** The user declined the platform's own confirmation. */
+    public data object DeleteCancelled : ViewerMessage
+}
+
+/**
+ * A consent question from the platform, which the viewer launches and answers back.
+ *
+ * [deleteAfterGrant] is what makes API 29 different: there the grant is a permission
+ * and the row is still on the device until the app deletes it again.
+ */
+public data class ViewerConsent(
+    public val sender: IntentSender,
+    public val deleteAfterGrant: Boolean,
+    public val uriString: String,
+)
 
 /**
  * The image viewer (master prompt §4.5).
@@ -60,6 +90,8 @@ public class ViewerViewModel @Inject constructor(
     private val index = MutableStateFlow(0)
     private val info = MutableStateFlow(false)
     private val confirmDelete = MutableStateFlow(false)
+    private val message = MutableStateFlow<ViewerMessage?>(null)
+    private val consent = MutableStateFlow<ViewerConsent?>(null)
 
     /** False until the first list has been matched against the id the viewer was opened with. */
     private var resolved = false
@@ -69,14 +101,18 @@ public class ViewerViewModel @Inject constructor(
         index,
         info,
         confirmDelete,
-    ) { list, shown, isInfo, isConfirm ->
+        message,
+    ) { list, shown, isInfo, isConfirm, notice ->
         ViewerUiState(
             items = list.orEmpty(),
             index = shown,
             loading = list == null,
             infoVisible = isInfo,
             deleteConfirmVisible = isConfirm,
+            message = notice,
         )
+    }.combine(consent) { shown, pending ->
+        shown.copy(consent = pending)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
@@ -114,6 +150,55 @@ public class ViewerViewModel @Inject constructor(
         if (next == index.value) return
         index.value = next
         savedStateHandle[SAVED_INDEX] = next
+    }
+
+    /**
+     * Asks the platform to delete the photograph being shown.
+     *
+     * The answer is whatever the platform said — deleted, a consent question, or
+     * refused — and nothing is reported to the user before it is known.
+     */
+    public fun deleteCurrent() {
+        val uriString = state.value.current?.uriString.orEmpty()
+        confirmDelete.value = false
+        viewModelScope.launch {
+            when (val outcome = media.delete(uriString)) {
+                DeleteOutcome.Deleted -> message.value = ViewerMessage.Deleted
+                is DeleteOutcome.Consent -> consent.value =
+                    ViewerConsent(outcome.sender, outcome.deleteAfterGrant, uriString)
+
+                DeleteOutcome.Refused -> message.value = ViewerMessage.DeleteFailed
+            }
+        }
+    }
+
+    /** The platform's own confirmation came back; [granted] is whether the user agreed. */
+    public fun consentResult(granted: Boolean) {
+        val pending = consent.value ?: return
+        consent.value = null
+        when {
+            !granted -> message.value = ViewerMessage.DeleteCancelled
+
+            // From API 30 the platform deleted the row itself while asking.
+            !pending.deleteAfterGrant -> message.value = ViewerMessage.Deleted
+
+            // On API 29 the grant was a permission: the deletion happens now, and only
+            // its own answer is reported.
+            else -> viewModelScope.launch {
+                when (val outcome = media.deleteAfterConsent(pending.uriString)) {
+                    DeleteOutcome.Deleted -> message.value = ViewerMessage.Deleted
+                    is DeleteOutcome.Consent -> consent.value =
+                        ViewerConsent(outcome.sender, outcome.deleteAfterGrant, pending.uriString)
+
+                    DeleteOutcome.Refused -> message.value = ViewerMessage.DeleteFailed
+                }
+            }
+        }
+    }
+
+    /** The viewer has shown [ViewerUiState.message]. */
+    public fun consumeMessage() {
+        message.value = null
     }
 
     public fun showInfo(visible: Boolean) {

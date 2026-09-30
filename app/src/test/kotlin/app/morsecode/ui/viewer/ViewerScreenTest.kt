@@ -30,6 +30,7 @@ import app.morsecode.core.model.MorseFormatters
 import app.morsecode.core.model.SortDirection
 import app.morsecode.core.model.SortKey
 import app.morsecode.core.model.SortOrder
+import app.morsecode.core.storage.DeleteOutcome
 import app.morsecode.navigation.Routes
 import app.morsecode.ui.FakeMediaRepository
 import app.morsecode.ui.TestLifecycleOwner
@@ -70,6 +71,7 @@ class ViewerScreenTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
 
     private lateinit var owner: TestLifecycleOwner
+    private lateinit var repository: FakeMediaRepository
     private lateinit var savedStateHandle: SavedStateHandle
     private var backPresses = 0
 
@@ -222,6 +224,7 @@ class ViewerScreenTest {
         settle()
 
         composeTestRule.onNodeWithText(string(R.string.viewer_delete_title)).assertDoesNotExist()
+        assertEquals(emptyList<String>(), repository.deletedUris)
         // The photograph is still the one being shown.
         assertShowing(2)
     }
@@ -229,15 +232,25 @@ class ViewerScreenTest {
     @Test
     fun `a deletion the platform refuses is reported as refused`() {
         showViewer()
+        repository.deleteOutcome = DeleteOutcome.Refused
 
-        composeTestRule.onNodeWithContentDescription(string(R.string.viewer_delete)).performClick()
-        settle()
-        composeTestRule.onNodeWithText(string(R.string.viewer_delete)).performClick()
+        confirmDelete()
 
-        // The delete is a real MediaStore call on a background thread; this build
-        // has no such photograph, so the honest outcome is a refusal, not a claim
-        // that it went away.
         assertEquals(string(R.string.viewer_delete_failed), awaitToast())
+        assertEquals(listOf(photos[2].uriString), repository.deletedUris)
+        // A refusal is not a deletion, so the photograph is still the one shown.
+        assertShowing(2)
+    }
+
+    @Test
+    fun `a deletion the platform performs is reported as deleted`() {
+        showViewer()
+        repository.deleteOutcome = DeleteOutcome.Deleted
+
+        confirmDelete()
+
+        assertEquals(string(R.string.viewer_deleted), awaitToast())
+        assertEquals(listOf(photos[2].uriString), repository.deletedUris)
     }
 
     @Test
@@ -323,8 +336,9 @@ class ViewerScreenTest {
                 if (restoredIndex != null) put(ViewerViewModel.SAVED_INDEX, restoredIndex)
             },
         )
+        repository = FakeMediaRepository(images = images)
         val viewModel = ViewerViewModel(
-            media = FakeMediaRepository(images = images),
+            media = repository,
             formatters = MorseFormatters.forDefaultLocale(),
             savedStateHandle = savedStateHandle,
         )
@@ -364,6 +378,14 @@ class ViewerScreenTest {
     private fun pageDescription(index: Int) =
         string(R.string.viewer_image_description, photos[index].displayName, index + 1, photos.size)
 
+    /** Asks to delete the photograph being shown, and confirms it. */
+    private fun confirmDelete() {
+        composeTestRule.onNodeWithContentDescription(string(R.string.viewer_delete)).performClick()
+        settle()
+        composeTestRule.onNodeWithText(string(R.string.viewer_delete)).performClick()
+        settle()
+    }
+
     /**
      * Waits for the toast a background operation produced.
      *
@@ -373,7 +395,7 @@ class ViewerScreenTest {
     private fun awaitToast(): String? {
         val deadline = System.currentTimeMillis() + TOAST_TIMEOUT_MILLIS
         while (System.currentTimeMillis() < deadline) {
-            ShadowLooper.idleMainLooper()
+            settle()
             ShadowToast.getTextOfLatestToast()?.let { return it }
             Thread.sleep(20L)
         }

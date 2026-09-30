@@ -1,7 +1,6 @@
 package app.morsecode.ui.viewer
 
 import android.app.Activity
-import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -27,9 +26,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -42,7 +38,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.net.toUri
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.morsecode.R
@@ -58,8 +53,6 @@ import app.morsecode.core.design.theme.MorseTextStyles
 import app.morsecode.core.design.theme.MorseTheme
 import app.morsecode.core.model.FeatureArea
 import app.morsecode.core.model.MediaItem
-import app.morsecode.ui.common.DeleteOutcome
-import app.morsecode.ui.common.MediaDelete
 import app.morsecode.ui.common.MediaFullImage
 import app.morsecode.ui.common.ShareFiles
 import app.morsecode.ui.common.rememberFeatureGate
@@ -134,29 +127,12 @@ public fun ViewerScreen(
     val current = state.current
 
     // Android asks the user before an app deletes media it did not contribute; this
-    // is that question coming back, together with the photograph it was about.
-    var pendingDelete by remember { mutableStateOf<PendingDelete?>(null) }
+    // is that question coming back. What it means depends on the API level, which is
+    // the storage layer's business rather than the screen's.
     val consentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
-        val pending = pendingDelete
-        pendingDelete = null
-        when {
-            pending == null -> Unit
-
-            result.resultCode != Activity.RESULT_OK ->
-                Toast.makeText(context, deleteCancelled, Toast.LENGTH_SHORT).show()
-
-            // On API 29 the answer is a permission, not a deletion: the row is still
-            // there, so it is deleted now and only then reported as gone.
-            pending.deleteAfterGrant -> scope.launch(main) {
-                val deleted = MediaDelete.completeAfterConsent(context, pending.uri)
-                val text = if (deleted == DeleteOutcome.Deleted) deletedText else deleteFailed
-                Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
-            }
-
-            else -> Toast.makeText(context, deletedText, Toast.LENGTH_SHORT).show()
-        }
+        viewModel.consentResult(result.resultCode == Activity.RESULT_OK)
     }
 
     val pagerState = rememberPagerState(
@@ -188,6 +164,27 @@ public fun ViewerScreen(
 
             else -> pagerState.animateScrollToPage(target)
         }
+    }
+
+    // One-shot feedback, shown once and then cleared so a recomposition or a
+    // rotation does not say it again.
+    val messageText = when (state.message) {
+        ViewerMessage.Deleted -> deletedText
+        ViewerMessage.DeleteFailed -> deleteFailed
+        ViewerMessage.DeleteCancelled -> deleteCancelled
+        null -> null
+    }
+    LaunchedEffect(messageText) {
+        if (messageText != null) {
+            Toast.makeText(context, messageText, Toast.LENGTH_SHORT).show()
+            viewModel.consumeMessage()
+        }
+    }
+
+    // The platform's own deletion dialog, when it wants to ask the user itself.
+    LaunchedEffect(state.consent) {
+        val pending = state.consent ?: return@LaunchedEffect
+        consentLauncher.launch(IntentSenderRequest.Builder(pending.sender).build())
     }
 
     // The settled page, not every page the finger travels past: the header would
@@ -389,30 +386,7 @@ public fun ViewerScreen(
                         )
                         MorseButton(
                             text = deleteDescription,
-                            onClick = {
-                                viewModel.confirmDelete(false)
-                                val uri = item.uriString?.let { runCatching { it.toUri() }.getOrNull() }
-                                if (uri == null) {
-                                    Toast.makeText(context, deleteFailed, Toast.LENGTH_SHORT).show()
-                                    return@MorseButton
-                                }
-                                scope.launch(main) {
-                                    when (val outcome = MediaDelete.request(context, uri)) {
-                                        DeleteOutcome.Deleted ->
-                                            Toast.makeText(context, deletedText, Toast.LENGTH_SHORT).show()
-
-                                        is DeleteOutcome.Consent -> {
-                                            pendingDelete = PendingDelete(uri, outcome.deleteAfterGrant)
-                                            consentLauncher.launch(
-                                                IntentSenderRequest.Builder(outcome.sender).build(),
-                                            )
-                                        }
-
-                                        DeleteOutcome.Refused ->
-                                            Toast.makeText(context, deleteFailed, Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            },
+                            onClick = viewModel::deleteCurrent,
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -586,9 +560,6 @@ private fun ViewerInfoDialog(
         }
     }
 }
-
-/** The photograph a platform consent question was about, and what its answer still requires. */
-private class PendingDelete(val uri: Uri, val deleteAfterGrant: Boolean)
 
 /**
  * A page in an endless deck that shows the photograph at [index].

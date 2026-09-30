@@ -2,6 +2,7 @@ package app.morsecode.ui
 
 import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.SafGrant
+import app.morsecode.core.storage.DeleteOutcome
 import app.morsecode.core.storage.MediaRepository
 import app.morsecode.core.storage.StorageAccess
 import kotlinx.coroutines.flow.Flow
@@ -22,6 +23,18 @@ internal class FakeMediaRepository(
     private val children: Map<String, List<MediaItem>> = emptyMap(),
     private val folders: Map<String, MediaItem?> = emptyMap(),
 ) : MediaRepository {
+
+    /**
+     * What the platform says when asked to delete.
+     *
+     * A real resolver answers differently per API level and per ownership, and a test
+     * that could not choose the answer could only ever assert whichever one this
+     * environment happens to produce.
+     */
+    var deleteOutcome: DeleteOutcome = DeleteOutcome.Refused
+
+    /** The uris the app asked the platform to delete, in the order it asked. */
+    val deletedUris: MutableList<String> = mutableListOf()
 
     override fun observeAccess(): Flow<StorageAccess> = flowOf(StorageAccess(mediaReadGranted = true))
 
@@ -51,4 +64,11 @@ internal class FakeMediaRepository(
     override suspend fun removeFolder(grantId: Long) = Unit
 
     override suspend fun pruneRevokedGrants(): Int = 0
+
+    override suspend fun delete(uriString: String): DeleteOutcome {
+        deletedUris += uriString
+        return deleteOutcome
+    }
+
+    override suspend fun deleteAfterConsent(uriString: String): DeleteOutcome = delete(uriString)
 }

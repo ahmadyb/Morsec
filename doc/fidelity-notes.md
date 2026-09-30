@@ -254,10 +254,14 @@ four 44 px circles on `#1A1A1A` with `#DDD` glyphs and a fifth, Send, on `var(--
 * **Edit, Delete and Info are real.** In the reference all three are `data-act="toast"` — the
   simulator's way of having no platform. The app asks the platform: Edit sends `ACTION_EDIT` with
   read and write grants and reports honestly when nothing on the device can edit the image; Delete
-  confirms first and then follows the storage APIs (a resolver delete up to API 28,
-  `RecoverableSecurityException` on API 29, `MediaStore.createDeleteRequest` from API 30), launching
-  the consent intent when the platform asks and reporting `RESULT_OK` as deleted and anything else
-  as cancelled — never a toast claiming a deletion the platform only offered to ask about. Info
+  confirms first and then asks the platform, through the storage layer where every other
+  MediaStore operation lives: a resolver delete up to API 28, `RecoverableSecurityException`
+  on API 29, `MediaStore.createDeleteRequest` from API 30. The three answers stay
+  distinguishable all the way to the screen, because they mean different things — on API 29
+  the user's agreement is a *permission* and the row is still on the device until the app
+  deletes it again, where from API 30 the platform deletes it while asking. So `RESULT_OK`
+  is reported as a deletion only once the platform has actually deleted something, and a
+  refusal, a cancellation and a deletion are three different sentences. Info
   shows what was reported and says *Unknown* for what was not, instead of showing `0 × 0` — a kind
   the app inferred from the file name is not a type the platform reported, so the Type row says
   *Unknown* too rather than passing `image` off as a MIME type.

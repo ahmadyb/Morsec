@@ -2,6 +2,7 @@ package app.morsecode.core.storage
 
 import android.content.Context
 import android.os.Build
+import android.provider.MediaStore
 import androidx.core.net.toUri
 import app.morsecode.core.data.repository.DeviceRepository
 import app.morsecode.core.model.MediaItem
@@ -114,6 +115,48 @@ internal class DefaultMediaRepository @Inject constructor(
         devices.removeGrant(grantId)
         refresh()
     }
+
+    override suspend fun delete(uriString: String): DeleteOutcome = withContext(io) {
+        val uri = runCatching { uriString.toUri() }.getOrNull() ?: return@withContext DeleteOutcome.Refused
+        val attempt = runCatching { context.contentResolver.delete(uri, null, null) }
+        if (attempt.isSuccess) {
+            return@withContext rowsToOutcome(attempt.getOrDefault(0))
+        }
+
+        val cause = attempt.exceptionOrNull()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // API 29 carries the consent flow inside the exception it throws, and what
+            // comes back is a permission rather than a deletion.
+            @Suppress("DEPRECATION")
+            val sender = (cause as? android.app.RecoverableSecurityException)
+                ?.userAction
+                ?.actionIntent
+                ?.intentSender
+            if (sender != null) {
+                return@withContext DeleteOutcome.Consent(sender, deleteAfterGrant = true)
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // API 30 and above ask the same question and delete the row themselves.
+            val sender = runCatching {
+                MediaStore.createDeleteRequest(context.contentResolver, listOf(uri)).intentSender
+            }.getOrNull()
+            if (sender != null) {
+                return@withContext DeleteOutcome.Consent(sender, deleteAfterGrant = false)
+            }
+        }
+        DeleteOutcome.Refused
+    }
+
+    override suspend fun deleteAfterConsent(uriString: String): DeleteOutcome = withContext(io) {
+        val uri = runCatching { uriString.toUri() }.getOrNull() ?: return@withContext DeleteOutcome.Refused
+        val rows = runCatching { context.contentResolver.delete(uri, null, null) }.getOrDefault(0)
+        rowsToOutcome(rows)
+    }
+
+    /** Zero rows changed is a refusal: nothing was deleted, and the app must not say otherwise. */
+    private fun rowsToOutcome(rows: Int): DeleteOutcome =
+        if (rows > 0) DeleteOutcome.Deleted else DeleteOutcome.Refused
 
     override suspend fun pruneRevokedGrants(): Int = withContext(io) {
         val grants = devices.observeGrants().first()
