@@ -313,3 +313,14 @@ public val PreviewColorsLight: MorseColorTokens = morseColorTokens(darkTheme = f
 
 /** The true-black backdrop used by the immersive photo viewer and video player. */
 public val ImmersiveBackdrop: Color = PreviewColorsDark.viewerBackdrop
+
+/**
+ * The warm centre of the video player's picture area.
+ *
+ * The reference paints the space the video would fill with
+ * `radial-gradient(circle at 60% 60%,#1b1a10,#000 70%)`: a glow that is almost black,
+ * offset below and right of centre, falling away to the true black of the screen. This
+ * build has no picture to put in it — no decoder until milestone 10 — so the glow is
+ * what tells the player's stage from the control bar under it.
+ */
+public val VideoSurfaceGlow: Color = PreviewColorsDark.videoSurfaceGlow

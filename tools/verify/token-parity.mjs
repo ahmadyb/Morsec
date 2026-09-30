@@ -215,6 +215,7 @@ const RAW_SKIP = new Set([
   'mono', 'sans', 'shadow', 'm3-e1', 'm3-e2', 'm3-e3', 'm3-motion', 'ph1', 'ph2', 'phS',
   // Declared inline in the document's screen templates / JS, checked further down.
   'viewerBackdrop', 'viewerIconBackground', 'viewerIconContent', 'viewerMetaText', 'videoControlBar',
+  'videoSurfaceGlow',
   'onb1a', 'onb1b', 'onb2a', 'onb2b', 'onb3a', 'onb3b', 'onb4a', 'onb4b',
 ]);
 
@@ -621,6 +622,7 @@ const INLINE_CONSTANTS = [
   ['viewerIconContent|root', /width:44px;height:44px;border-radius:50%;background:#[0-9A-Fa-f]{3,6};color:(#[0-9A-Fa-f]{3,6})/],
   ['viewerMetaText|root', /class="meta" style="color:(#[0-9A-Fa-f]{3,6})"/],
   ['videoControlBar|root', /padding:14px 18px 22px;background:(#[0-9A-Fa-f]{3,6})/],
+  ['videoSurfaceGlow|root', /radial-gradient\(circle at 60% 60%,(#[0-9A-Fa-f]{3,6}),#000 70%\)/],
 ];
 for (const [key, pattern] of INLINE_CONSTANTS) {
   const found = pattern.exec(html);

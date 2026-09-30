@@ -72,6 +72,7 @@ public data class MorseColorTokens(
     val viewerIconContent: Color,
     val viewerMetaText: Color,
     val videoControlBar: Color,
+    val videoSurfaceGlow: Color,
     // File-kind colours (the mockup's KIND map) --------------------------
     val kindImage: Color,
     val kindVideo: Color,
@@ -260,6 +261,7 @@ public fun morseColorTokens(darkTheme: Boolean, accent: Accent): MorseColorToken
         viewerIconContent = Color(MockupTokens.argb(MockupTokens.rawColor("viewerIconContent", "root"))),
         viewerMetaText = Color(MockupTokens.argb(MockupTokens.rawColor("viewerMetaText", "root"))),
         videoControlBar = Color(MockupTokens.argb(MockupTokens.rawColor("videoControlBar", "root"))),
+        videoSurfaceGlow = Color(MockupTokens.argb(MockupTokens.rawColor("videoSurfaceGlow", "root"))),
         kindImage = base("kindImage"),
         kindVideo = base("kindVideo"),
         kindAudio = base("kindAudio"),

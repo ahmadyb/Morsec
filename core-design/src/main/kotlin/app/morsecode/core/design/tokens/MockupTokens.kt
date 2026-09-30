@@ -88,6 +88,7 @@ public object MockupTokens {
         "viewerIconContent|root" to "#DDDDDD",
         "viewerMetaText|root" to "#8A8A8A",
         "videoControlBar|root" to "#0B0B0B",
+        "videoSurfaceGlow|root" to "#1B1A10",
 
         // --- onboarding slide badges (the JS `slides` array, not CSS vars) ---
         "onb1a|root" to "#F59E0B",
