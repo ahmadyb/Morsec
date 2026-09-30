@@ -141,7 +141,7 @@ internal fun BroadcastSenderContent(
         )
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1f).testTag(BroadcastListTag),
             contentPadding = PaddingValues(bottom = 10.dp),
         ) {
             items(state.files, key = { it.file.id }) { file ->

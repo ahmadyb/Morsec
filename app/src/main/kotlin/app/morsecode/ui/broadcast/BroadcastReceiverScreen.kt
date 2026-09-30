@@ -11,6 +11,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -18,6 +19,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.morsecode.R
 import app.morsecode.core.design.component.MorseButton
+import app.morsecode.core.design.component.MorseButtonVariant
 import app.morsecode.core.design.component.MorseWash
 import app.morsecode.core.design.component.SectionHeader
 import app.morsecode.core.design.icon.MorseIcons
@@ -110,7 +112,7 @@ internal fun BroadcastReceiverContent(
         )
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1f).testTag(BroadcastListTag),
             contentPadding = PaddingValues(bottom = 10.dp),
         ) {
             item(key = "source") {
@@ -193,12 +195,24 @@ internal fun BroadcastReceiverContent(
                                 style = MorseTextStyles.meta,
                                 color = colors.textTertiary,
                             )
-                            MorseButton(
-                                text = stringResource(R.string.broadcast_open_folder),
-                                onClick = onOpenFolder,
-                                fillWidth = true,
-                                modifier = Modifier.padding(top = 10.dp),
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                MorseButton(
+                                    text = stringResource(R.string.broadcast_open_folder),
+                                    onClick = onOpenFolder,
+                                    variant = MorseButtonVariant.WASH,
+                                    fillWidth = true,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                MorseButton(
+                                    text = stringResource(R.string.broadcast_see_completion),
+                                    onClick = onSeeCompletion,
+                                    fillWidth = true,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
                         }
                     }
                 }

@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -103,7 +104,7 @@ internal fun BroadcastSentContent(
         )
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1f).testTag(BroadcastListTag),
             contentPadding = PaddingValues(bottom = 10.dp),
         ) {
             item(key = "banner") {
@@ -425,7 +426,7 @@ internal fun BroadcastReceivedContent(
         )
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1f).testTag(BroadcastListTag),
             contentPadding = PaddingValues(bottom = 10.dp),
         ) {
             item(key = "source") {

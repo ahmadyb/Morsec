@@ -10,6 +10,13 @@ import app.morsecode.ui.common.MorseActionBarTone
 import app.morsecode.ui.transfer.TransferAllLabel
 
 /**
+ * The tag a broadcast list carries, so a test can scroll a list to a row it has not composed
+ * yet — which is how the reachability proof at the reference phone width is written without
+ * pretending a taller viewport is a phone.
+ */
+internal const val BroadcastListTag: String = "broadcast-list"
+
+/**
  * The broadcast bar: the same four cells on every broadcast screen.
  *
  * A batch is a transfer with more than one receiver, so it keeps the transfer bar exactly —
