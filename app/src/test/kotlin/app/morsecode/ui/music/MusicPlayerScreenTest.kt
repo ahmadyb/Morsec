@@ -59,6 +59,12 @@ import org.robolectric.shadows.ShadowLooper
  *
  * There is no clock in the player and none is faked here: the position moves because a
  * test moved it, and a track ends because a test said it ended.
+ *
+ * Two things shape every index below. The route carries the order Files was showing —
+ * name ascending — so the queue is these tracks alphabetically, not in the order the
+ * reference lists them; and a `LazyColumn` composes only what is on screen, which on
+ * this phone is the first four queue rows, so a row nobody has scrolled to cannot be
+ * asserted on.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -75,36 +81,56 @@ class MusicPlayerScreenTest {
     private var backPresses = 0
     private var navigations = emptyList<MorseDestination>()
 
+    /** The order Files was showing, and therefore the order the queue is in. */
+    private val sort = SortOrder(SortKey.NAME, SortDirection.ASC)
+
     /**
-     * The reference's nine tracks, in the order its Music tab lists them, with the
-     * lengths it prints. Only the second carries an album tag: "Harbour Lights ·
-     * Midnight Sessions" is the one "artist · album" line the reference shows, and the
-     * rest exercise the line with only an artist in it.
+     * The reference's nine tracks with the lengths it prints, in the order this
+     * player's queue shows them: by name, ascending, because that is the sort token
+     * the route carries. Only "Ocean Eyes (Live)" has an album tag — "Harbour Lights ·
+     * Midnight Sessions" is the one such line the reference shows — and the rest
+     * exercise the line with only an artist in it.
      */
     private val tracks = listOf(
+        track("Dust & Gold", "Amara Diallo", null, 208_000L),
+        track("Harmattan", "Tunde Olaniyi", null, 186_000L),
+        track("Late Transmission", "The Wanderers", null, 281_000L),
+        track("Low Orbit", "Bellwether", null, 374_000L),
         track("Midnight Drive", "The Wanderers", null, 222_000L),
-        track("Ocean Eyes (Live)", "Harbour Lights", "Midnight Sessions", 248_000L),
         track("Neon Rain", "Kite & Co.", null, 175_000L),
+        track("Ocean Eyes (Live)", "Harbour Lights", "Midnight Sessions", 248_000L),
         track("Paper Boats", "Nadia Qureshi", null, 195_000L),
         track("Slow Signal", "Bellwether", null, 302_000L),
-        track("Dust & Gold", "Amara Diallo", null, 208_000L),
-        track("Late Transmission", "The Wanderers", null, 281_000L),
-        track("Harmattan", "Tunde Olaniyi", null, 186_000L),
-        track("Low Orbit", "Bellwether", null, 374_000L),
     )
+
+    /** The reference's now-playing track, and the one most of these tests open. */
+    private val oceanEyes = tracks[6]
 
     @Test
     fun `the tapped track is the one shown, over a queue of all nine`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
-        assertShowing(1)
+        assertShowing(6)
         composeTestRule.onNodeWithText("Harbour Lights · Midnight Sessions").assertIsDisplayed()
         composeTestRule.onNodeWithText(quantity(R.plurals.music_queue_header, 9, 9)).assertIsDisplayed()
     }
 
     @Test
+    fun `the queue is the order the route asked for, not the order the library gave`() {
+        showPlayer(sort = SortOrder(SortKey.NAME, SortDirection.DESC))
+
+        assertEquals(tracks.map { it.id }.reversed(), viewModel.state.value.queue.map { it.id })
+        // Name descending puts the reference's track third from the top, and the
+        // length on the right of the scrubber says which track that is: assertShowing
+        // reads the ascending list, so this order is asserted on its own terms.
+        assertEquals(2, viewModel.state.value.index)
+        assertEquals(oceanEyes, viewModel.state.value.current)
+        composeTestRule.onNodeWithText("-4:08").assertIsDisplayed()
+    }
+
+    @Test
     fun `a track with no album tag shows its artist alone`() {
-        showPlayer(opened = tracks[0])
+        showPlayer(opened = tracks[2])
 
         // The artist is on screen twice — in the title block and in that track's own
         // queue row — so what this test is about is what is *not* there: no album tag
@@ -115,7 +141,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `play and pause are one control that says which of them it is`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.music_play)).performClick()
         settle()
@@ -130,17 +156,17 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `next and previous walk the queue and wrap at both ends`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         click(R.string.music_next)
-        assertShowing(2)
+        assertShowing(7)
 
         click(R.string.music_previous)
-        assertShowing(1)
+        assertShowing(6)
 
         // The queue is a loop, not a dead end at either side.
-        click(R.string.music_previous)
-        assertShowing(0)
+        viewModel.select(0)
+        settle()
         click(R.string.music_previous)
         assertShowing(tracks.lastIndex)
         click(R.string.music_next)
@@ -149,8 +175,8 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `dragging the scrubber seeks, and cannot leave the track`() {
-        showPlayer(opened = tracks[1])
-        val duration = tracks[1].durationMillis
+        showPlayer()
+        val duration = oceanEyes.durationMillis
 
         composeTestRule.onNodeWithContentDescription(string(R.string.music_seek))
             .performTouchInput { swipeLeft() }
@@ -159,7 +185,12 @@ class MusicPlayerScreenTest {
         val afterLeft = viewModel.state.value.positionMillis
         assertTrue("a drag left must move the position, was $afterLeft", afterLeft > 0L)
         assertTrue("a drag left must land before the middle, was $afterLeft", afterLeft < duration / 2)
-        composeTestRule.onNodeWithText(elapsed(afterLeft)).assertIsDisplayed()
+        // The elapsed label can read the same as a queue row's length, so it is
+        // asserted as "on screen" and the remaining time — which nothing else prints
+        // with a minus in front of it — is asserted exactly.
+        assertTrue(
+            composeTestRule.onAllNodes(hasText(elapsed(afterLeft))).fetchSemanticsNodes().isNotEmpty(),
+        )
         composeTestRule.onNodeWithText("-${elapsed(duration - afterLeft)}").assertIsDisplayed()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.music_seek))
@@ -173,8 +204,8 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `a seek is clamped to the track, whatever it is asked for`() {
-        showPlayer(opened = tracks[1])
-        val duration = tracks[1].durationMillis
+        showPlayer()
+        val duration = oceanEyes.durationMillis
 
         viewModel.seekTo(-50_000L)
         settle()
@@ -185,15 +216,13 @@ class MusicPlayerScreenTest {
         viewModel.seekTo(duration * 4)
         settle()
         assertEquals(duration, viewModel.state.value.positionMillis)
-        // No queue row is printed with a minus in front of it, so these two are the
-        // scrubber's own labels and nothing else.
         composeTestRule.onNodeWithText("-0:00").assertIsDisplayed()
         assertEquals("4:08", viewModel.state.value.elapsed)
     }
 
     @Test
     fun `shuffle says it is on, and every next it gives is another track in the queue`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
         val shuffle = string(R.string.music_shuffle)
 
         composeTestRule.onNodeWithContentDescription("$shuffle, ${string(R.string.music_shuffle_off)}")
@@ -218,7 +247,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `repeat cycles its three answers`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
         val repeat = string(R.string.music_repeat)
 
         fun assertRepeat(@StringRes state: Int) {
@@ -243,7 +272,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `a track that ends is answered the way repeat and shuffle say`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         // Repeat one: the same track again, from its start, still playing.
         viewModel.cycleRepeat()
@@ -252,11 +281,12 @@ class MusicPlayerScreenTest {
         settle()
         viewModel.trackEnded()
         settle()
-        assertEquals(1, viewModel.state.value.index)
+        assertEquals(6, viewModel.state.value.index)
         assertEquals(0L, viewModel.state.value.positionMillis)
         assertTrue(viewModel.state.value.playing)
 
-        // Repeat the queue: two cycles from "repeat one" is "repeat the queue".
+        // Repeat the queue: two cycles from "repeat one" is "repeat the queue", and
+        // the last track ends on the first and keeps playing.
         viewModel.cycleRepeat()
         viewModel.cycleRepeat()
         assertEquals(RepeatMode.ALL, viewModel.state.value.repeat)
@@ -290,7 +320,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `saving a track keeps it saved, and only that track`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
         val liked = string(R.string.music_liked)
 
         composeTestRule.onNodeWithContentDescription(string(R.string.music_save)).performClick()
@@ -311,7 +341,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `sharing the track hands it to the platform`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.action_share)).performClick()
         settle()
@@ -325,18 +355,18 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `a queue row plays the track it names, from its start`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
         viewModel.seekTo(90_000L)
         settle()
 
-        // "Midnight Drive" is on screen only as its queue row — it is not the track
-        // being shown — so this click cannot mean anything else.
-        composeTestRule.onAllNodes(hasText("Midnight Drive") and hasClickAction()).assertCountEquals(1)
-        composeTestRule.onAllNodes(hasText("Midnight Drive") and hasClickAction())[0].performClick()
+        // "Late Transmission" is on screen only as its queue row — it is not the
+        // track being shown — so this click cannot mean anything else.
+        composeTestRule.onAllNodes(hasText("Late Transmission") and hasClickAction()).assertCountEquals(1)
+        composeTestRule.onAllNodes(hasText("Late Transmission") and hasClickAction())[0].performClick()
         settle()
 
-        assertShowing(0)
-        assertEquals(0, viewModel.state.value.index)
+        assertShowing(2)
+        assertEquals(2, viewModel.state.value.index)
         assertEquals(0L, viewModel.state.value.positionMillis)
     }
 
@@ -346,7 +376,7 @@ class MusicPlayerScreenTest {
         // row nobody has scrolled to cannot be asserted on.
         showPlayer(opened = tracks[2])
 
-        composeTestRule.onAllNodes(hasText("Neon Rain") and hasClickAction()).assertCountEquals(1)
+        composeTestRule.onAllNodes(hasText("Late Transmission") and hasClickAction()).assertCountEquals(1)
         assertEquals(2, viewModel.state.value.index)
         assertEquals(tracks[2], viewModel.state.value.current)
         assertShowing(2)
@@ -357,12 +387,12 @@ class MusicPlayerScreenTest {
         showPlayer(
             opened = tracks[0],
             restored = buildMap<String, Any?> {
-                put(MusicPlayerViewModel.SAVED_INDEX, 4)
+                put(MusicPlayerViewModel.SAVED_INDEX, 8)
                 put(MusicPlayerViewModel.SAVED_PLAYING, true)
                 put(MusicPlayerViewModel.SAVED_POSITION, 96_000L)
                 put(MusicPlayerViewModel.SAVED_SHUFFLE, ShuffleMode.ON.name)
                 put(MusicPlayerViewModel.SAVED_REPEAT, RepeatMode.ONE.name)
-                put(MusicPlayerViewModel.SAVED_LIKED, arrayListOf(tracks[4].id, tracks[7].id))
+                put(MusicPlayerViewModel.SAVED_LIKED, arrayListOf(tracks[8].id, tracks[1].id))
             },
         )
 
@@ -390,13 +420,13 @@ class MusicPlayerScreenTest {
         )
 
         assertEquals(tracks[2].durationMillis, viewModel.state.value.positionMillis)
-        assertEquals("2:55", viewModel.state.value.elapsed)
+        assertEquals("4:41", viewModel.state.value.elapsed)
         composeTestRule.onNodeWithText("-0:00").assertIsDisplayed()
     }
 
     @Test
     fun `every control on the player is named for a screen reader`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         listOf(
             string(R.string.action_back),
@@ -420,7 +450,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `the scrubber says where the track is, in words`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         viewModel.seekTo(104_000L)
         settle()
@@ -435,7 +465,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `the header's third cell says plainly what this build cannot do`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.music_playback_info)).performClick()
         settle()
@@ -447,7 +477,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `the back cell leaves the player`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.action_back)).performClick()
         settle()
@@ -457,7 +487,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `the bottom nav is still there, still on Files, and still works`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         MorseDestination.ordered.forEach { destination ->
             composeTestRule.onNodeWithContentDescription(string(destination.labelRes)).assertExists()
@@ -470,7 +500,7 @@ class MusicPlayerScreenTest {
 
     @Test
     fun `the whole player fits the phone, from the header down to the first queue row`() {
-        showPlayer(opened = tracks[1])
+        showPlayer()
 
         composeTestRule.onNodeWithText(string(R.string.music_now_playing)).assertIsDisplayed()
         composeTestRule.onNodeWithText("Harbour Lights · Midnight Sessions").assertIsDisplayed()
@@ -478,12 +508,12 @@ class MusicPlayerScreenTest {
         composeTestRule.onNodeWithContentDescription(string(R.string.music_play)).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(string(R.string.music_save)).assertIsDisplayed()
         composeTestRule.onNodeWithText(quantity(R.plurals.music_queue_header, 9, 9)).assertIsDisplayed()
-        composeTestRule.onAllNodes(hasText("Midnight Drive"))[0].assertIsDisplayed()
+        composeTestRule.onAllNodes(hasText("Dust & Gold"))[0].assertIsDisplayed()
     }
 
     @Test
     fun `a device with no music says so instead of drawing an empty player`() {
-        showPlayer(opened = tracks[1], library = emptyList())
+        showPlayer(library = emptyList())
 
         composeTestRule.onNodeWithText(string(R.string.music_empty_title)).assertIsDisplayed()
         composeTestRule.onNodeWithText(string(R.string.music_empty_body)).assertIsDisplayed()
@@ -507,8 +537,9 @@ class MusicPlayerScreenTest {
     }
 
     private fun showPlayer(
-        opened: MediaItem = tracks[1],
+        opened: MediaItem = oceanEyes,
         library: List<MediaItem> = tracks,
+        sort: SortOrder = this.sort,
         restored: Map<String, Any?> = emptyMap(),
     ) {
         backPresses = 0
@@ -517,7 +548,7 @@ class MusicPlayerScreenTest {
         val handle = SavedStateHandle(
             buildMap<String, Any?> {
                 put(Routes.MUSIC_ARG, opened.id)
-                put(Routes.MUSIC_SORT_ARG, Routes.sortToken(SortOrder(SortKey.NAME, SortDirection.ASC)))
+                put(Routes.MUSIC_SORT_ARG, Routes.sortToken(sort))
                 putAll(restored)
             },
         )
@@ -547,10 +578,10 @@ class MusicPlayerScreenTest {
     }
 
     /**
-     * Asserts the track at [index] is the one being shown.
+     * Asserts the track at [index] of the queue is the one being shown.
      *
      * Its name can appear twice — once as the title over the artwork and once as its
-     * own queue row — so the assertion is "at least once", and the identity of the
+     * own queue row — so that assertion is "at least once", and the identity of the
      * track is pinned by the time left on the right of the scrubber: every track here
      * is a different length, and no queue row is printed with a minus in front of it.
      */
