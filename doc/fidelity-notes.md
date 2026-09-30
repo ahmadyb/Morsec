@@ -371,3 +371,61 @@ of it above `bottomNav('files')`, because a track is opened from Files and belon
   no `SemanticsProperties.Selected`, anywhere in the app. Adding it is a design-system change that
   belongs with the multi-select work in milestones 3–4 rather than with this screen; the test
   asserts the row the model selects is the one drawn, and that the shown track is exactly one row.
+
+### Video player (§4.7)
+
+The stage is the reference's own gradient, stop for stop: `radial-gradient(circle at 60% 60%,#1b1a10,#000
+70%)`, with the 70% measured the way CSS measures a circle gradient of unspecified size — along the ray to
+the farthest corner. With no decoder until milestone 10 that glow is what separates the picture area from
+the `#0B0B0B` control bar beneath it, so the token is `videoSurfaceGlow` and the parity harness now checks
+it against the template's own inline style, the way it already checks `viewerBackdrop` and `viewerControlBar`.
+The stop is a constant in the screen rather than a token because the document writes it inline in one place
+and nowhere else; the two colours it runs between are tokens.
+
+* **The seek control is the same component as the music player's.** `.scrub.big.dark` — the taller bar on a
+  track of white at 20% — is `MorseScrubber(big = true, dark = true)`, unchanged. Its tap-and-drag gesture,
+  its touch-target padding and its reduced-motion behaviour are asserted once, in `MorseScrubberTest`, in
+  both variants; this screen asserts only that a seek reaches the paper, because a synthetic drag inside a
+  whole screen is a statement about the injection framework rather than about the player.
+* **The volume strip is a gesture surface, not ten buttons.** It answers on the way down and for every move
+  of the same pointer, which is what "Volume is a real slider — click any bar to set the level" means for a
+  finger, and it announces itself as an adjustable range whose action calls the same callback. The reference
+  lights a bar at 75% on `:hover`; a phone has no cursor, so no state is drawn for one. The speaker is
+  drawn 30 dp as the reference draws it and reports a 48 dp touch box as §11 requires, which is part of why
+  the row below needs the width rule.
+* **One width rule, from the reference's own arithmetic.** Five controls at their drawn sizes fit the 411 dp
+  phone this document was laid out for. Four 48 dp touch boxes plus a volume control of ten bars and a
+  readout need 397 dp of the 324 dp a 360 dp phone has left after the bar's padding, so the width the row
+  needs is computed from the tokens it is drawn with, and on a narrower device the volume control takes the
+  line below the transport. Nothing moves at the reference's width and no control is ever pushed off the
+  screen; the screen test renders it at 360 dp to say so.
+* **The header ends in two switches rather than nothing.** The reference's phone header has no trailing
+  control, and fullscreen is drawn on the WebShare player instead; §4.7 asks this player for fullscreen
+  handling, and the control row below could not take a sixth control at any width, so the switch goes where
+  there is room. Beside it is the app's gate for `MEDIA_PLAYBACK` — the same idiom as the music player's
+  header — which becomes a spacer of the same size once playback is real.
+* **It opens at 0:00, paused.** The reference opens a clip already playing at 28% of its length because its
+  clock is a simulation with something to show for it. Nothing here advances on its own, so a position nobody
+  put there would be a claim about playback that is not happening. `VideoTransportRules.skip` and `.seek` are
+  pure functions, so the ±10 second controls and the scrubber clamp by one rule rather than three that agree
+  today, and the twenty-two tests that ask for the same input twice are checking that no clock exists.
+* **Fullscreen is the player's own layout state.** The title block gives its height to the picture, and the
+  state is written to `SavedStateHandle` with everything else, so it survives recomposition and process
+  death. Locking the orientation and hiding the system bars are the window's business and arrive with the
+  real player in milestone 10, which is why nothing here reaches for an Activity.
+* **Subtitles have three states and honestly report the one this build can have.** Nothing here can open a
+  container and enumerate its tracks until Media3 lands, so a clip reports `UNAVAILABLE` and the control
+  says so when pressed rather than switching a track that cannot appear. The state behind it already knows
+  `OFF` from `ON`, so the control is a switch that switches something the day a track exists; the screen
+  test drives all three.
+* **A nudge says what it did; the time above the scrubber is the answer.** The reference's toast also prints
+  the time it landed on. Composing that sentence needs a resource read inside a click lambda, which is the
+  lint rule this codebase keeps itself to, so the toast names the action and the elapsed label — moving on
+  the same clamp the toast would have quoted — carries the position. The two mute toasts keep the
+  reference's wording and its remembered level, that level being formatted in the view model so the
+  sentence can be composed before the click happens.
+* **The 42nd lint warning was mine, and it is fixed rather than documented.** `AutoboxingStateCreation` at
+  `Scrubber.kt:118` appeared when the scrubber's gesture was rewritten: the track width is an Int, and
+  `mutableStateOf` boxes it on every size change. It is held in `mutableIntStateOf` now, so the count is back
+  to the 41 the viewer left behind and the video player's own code adds none — the volume metrics and the
+  glow token that this group added are read through `MockupTokens` like every other token.
