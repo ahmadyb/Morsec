@@ -95,13 +95,8 @@ public class BroadcastPickerViewModel @Inject constructor(
     /** For the screen's toast: what the user is about to broadcast to. */
     public fun chosenToken(): String = selection.value.chosenToken
 
-    private fun publish(selection: BroadcastSelection): BroadcastPickUiState = BroadcastPickUiState(
-        selection = selection,
-        batchFileCount = BroadcastFixtures.batch.size,
-        batchBytes = formatters.bytes(BroadcastMath.batchBytes(BroadcastFixtures.batch)),
-        discoveryLive = FeatureReadiness.isAvailable(FeatureArea.LAN_TRANSPORT) ||
-            FeatureReadiness.isAvailable(FeatureArea.NEARBY_TRANSPORT),
-    )
+    private fun publish(selection: BroadcastSelection): BroadcastPickUiState =
+        broadcastPickState(selection, BroadcastFixtures.batch, formatters)
 }
 
 // ---------------------------------------------------------------- the sender
@@ -223,56 +218,8 @@ public class BroadcastSenderViewModel @Inject constructor(
         _state.value = publish(session.value, endConfirmation.value)
     }
 
-    private fun publish(current: BroadcastSession, endVisible: Boolean): BroadcastSenderUiState {
-        val result = current.result
-        return BroadcastSenderUiState(
-            sessionId = current.id,
-            files = current.uniqueFiles.map { file -> fileRow(current, file) },
-            result = result,
-            recipientCount = current.uniqueRecipients.size,
-            combinedThroughput = formatters.speed(result.combinedThroughput),
-            hasThroughput = result.combinedThroughput > 0L,
-            tiles = BroadcastTiles(
-                phones = current.uniqueRecipients.size.toString(),
-                filesEach = current.uniqueFiles.size.toString(),
-                toSend = formatters.bytes(current.bytesToSend),
-                delivered = formatters.bytes(result.confirmedBytes),
-            ),
-            allAction = current.allAction,
-            endConfirmationVisible = endVisible,
-        )
-    }
-
-    private fun fileRow(current: BroadcastSession, file: BroadcastFile): BroadcastFileRow {
-        val deliveries = current.deliveriesFor(file.id)
-        return BroadcastFileRow(
-            file = file,
-            size = formatters.bytes(file.sizeBytes),
-            deliveredPhones = deliveries.count { it.state == TransferState.DONE },
-            totalPhones = deliveries.size,
-            state = BroadcastGroupState.of(deliveries),
-            recipients = deliveries.map { delivery -> deliveryRow(current, file, delivery) },
-        )
-    }
-
-    private fun deliveryRow(
-        current: BroadcastSession,
-        file: BroadcastFile,
-        delivery: BroadcastDelivery,
-    ): BroadcastDeliveryRow {
-        val recipient = current.recipient(delivery.recipientId)
-        return BroadcastDeliveryRow(
-            key = delivery.key,
-            fileName = file.fileName,
-            recipient = requireNotNull(recipient),
-            transferred = formatters.bytes(delivery.transferred),
-            total = formatters.bytes(delivery.totalBytes),
-            percent = if (delivery.transferred <= 0L) "" else formatters.percent(delivery.fraction),
-            fraction = delivery.fraction,
-            state = delivery.state,
-            actions = delivery.actions,
-        )
-    }
+    private fun publish(current: BroadcastSession, endVisible: Boolean): BroadcastSenderUiState =
+        broadcastSenderState(current, formatters, endVisible)
 
     private companion object {
         /**
@@ -405,28 +352,9 @@ public class BroadcastReceiverViewModel @Inject constructor(
         _state.value = publish(session.value, endConfirmation.value)
     }
 
-    private fun publish(current: BroadcastSession, endVisible: Boolean): BroadcastReceiverUiState {
-        val deliveries = current.deliveriesTo(recipient.peerId)
-        val moving = deliveries.filter { it.state.isActive && it.speedBytesPerSecond > 0L }
-        val average = if (moving.isEmpty()) 0L else moving.sumOf { it.speedBytesPerSecond } / moving.size
-        return BroadcastReceiverUiState(
-            sessionId = current.id,
-            recipient = recipient,
-            sender = current.sender,
-            batchBytes = formatters.bytes(current.batchBytes),
-            rows = deliveries.mapNotNull { delivery ->
-                current.file(delivery.fileId)?.let { file ->
-                    rowTo(delivery.asItem(current.id, file, TransferDirection.INCOMING), formatters)
-                }
-            },
-            result = current.resultFor(recipient.peerId),
-            averageSpeed = formatters.speed(average),
-            hasAverageSpeed = average > 0L,
-            allAction = current.allActionFor(recipient.peerId),
-            endConfirmationVisible = endVisible,
-        )
+    private fun publish(current: BroadcastSession, endVisible: Boolean): BroadcastReceiverUiState =
+        broadcastReceiverState(current, recipient.peerId, formatters, endVisible)
     }
-}
 
 // ---------------------------------------------------------------- completions
 
@@ -482,38 +410,9 @@ public class BroadcastSentViewModel @Inject constructor(
         _state.value = publish()
     }
 
-    private fun publish(): BroadcastSentUiState {
-        val current = session.value
-        val result = current.result
-        return BroadcastSentUiState(
-            result = result,
-            recipients = if (cleared.value) {
-                emptyList()
-            } else {
-                current.uniqueRecipients.map { recipient -> recipientRow(current, recipient) }
-            },
-            recipientCount = current.uniqueRecipients.size,
-            filesEach = current.uniqueFiles.size,
-            deliveredBytes = formatters.bytes(result.confirmedBytes),
-            allAction = current.allAction,
-            cleared = cleared.value,
-        )
-    }
+    private fun publish(): BroadcastSentUiState =
+        broadcastSentState(session.value, formatters, cleared.value)
 
-    private fun recipientRow(current: BroadcastSession, recipient: Peer): BroadcastRecipientResultRow {
-        val result = current.resultFor(recipient.peerId)
-        return BroadcastRecipientResultRow(
-            peer = recipient,
-            delivered = result.delivered,
-            expected = result.expected,
-            bytes = formatters.bytes(result.confirmedBytes),
-            failed = result.failed,
-            skipped = result.skipped,
-            cancelled = result.cancelled,
-            mismatched = result.mismatched,
-            state = current.stateFor(recipient.peerId),
-        )
-    }
 }
 
 /** What one phone's completion screen draws: its own files, and what became of them. */
@@ -526,8 +425,9 @@ public data class BroadcastReceivedUiState(
     public val fileCount: Int,
     /** Disabled once nothing is unfinished, which is the whole point of a completion screen. */
     public val allAction: BroadcastAllAction,
+) {
     public val complete: Boolean get() = result.complete
-)
+}
 
 /** One phone's completion: what arrived, what the checksums said, and where the files are. */
 @HiltViewModel
@@ -546,21 +446,201 @@ public class BroadcastReceivedViewModel @Inject constructor(
 
     public val state: StateFlow<BroadcastReceivedUiState> = _state.asStateFlow()
 
-    private fun publish(): BroadcastReceivedUiState {
-        val deliveries = session.deliveriesTo(recipient.peerId)
-        val result = session.resultFor(recipient.peerId)
-        return BroadcastReceivedUiState(
-            sender = session.sender,
-            recipient = recipient,
-            rows = deliveries.mapNotNull { delivery ->
-                session.file(delivery.fileId)?.let { file ->
-                    rowTo(delivery.asItem(session.id, file, TransferDirection.INCOMING), formatters)
-                }
-            },
-            result = result,
-            deliveredBytes = formatters.bytes(result.confirmedBytes),
-            fileCount = deliveries.size,
-            allAction = session.allActionFor(recipient.peerId),
-        )
-    }
+    private fun publish(): BroadcastReceivedUiState =
+        broadcastReceivedState(session, recipient.peerId, formatters)
+}
+
+
+// ---------------------------------------------------------------- state builders
+
+/**
+ * The five screens' states, built from a session and nothing else.
+ *
+ * These are top-level functions rather than private methods of each view model for the same
+ * reason the duplex session has one: a screen test needs a state it can construct, and a
+ * completion screen's partial case — a broadcast that finished with a failure and a skip —
+ * only exists if a state can be built from a session that has one. Every screen draws exactly
+ * what these return, so a test that asserts over one of these is asserting over the screen.
+ *
+ * Each builder derives everything from the deliveries: no count, total, percentage or speed is
+ * stored beside them, which is what makes a state that contradicts its own rows impossible to
+ * write down.
+ */
+
+/** What the picker draws: a selection, the batch it would send, and whether discovery is live. */
+internal fun broadcastPickState(
+    selection: BroadcastSelection,
+    batch: List<BroadcastFile>,
+    formatters: MorseFormatters,
+): BroadcastPickUiState = BroadcastPickUiState(
+    selection = selection,
+    batchFileCount = BroadcastMath.distinctFiles(batch).size,
+    batchBytes = formatters.bytes(BroadcastMath.batchBytes(batch)),
+    discoveryLive = FeatureReadiness.isAvailable(FeatureArea.LAN_TRANSPORT) ||
+        FeatureReadiness.isAvailable(FeatureArea.NEARBY_TRANSPORT),
+)
+
+/** What the sender draws: the batch, nested by file, with one row per phone beneath it. */
+internal fun broadcastSenderState(
+    session: BroadcastSession,
+    formatters: MorseFormatters,
+    endConfirmationVisible: Boolean = false,
+): BroadcastSenderUiState {
+    val result = session.result
+    return BroadcastSenderUiState(
+        sessionId = session.id,
+        files = session.uniqueFiles.map { file -> broadcastFileRow(session, file, formatters) },
+        result = result,
+        recipientCount = session.uniqueRecipients.size,
+        combinedThroughput = formatters.speed(result.combinedThroughput),
+        hasThroughput = result.combinedThroughput > 0L,
+        tiles = BroadcastTiles(
+            phones = session.uniqueRecipients.size.toString(),
+            filesEach = session.uniqueFiles.size.toString(),
+            toSend = formatters.bytes(session.bytesToSend),
+            delivered = formatters.bytes(result.confirmedBytes),
+        ),
+        allAction = session.allAction,
+        endConfirmationVisible = endConfirmationVisible,
+    )
+}
+
+/** One file of the batch, and where each phone is with it. */
+internal fun broadcastFileRow(
+    session: BroadcastSession,
+    file: BroadcastFile,
+    formatters: MorseFormatters,
+): BroadcastFileRow {
+    val deliveries = session.deliveriesFor(file.id)
+    return BroadcastFileRow(
+        file = file,
+        size = formatters.bytes(file.sizeBytes),
+        deliveredPhones = deliveries.count { it.state == TransferState.DONE },
+        totalPhones = deliveries.size,
+        state = BroadcastGroupState.of(deliveries),
+        recipients = deliveries.mapNotNull { delivery ->
+            session.recipient(delivery.recipientId)?.let { recipient ->
+                broadcastDeliveryRow(delivery, file, recipient, formatters)
+            }
+        },
+    )
+}
+
+/** One phone's row beneath a file: its own bytes, its own percentage, its own controls. */
+internal fun broadcastDeliveryRow(
+    delivery: BroadcastDelivery,
+    file: BroadcastFile,
+    recipient: Peer,
+    formatters: MorseFormatters,
+): BroadcastDeliveryRow = BroadcastDeliveryRow(
+    key = delivery.key,
+    fileName = file.fileName,
+    recipient = recipient,
+    transferred = formatters.bytes(delivery.transferred),
+    total = formatters.bytes(delivery.totalBytes),
+    percent = if (delivery.transferred <= 0L) "" else formatters.percent(delivery.fraction),
+    fraction = delivery.fraction,
+    state = delivery.state,
+    actions = delivery.actions,
+)
+
+/**
+ * What one phone's receiving screen draws: that phone's deliveries, read as incoming.
+ *
+ * Only that phone's deliveries are here — the screen cannot show another phone's progress even
+ * by accident, which is the structural half of "one recipient's trouble does not touch
+ * another's".
+ */
+internal fun broadcastReceiverState(
+    session: BroadcastSession,
+    recipientId: String,
+    formatters: MorseFormatters,
+    endConfirmationVisible: Boolean = false,
+): BroadcastReceiverUiState {
+    val recipient = session.recipient(recipientId) ?: session.uniqueRecipients.first()
+    val deliveries = session.deliveriesTo(recipient.peerId)
+    val moving = deliveries.filter { it.state.isActive && it.speedBytesPerSecond > 0L }
+    val average = if (moving.isEmpty()) 0L else moving.sumOf { it.speedBytesPerSecond } / moving.size
+    return BroadcastReceiverUiState(
+        sessionId = session.id,
+        recipient = recipient,
+        sender = session.sender,
+        batchBytes = formatters.bytes(session.batchBytes),
+        rows = deliveries.mapNotNull { delivery ->
+            session.file(delivery.fileId)?.let { file ->
+                rowTo(delivery.asItem(session.id, file, TransferDirection.INCOMING), formatters)
+            }
+        },
+        result = session.resultFor(recipient.peerId),
+        averageSpeed = formatters.speed(average),
+        hasAverageSpeed = average > 0L,
+        allAction = session.allActionFor(recipient.peerId),
+        endConfirmationVisible = endConfirmationVisible,
+    )
+}
+
+/** What the sender's completion draws: every phone, and what the batch added up to. */
+internal fun broadcastSentState(
+    session: BroadcastSession,
+    formatters: MorseFormatters,
+    cleared: Boolean = false,
+): BroadcastSentUiState {
+    val result = session.result
+    return BroadcastSentUiState(
+        result = result,
+        recipients = if (cleared) {
+            emptyList()
+        } else {
+            session.uniqueRecipients.map { recipient -> broadcastRecipientResult(session, recipient, formatters) }
+        },
+        recipientCount = session.uniqueRecipients.size,
+        filesEach = session.uniqueFiles.size,
+        deliveredBytes = formatters.bytes(result.confirmedBytes),
+        allAction = session.allAction,
+        cleared = cleared,
+    )
+}
+
+/** One phone's outcome, as the sender's completion lists it. */
+internal fun broadcastRecipientResult(
+    session: BroadcastSession,
+    recipient: Peer,
+    formatters: MorseFormatters,
+): BroadcastRecipientResultRow {
+    val result = session.resultFor(recipient.peerId)
+    return BroadcastRecipientResultRow(
+        peer = recipient,
+        delivered = result.delivered,
+        expected = result.expected,
+        bytes = formatters.bytes(result.confirmedBytes),
+        failed = result.failed,
+        skipped = result.skipped,
+        cancelled = result.cancelled,
+        mismatched = result.mismatched,
+        state = session.stateFor(recipient.peerId),
+    )
+}
+
+/** What one phone's completion draws: what arrived, and what the checksums said. */
+internal fun broadcastReceivedState(
+    session: BroadcastSession,
+    recipientId: String,
+    formatters: MorseFormatters,
+): BroadcastReceivedUiState {
+    val recipient = session.recipient(recipientId) ?: session.uniqueRecipients.first()
+    val deliveries = session.deliveriesTo(recipient.peerId)
+    val result = session.resultFor(recipient.peerId)
+    return BroadcastReceivedUiState(
+        sender = session.sender,
+        recipient = recipient,
+        rows = deliveries.mapNotNull { delivery ->
+            session.file(delivery.fileId)?.let { file ->
+                rowTo(delivery.asItem(session.id, file, TransferDirection.INCOMING), formatters)
+            }
+        },
+        result = result,
+        deliveredBytes = formatters.bytes(result.confirmedBytes),
+        fileCount = deliveries.size,
+        allAction = session.allActionFor(recipient.peerId),
+    )
 }
