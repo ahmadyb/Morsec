@@ -12,6 +12,7 @@ import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -81,16 +82,16 @@ class TransferScreensTest {
     fun `a moving outbound row offers pause and cancel`() {
         showStateless(session(outbound = listOf(row("a", TransferState.SENDING, kind = MediaKind.VIDEO))))
 
-        assertRowControls(fileName = "a.bin", pause = true, resume = false, cancel = true, retry = false)
+        assertRowControls(fileName = "a", pause = true, resume = false, cancel = true, retry = false)
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.VIDEO.id).assertIsDisplayed()
     }
 
     @Test
     fun `a moving inbound row offers pause and cancel, the same way`() {
-        showStateless(session(inbound = listOf(row("a", TransferState.RECEIVING, kind = MediaKind.IMAGE, TransferDirection.INCOMING))))
+        showStateless(session(inbound = listOf(row("a", TransferState.RECEIVING, MediaKind.IMAGE, TransferDirection.INCOMING))))
 
-        assertRowControls(fileName = "a.bin", pause = true, resume = false, cancel = true, retry = false)
+        assertRowControls(fileName = "a", pause = true, resume = false, cancel = true, retry = false)
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.IMAGE.id).assertIsDisplayed()
     }
@@ -105,7 +106,7 @@ class TransferScreensTest {
             ),
         )
 
-        assertRowControls(fileName = "a.bin", pause = false, resume = true, cancel = true, retry = false)
+        assertRowControls(fileName = "a", pause = false, resume = true, cancel = true, retry = false)
         composeTestRule.onNodeWithText("39.7 MB / 64 MB · resume 39.7 MB").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.AUDIO.id).assertIsDisplayed()
@@ -121,7 +122,7 @@ class TransferScreensTest {
             ),
         )
 
-        assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = true, retry = false)
+        assertRowControls(fileName = "a", pause = false, resume = false, cancel = true, retry = false)
         composeTestRule.onNodeWithText("4.1 MB · waiting").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.DOC.id).assertIsDisplayed()
@@ -131,7 +132,7 @@ class TransferScreensTest {
     fun `a failed row offers retry alone`() {
         showStateless(session(outbound = listOf(row("a", TransferState.FAILED, kind = MediaKind.ZIP, transferredBytes = 190_000L))))
 
-        assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = true)
+        assertRowControls(fileName = "a", pause = false, resume = false, cancel = false, retry = true)
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.ZIP.id).assertIsDisplayed()
     }
@@ -152,7 +153,7 @@ class TransferScreensTest {
             ),
         )
 
-        assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = false)
+        assertRowControls(fileName = "a", pause = false, resume = false, cancel = false, retry = false)
         composeTestRule.onNodeWithText("1.8 MB · CRC verified").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.APK.id).assertIsDisplayed()
@@ -168,7 +169,7 @@ class TransferScreensTest {
             ),
         )
 
-        assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = false)
+        assertRowControls(fileName = "a", pause = false, resume = false, cancel = false, retry = false)
         composeTestRule.onNodeWithText("64 MB · verifying").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.FOLDER.id).assertIsDisplayed()
@@ -190,7 +191,7 @@ class TransferScreensTest {
             ),
         )
 
-        assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = false)
+        assertRowControls(fileName = "a", pause = false, resume = false, cancel = false, retry = false)
         composeTestRule.onNodeWithText("600 KB / 1.8 MB · cancelled").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.OTHER.id).assertIsDisplayed()
@@ -206,7 +207,7 @@ class TransferScreensTest {
             ),
         )
 
-        assertRowControls(fileName = "a.bin", pause = false, resume = false, cancel = false, retry = false)
+        assertRowControls(fileName = "a", pause = false, resume = false, cancel = false, retry = false)
         composeTestRule.onNodeWithText("4.1 MB · skipped").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.VIDEO.id).assertIsDisplayed()
@@ -314,10 +315,10 @@ class TransferScreensTest {
             session(outbound = listOf(row("a", TransferState.SENDING), row("b", TransferState.SENDING))),
         )
 
-        composeTestRule.onNodeWithContentDescription(string(R.string.transfer_pause_file, "b.bin")).performClick()
+        composeTestRule.onNodeWithContentDescription(string(R.string.transfer_pause_file, "b")).performClick()
         settle()
 
-        assertEquals("the control reported the row it belongs to", listOf("b.bin"), rowActions)
+        assertEquals("the control reported the row it belongs to", listOf("b"), rowActions)
     }
 
     @Test
@@ -387,7 +388,7 @@ class TransferScreensTest {
         )
 
         // Retry stays per file: exactly one, for the one failed row.
-        composeTestRule.onAllNodesWithContentDescription(string(R.string.transfer_retry_file, "a.bin"))
+        composeTestRule.onAllNodesWithContentDescription(string(R.string.transfer_retry_file, "a"))
             .assertCountEquals(1)
         composeTestRule.onAllNodesWithText("Retry failed").assertCountEquals(0)
         composeTestRule.onAllNodesWithText("Queue").assertCountEquals(0)
@@ -423,9 +424,9 @@ class TransferScreensTest {
             composeTestRule.onNodeWithText(string(label)).assertIsDisplayed()
         }
         // And the file's own controls are still on screen rather than pushed off it.
-        composeTestRule.onNodeWithContentDescription(string(R.string.transfer_pause_file, "a.bin"))
+        composeTestRule.onNodeWithContentDescription(string(R.string.transfer_pause_file, "a"))
             .assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription(string(R.string.transfer_cancel_file, "a.bin"))
+        composeTestRule.onNodeWithContentDescription(string(R.string.transfer_cancel_file, "a"))
             .assertIsDisplayed()
     }
 
@@ -704,8 +705,8 @@ class TransferScreensTest {
     fun `the screen renders in the light theme as well as the dark one`() {
         showStateless(session(outbound = listOf(row("a", TransferState.SENDING))), darkTheme = false)
 
-        composeTestRule.onNodeWithText("a.bin").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription(string(R.string.transfer_pause_file, "a.bin"))
+        composeTestRule.onNodeWithText("a").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription(string(R.string.transfer_pause_file, "a"))
             .assertIsDisplayed()
         composeTestRule.onNodeWithText("SENDING").assertIsDisplayed()
     }

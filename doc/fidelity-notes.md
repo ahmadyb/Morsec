@@ -502,8 +502,9 @@ The differences from the reference, each a decision:
   the kind icon at every width. Below the row's width need the arrow goes, because which way a file is going
   is the section's job and the screen has exactly two sections; the kind icon, the name, the chip and the
   controls all stay, asserted at 360 dp. The row's need is ScreenPadding × 2 + directionGlyph 30 +
-  fileIcon 34 + four 12 dp gaps + a 96 dp floor for the name + a 72 dp floor for the chip + four 48 dp
-  controls, which is what the 30 dp token added for the glyph is measured against.
+  fileIcon 34 + four 12 dp gaps + a 96 dp floor for the name + a 72 dp floor for the chip + one or two
+  48 dp controls, depending on how many the row's state offers; that sum is what the 30 dp token added
+  for the glyph is measured against.
 * **Rows are named for anything that reads them.** Every per-file control carries a content description
   naming its file ("Pause holiday_2019.mp4"), the progress bar exposes a range and a "48.9 MB of 144 MB,
   34%" description, and the bottom bar's cells are named by their own words. The one thing deliberately

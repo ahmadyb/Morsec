@@ -57,7 +57,40 @@ public data class TransferRow(
 public data class TransferAllAction(
     public val label: TransferAllLabel,
     public val enabled: Boolean,
-)
+) {
+    public companion object {
+        /**
+         * What the control would do, and whether it can, decided once.
+         *
+         * It resumes when something is held and nothing is moving, and pauses otherwise. The
+         * label and the enabled flag come from the same two counts, so a button that says
+         * Resume all cannot be one that pauses, and the view model can ask this same question
+         * to know what pressing it means.
+         */
+        public fun of(session: TransferSession): TransferAllAction {
+            val paused = session.allItems.count { it.state == TransferState.PAUSED }
+            val pausable = session.allItems.count { it.state.isPausable && it.pauseEligible }
+            val resumeInstead = paused > 0 && session.allItems.none { it.state.isActive }
+            return TransferAllAction(
+                label = if (resumeInstead) TransferAllLabel.RESUME_ALL else TransferAllLabel.PAUSE_ALL,
+                enabled = if (resumeInstead) paused > 0 else pausable > 0,
+            )
+        }
+
+        /**
+         * The session after the whole-session control is pressed.
+         *
+         * One click, one answer: whatever [of] said the label was, that is the transition
+         * performed, so the control cannot do something other than what it says.
+         */
+        public fun toggled(session: TransferSession): TransferSession =
+            if (of(session).label == TransferAllLabel.RESUME_ALL) {
+                TransferRules.resumeAll(session)
+            } else {
+                TransferRules.pauseAll(session)
+            }
+    }
+}
 
 /**
  * Everything both duplex views draw, derived from the session.
@@ -139,17 +172,12 @@ public class TransferViewModel @Inject constructor(
      * The action bar's single whole-session control.
      *
      * It pauses when the session is running and resumes when it is held, which is the
-     * reference's own toggle (`S.tx.paused=!S.tx.paused`). Which of the two it currently is
-     * comes from [TransferUiState.allAction], so the label and the action cannot disagree.
+     * reference's own toggle (`S.tx.paused=!S.tx.paused`). Which of the two it is comes from
+     * the same [TransferAllAction.of] the screen reads to label the button, so the label and
+     * the action cannot disagree.
      */
     public fun toggleAll() {
-        mutate { current ->
-            if (current.allAction.label == TransferAllLabel.RESUME_ALL) {
-                TransferRules.resumeAll(current)
-            } else {
-                TransferRules.pauseAll(current)
-            }
-        }
+        mutate(TransferAllAction::toggled)
     }
 
     /**
@@ -220,36 +248,26 @@ internal fun transferUiStateTo(
     layout: TransferLayout,
     formatters: MorseFormatters,
     endConfirmationVisible: Boolean = false,
-): TransferUiState {
-    val paused = session.allItems.count { it.state == TransferState.PAUSED }
-    val pausable = session.allItems.count { it.state.isPausable && it.pauseEligible }
-    // Resume is offered when something is held and nothing else is running, which is the same
-    // condition the reference's single batch flag expresses.
-    val resumeInstead = paused > 0 && session.allItems.none { it.state.isActive }
-    return TransferUiState(
-        layout = layout,
-        sessionId = session.id,
-        peer = session.peer,
-        outbound = session.outbound.map { rowTo(it, formatters) },
-        inbound = session.inbound.map { rowTo(it, formatters) },
-        summaryOutbound = session.summary(TransferDirection.OUTGOING),
-        summaryInbound = session.summary(TransferDirection.INCOMING),
-        summaryLines = layout.summaryDirections.map { direction ->
-            val summary = session.summary(direction)
-            TransferSummaryLine(
-                direction = direction,
-                summary = summary,
-                averageSpeed = formatters.speed(summary.averageSpeedBytesPerSecond),
-            )
-        },
-        allAction = TransferAllAction(
-            label = if (resumeInstead) TransferAllLabel.RESUME_ALL else TransferAllLabel.PAUSE_ALL,
-            enabled = if (resumeInstead) paused > 0 else pausable > 0,
-        ),
-        endConfirmationVisible = endConfirmationVisible,
-        unfinishedCount = session.allItems.count { it.state.isUnfinished },
-    )
-}
+): TransferUiState = TransferUiState(
+    layout = layout,
+    sessionId = session.id,
+    peer = session.peer,
+    outbound = session.outbound.map { rowTo(it, formatters) },
+    inbound = session.inbound.map { rowTo(it, formatters) },
+    summaryOutbound = session.summary(TransferDirection.OUTGOING),
+    summaryInbound = session.summary(TransferDirection.INCOMING),
+    summaryLines = layout.summaryDirections.map { direction ->
+        val summary = session.summary(direction)
+        TransferSummaryLine(
+            direction = direction,
+            summary = summary,
+            averageSpeed = formatters.speed(summary.averageSpeedBytesPerSecond),
+        )
+    },
+    allAction = TransferAllAction.of(session),
+    endConfirmationVisible = endConfirmationVisible,
+    unfinishedCount = session.allItems.count { it.state.isUnfinished },
+)
 
 /** One item with the four numbers its row prints. */
 internal fun rowTo(item: TransferItem, formatters: MorseFormatters): TransferRow = TransferRow(
