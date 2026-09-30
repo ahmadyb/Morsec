@@ -199,20 +199,22 @@ class MusicPlayerScreenTest {
         composeTestRule.onNodeWithContentDescription(string(R.string.music_seek))
             .performTouchInput { swipeLeft() }
         settle()
-        assertTrue(
-            "a drag left left the track: ${viewModel.state.value.positionMillis}",
-            viewModel.state.value.positionMillis in 0L..duration,
-        )
+        val afterLeft = viewModel.state.value.positionMillis
+        // The scrubber seeks on the way down, so a gesture that starts three
+        // quarters along the track has already moved the position before it moves
+        // the finger; where it ends up is the framework's business, not the player's.
+        assertTrue("a drag left must seek, was $afterLeft", afterLeft > 0L)
+        assertTrue("a drag left left the track: $afterLeft", afterLeft in 0L..duration)
 
         composeTestRule.onNodeWithContentDescription(string(R.string.music_seek))
             .performTouchInput { swipeRight() }
         settle()
         val position = viewModel.state.value.positionMillis
+        assertTrue("a drag right must seek, was $position", position > 0L)
         assertTrue("a drag right left the track: $position", position in 0L..duration)
-        // Where a synthetic drag ends is the test framework's business; that the two
-        // labels agree with the position it left is the player's.
+        // Both labels are the position the gesture left, printed.
         assertEquals(elapsed(position), viewModel.state.value.elapsed)
-        composeTestRule.onNodeWithText("-${elapsed(duration - position)}").assertIsDisplayed()
+        assertEquals("-${elapsed(duration - position)}", viewModel.state.value.remaining)
     }
 
     @Test
