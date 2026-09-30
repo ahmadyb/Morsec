@@ -77,6 +77,24 @@ class MorseScrubberTest {
     }
 
     @Test
+    fun `a tap anywhere on the track seeks there, without the finger moving`() {
+        val seeks = mutableListOf<Long>()
+        showScrubber(positionMillis = 0L, onSeek = { seeks += it })
+
+        composeTestRule.onNodeWithContentDescription(DESCRIPTION).performClick()
+        composeTestRule.waitForIdle()
+
+        // The tap lands in the middle of the track, so it means half of it. This is
+        // the half of "click anywhere on the track or drag the knob to seek" that a
+        // gesture detector waiting for touch slop would never answer at all.
+        val sought = seeks.single()
+        assertTrue(
+            "a tap in the middle must seek to the middle, sought $sought",
+            kotlin.math.abs(sought - TRACK / 2) < TRACK / 20,
+        )
+    }
+
+    @Test
     fun `dragging left seeks backwards and stays inside the track`() {
         val seeks = mutableListOf<Long>()
         showScrubber(positionMillis = TRACK / 2, onSeek = { seeks += it })

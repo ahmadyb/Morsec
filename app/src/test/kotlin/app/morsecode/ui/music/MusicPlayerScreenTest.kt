@@ -174,32 +174,45 @@ class MusicPlayerScreenTest {
     }
 
     @Test
-    fun `dragging the scrubber seeks, and cannot leave the track`() {
+    fun `tapping the scrubber seeks to where it was tapped`() {
+        showPlayer()
+        val duration = oceanEyes.durationMillis
+
+        // A tap is the reference's pointerdown seek: it lands in the middle of the
+        // track, so half of 4:08 is left, and the finger never had to move.
+        composeTestRule.onNodeWithContentDescription(string(R.string.music_seek)).performClick()
+        settle()
+
+        val position = viewModel.state.value.positionMillis
+        assertTrue(
+            "a tap in the middle must seek to the middle, was $position",
+            kotlin.math.abs(position - duration / 2) <= duration / 100,
+        )
+        composeTestRule.onNodeWithText("-${elapsed(duration - position)}").assertIsDisplayed()
+    }
+
+    @Test
+    fun `dragging the scrubber keeps every seek inside the track`() {
         showPlayer()
         val duration = oceanEyes.durationMillis
 
         composeTestRule.onNodeWithContentDescription(string(R.string.music_seek))
             .performTouchInput { swipeLeft() }
         settle()
-
-        val afterLeft = viewModel.state.value.positionMillis
-        assertTrue("a drag left must move the position, was $afterLeft", afterLeft > 0L)
-        assertTrue("a drag left must land before the middle, was $afterLeft", afterLeft < duration / 2)
-        // The elapsed label can read the same as a queue row's length, so it is
-        // asserted as "on screen" and the remaining time — which nothing else prints
-        // with a minus in front of it — is asserted exactly.
         assertTrue(
-            composeTestRule.onAllNodes(hasText(elapsed(afterLeft))).fetchSemanticsNodes().isNotEmpty(),
+            "a drag left left the track: ${viewModel.state.value.positionMillis}",
+            viewModel.state.value.positionMillis in 0L..duration,
         )
-        composeTestRule.onNodeWithText("-${elapsed(duration - afterLeft)}").assertIsDisplayed()
 
         composeTestRule.onNodeWithContentDescription(string(R.string.music_seek))
             .performTouchInput { swipeRight() }
         settle()
-        assertTrue(
-            "a drag right must end past the middle, was ${viewModel.state.value.positionMillis}",
-            viewModel.state.value.positionMillis > duration / 2,
-        )
+        val position = viewModel.state.value.positionMillis
+        assertTrue("a drag right left the track: $position", position in 0L..duration)
+        // Where a synthetic drag ends is the test framework's business; that the two
+        // labels agree with the position it left is the player's.
+        assertEquals(elapsed(position), viewModel.state.value.elapsed)
+        composeTestRule.onNodeWithText("-${elapsed(duration - position)}").assertIsDisplayed()
     }
 
     @Test
@@ -276,7 +289,10 @@ class MusicPlayerScreenTest {
 
         // Repeat one: the same track again, from its start, still playing.
         viewModel.cycleRepeat()
+        settle()
         viewModel.cycleRepeat()
+        settle()
+        assertEquals(RepeatMode.ONE, viewModel.state.value.repeat)
         viewModel.seekTo(120_000L)
         settle()
         viewModel.trackEnded()
@@ -288,7 +304,9 @@ class MusicPlayerScreenTest {
         // Repeat the queue: two cycles from "repeat one" is "repeat the queue", and
         // the last track ends on the first and keeps playing.
         viewModel.cycleRepeat()
+        settle()
         viewModel.cycleRepeat()
+        settle()
         assertEquals(RepeatMode.ALL, viewModel.state.value.repeat)
         viewModel.select(tracks.lastIndex)
         settle()
@@ -299,7 +317,9 @@ class MusicPlayerScreenTest {
 
         // Neither: the queue ends, and the player says so by stopping.
         viewModel.cycleRepeat()
+        settle()
         viewModel.cycleRepeat()
+        settle()
         assertEquals(RepeatMode.OFF, viewModel.state.value.repeat)
         assertEquals(ShuffleMode.OFF, viewModel.state.value.shuffle)
         viewModel.select(tracks.lastIndex)

@@ -4,9 +4,8 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,12 +19,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
@@ -75,7 +76,15 @@ public object ScrubberMath {
  * finger (10 dp here, the same touch-floor call the rest of the app makes), and a
  * 13 px knob with a 3 px ring of accent at 26% that is invisible until interaction.
  *
- * Two differences, both deliberate:
+ * The gesture is written out rather than handed to `draggable`, for one reason: the
+ * reference seeks in its `pointerdown` handler, so a tap anywhere on the track seeks
+ * there without the finger ever moving. `draggable` reports nothing until touch slop
+ * is exceeded, which would make a tap do nothing at all — half of "click anywhere on
+ * the track or drag the knob" would be missing. Every move is consumed as it is read,
+ * which is what `.scrub{touch-action:none}` is for: a scrubber inside a scrolling
+ * list must not scroll the list.
+ *
+ * Two further differences, both deliberate:
  *
  * - The reference reveals the knob on `:hover` as well as while dragging. A phone has
  *   no cursor, so the knob appears under the finger and not before it.
@@ -107,6 +116,7 @@ public fun MorseScrubber(
     // the bar follows the finger rather than the position the player reported.
     var dragging by remember { mutableStateOf<Float?>(null) }
     var trackWidth by remember { mutableStateOf(0) }
+    val seekTo by rememberUpdatedState(onSeek)
 
     val fraction = dragging ?: ScrubberMath.fraction(positionMillis, durationMillis)
 
@@ -114,11 +124,7 @@ public fun MorseScrubber(
     fun seek(fractionOfTrack: Float) {
         val clamped = fractionOfTrack.coerceIn(0f, 1f)
         dragging = clamped
-        onSeek(ScrubberMath.position(clamped, durationMillis))
-    }
-
-    val dragState = rememberDraggableState { delta ->
-        if (trackWidth > 0) seek(fraction + delta / trackWidth)
+        seekTo(ScrubberMath.position(clamped, durationMillis))
     }
 
     val drawn by animateFloatAsState(
@@ -140,12 +146,25 @@ public fun MorseScrubber(
             .fillMaxWidth()
             .padding(vertical = metrics.scrubberPaddingVertical)
             .onSizeChanged { trackWidth = it.width }
-            .draggable(
-                state = dragState,
-                orientation = Orientation.Horizontal,
-                onDragStarted = { offset -> seek(offset.x / trackWidth.coerceAtLeast(1)) },
-                onDragStopped = { dragging = null },
-            )
+            .pointerInput(durationMillis) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    // Seek on the way down, as `pointerdown` does: this is the tap.
+                    seek(down.position.x / size.width.coerceAtLeast(1))
+                    down.consume()
+                    var tracking = true
+                    while (tracking) {
+                        val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
+                        if (change == null || !change.pressed) {
+                            tracking = false
+                        } else {
+                            seek(change.position.x / size.width.coerceAtLeast(1))
+                            change.consume()
+                        }
+                    }
+                    dragging = null
+                }
+            }
             .semantics {
                 this.contentDescription = contentDescription
                 if (positionDescription != null) this.stateDescription = positionDescription
