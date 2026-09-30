@@ -103,6 +103,48 @@ public object Routes {
     public fun transfer(layoutId: String): String = "session/$layoutId"
 
     /**
+     * The broadcast flow's five destinations.
+     *
+     * A broadcast is not one session read from two ends, so it is not one destination with a
+     * token: the picker chooses the phones, the sender watches one batch fan out, each phone
+     * has its own receiving screen, and each of those has a completion. They are literal
+     * route segments rather than a `{stage}` placeholder so that no two patterns in the graph
+     * can ever match the same path — a receiver's screen carries the phone it belongs to, and
+     * that argument is the only variable part.
+     */
+    public const val BROADCAST_PICK: String = "broadcast/pick"
+
+    /** The argument naming the phone whose receiving screen is drawn. */
+    public const val BROADCAST_RECIPIENT_ARG: String = "recipient"
+
+    /**
+     * The sender, told which phones the picker chose.
+     *
+     * The selection is part of the route rather than state the sender guesses at: what the
+     * user ticked is what the batch fans out to, so the screen that watches the fan-out cannot
+     * disagree with the screen that started it. An absent token means the flow was entered
+     * without a picker — a test, a deep link — and the session falls back to the reference's
+     * own two phones rather than to nothing.
+     */
+    public const val BROADCAST_SENDER: String = "broadcast/sender?chosen={chosen}"
+    public const val BROADCAST_SENT: String = "broadcast/sender/complete"
+    public const val BROADCAST_RECEIVER: String = "broadcast/receiver/{$BROADCAST_RECIPIENT_ARG}"
+    public const val BROADCAST_RECEIVED: String = "broadcast/receiver/{$BROADCAST_RECIPIENT_ARG}/complete"
+
+    /** The chosen phones a picker restores itself from, so a recreated screen comes back. */
+    public const val BROADCAST_CHOSEN_ARG: String = "chosen"
+
+    /** The sender's route, carrying the phones the picker chose. */
+    public fun broadcastSender(chosenToken: String): String = "broadcast/sender?chosen=$chosenToken"
+
+    /** One phone's receiving screen: the same screen for every phone, told which one. */
+    public fun broadcastReceiver(recipientId: String): String = "broadcast/receiver/$recipientId"
+
+    /** One phone's completion screen, for the phone that finished. */
+    public fun broadcastReceived(recipientId: String): String =
+        "broadcast/receiver/$recipientId/complete"
+
+    /**
      * Navigation decodes a path argument on the way in, but a restored or
      * deep-linked value can still carry the encoding, so the rule lives here
      * rather than being re-derived in each destination: a value that is already a

@@ -75,6 +75,14 @@ public fun ConnectScreen(
      * says what this build cannot do yet.
      */
     onOpenTransfer: (TransferLayout) -> Unit,
+    /**
+     * Opens the broadcast picker.
+     *
+     * Broadcast was a gate too, for the same reason and with the same answer: the picker and
+     * the three screens behind it exist now, so the button goes there and it is the fan-out's
+     * own engine work that says what this build cannot do yet.
+     */
+    onOpenBroadcast: () -> Unit,
     viewModel: ConnectViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -165,7 +173,7 @@ public fun ConnectScreen(
                     }
                     MorseButton(
                         text = stringResource(R.string.connect_broadcast),
-                        onClick = { gate.run(FeatureArea.SESSIONS_AND_BROADCAST) { } },
+                        onClick = onOpenBroadcast,
                         variant = MorseButtonVariant.WASH,
                         fillWidth = true,
                     )

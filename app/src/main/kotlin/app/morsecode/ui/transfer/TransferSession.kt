@@ -187,11 +187,28 @@ public data class TransferActions(
         /** No controls: completed, cancelled, skipped and verifying rows all offer none. */
         public val NONE: TransferActions = TransferActions(pause = false, resume = false, cancel = false, retry = false)
 
-        public fun of(item: TransferItem): TransferActions = TransferActions(
-            pause = item.state.isPausable && item.pauseEligible,
-            resume = item.state.isResumable,
-            cancel = item.state.isCancellable && item.cancelEligible,
-            retry = item.state.isRetryable && item.retryEligible,
+        public fun of(item: TransferItem): TransferActions =
+            of(item.state, item.pauseEligible, item.cancelEligible, item.retryEligible)
+
+        /**
+         * The same matrix, for anything that is a transfer without being a [TransferItem].
+         *
+         * A broadcast delivery to one phone is exactly that: it moves, holds, fails and
+         * verifies like any other file, and it has to reach the same answer about what it may
+         * offer. Rather than a second matrix in the broadcast package — which is how two
+         * screens come to disagree about whether a paused file can be cancelled — the delivery
+         * asks this.
+         */
+        public fun of(
+            state: TransferState,
+            pauseEligible: Boolean = true,
+            cancelEligible: Boolean = true,
+            retryEligible: Boolean = true,
+        ): TransferActions = TransferActions(
+            pause = state.isPausable && pauseEligible,
+            resume = state.isResumable,
+            cancel = state.isCancellable && cancelEligible,
+            retry = state.isRetryable && retryEligible,
         )
     }
 }
@@ -517,17 +534,26 @@ public object TransferRules {
      * because it happened before the user ended anything and telling them it was cancelled
      * would be blaming them for it.
      */
-    public fun end(session: TransferSession): TransferSession = overSession(session) { item ->
+    public fun end(session: TransferSession): TransferSession = overSession(session, ::end)
+
+    /**
+     * What ending a session does to one row, on its own.
+     *
+     * Everything unfinished stops, including a file that is being verified: the question the
+     * user answered was about the whole session, and a checksum comparison outliving it would
+     * make that question's answer untrue. The per-row eligibility flags are deliberately not
+     * consulted — they are the *engine's* terms for a row it is still working on, and once the
+     * session is over there is no engine left to ask. A row that already arrived, was skipped,
+     * or failed on its own terms is left exactly as it is.
+     *
+     * It is a function of one row as well as of a session because a broadcast ends a delivery
+     * with the same rule, and a second copy of "unfinished becomes cancelled" is a second
+     * answer waiting to disagree with this one.
+     */
+    public fun end(item: TransferItem): TransferItem =
         if (item.state.isUnfinished) {
-            // Everything unfinished stops, including a file that is being verified: the
-            // question the user answered was about the whole session, and a checksum
-            // comparison outliving it would make that question's answer untrue. The
-            // per-row eligibility flags are deliberate here — they are the *engine's*
-            // terms for a row it is still working on, and once the session is over there
-            // is no engine left to ask.
             item.copy(state = TransferState.CANCELLED, speedBytesPerSecond = 0L)
         } else {
             item
         }
-    }
 }

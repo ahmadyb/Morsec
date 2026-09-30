@@ -157,6 +157,9 @@ public data class MorseMetrics(
     val volumeStepRadius: Dp,
     val volumeLabelWidth: Dp,
     val transferDirectionGlyph: Dp,
+    /** The nested recipient avatar's size and letter size inside the broadcast sender. */
+    val broadcastRecipientAvatar: Dp,
+    val broadcastRecipientAvatarText: TextUnit,
     val addressBarMinHeight: Dp,
     val addressBarPadding: Dp,
     val addressBarNestedPaddingHorizontal: Dp,
@@ -311,6 +314,8 @@ public data class MorseMetrics(
             volumeStepRadius = dp("video.volumeStepRadius"),
             volumeLabelWidth = dp("video.volumeLabelWidth"),
             transferDirectionGlyph = dp("transfer.directionGlyph"),
+            broadcastRecipientAvatar = dp("broadcast.recipientAvatar"),
+            broadcastRecipientAvatarText = MockupTokens.metrics.getValue("broadcast.recipientAvatarText").sp,
             addressBarMinHeight = dp("addressBar.minHeight"),
             addressBarPadding = dp("addressBar.padding"),
             addressBarNestedPaddingHorizontal = dp("addressBar.nestedPaddingHorizontal"),

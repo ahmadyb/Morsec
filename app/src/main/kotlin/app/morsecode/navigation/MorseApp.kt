@@ -9,6 +9,11 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.navArgument
+import app.morsecode.ui.broadcast.BroadcastPickScreen
+import app.morsecode.ui.broadcast.BroadcastReceivedScreen
+import app.morsecode.ui.broadcast.BroadcastReceiverScreen
+import app.morsecode.ui.broadcast.BroadcastSenderScreen
+import app.morsecode.ui.broadcast.BroadcastSentScreen
 import app.morsecode.ui.connect.ConnectScreen
 import app.morsecode.ui.crashes.CrashesScreen
 import app.morsecode.ui.doctor.DoctorScreen
@@ -58,6 +63,7 @@ public fun MorseApp(
                 onOpenTransfer = { layout ->
                     navController.navigateSimple(Routes.transfer(layout.id))
                 },
+                onOpenBroadcast = { navController.navigateSimple(Routes.BROADCAST_PICK) },
             )
         }
 
@@ -147,6 +153,79 @@ public fun MorseApp(
             )
         }
 
+        // The broadcast flow: pick phones, fan the batch out, watch one phone receive it,
+        // then read what the batch added up to. One receiver screen draws every phone — the
+        // route says which — because the reference's three phone frames are a mockup showing
+        // three states of one screen, and an app has one screen and an argument.
+        composable(Routes.BROADCAST_PICK) {
+            BroadcastPickScreen(
+                onBack = navController::back,
+                onNavigate = navController::navigateTopLevel,
+                onBroadcastTo = { chosen ->
+                    navController.navigateSimple(Routes.broadcastSender(chosen))
+                },
+            )
+        }
+
+        composable(
+            route = Routes.BROADCAST_SENDER,
+            arguments = listOf(
+                navArgument(Routes.BROADCAST_CHOSEN_ARG) {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+            ),
+        ) {
+            BroadcastSenderScreen(
+                onBack = navController::back,
+                onNavigate = navController::navigateTopLevel,
+                onSeeCompletion = { navController.navigateSimple(Routes.BROADCAST_SENT) },
+                onOpenRecipient = { recipientId ->
+                    navController.navigateSimple(Routes.broadcastReceiver(recipientId))
+                },
+                onEnded = { navController.leaveBroadcast() },
+            )
+        }
+
+        composable(Routes.BROADCAST_SENT) {
+            BroadcastSentScreen(
+                onBack = navController::back,
+                onNavigate = navController::navigateTopLevel,
+                onEnded = { navController.leaveBroadcast() },
+            )
+        }
+
+        composable(
+            route = Routes.BROADCAST_RECEIVER,
+            arguments = listOf(
+                navArgument(Routes.BROADCAST_RECIPIENT_ARG) { type = NavType.StringType },
+            ),
+        ) {
+            BroadcastReceiverScreen(
+                onBack = navController::back,
+                onNavigate = navController::navigateTopLevel,
+                onSeeCompletion = { recipientId ->
+                    navController.navigateSimple(Routes.broadcastReceived(recipientId))
+                },
+                onOpenFolder = { navController.navigateTopLevel(MorseDestination.FILES) },
+                onEnded = { navController.leaveBroadcast() },
+            )
+        }
+
+        composable(
+            route = Routes.BROADCAST_RECEIVED,
+            arguments = listOf(
+                navArgument(Routes.BROADCAST_RECIPIENT_ARG) { type = NavType.StringType },
+            ),
+        ) {
+            BroadcastReceivedScreen(
+                onBack = navController::back,
+                onNavigate = navController::navigateTopLevel,
+                onOpenFolder = { navController.navigateTopLevel(MorseDestination.FILES) },
+                onEnded = { navController.leaveBroadcast() },
+            )
+        }
+
         // The internal folder browser. One entry holds the whole walk: the browser
         // changes level in place and turns the back gesture into "up one level"
         // until the granted folder is reached, so nothing is stacked per level.
@@ -198,6 +277,19 @@ public fun MorseApp(
                 onOpenDoctor = { navController.navigateSimple(Routes.DOCTOR) },
             )
         }
+    }
+}
+
+/**
+ * Leaving a broadcast: back to Connect, with the flow it came from no longer behind it.
+ *
+ * The same shape as ending a duplex session — the reference returns to Connect too — and
+ * written once here because all three of the flow's exits mean the same thing.
+ */
+private fun NavHostController.leaveBroadcast() {
+    navigate(Routes.CONNECT) {
+        popUpTo(Routes.BROADCAST_PICK) { inclusive = true }
+        launchSingleTop = true
     }
 }
 

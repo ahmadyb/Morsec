@@ -642,6 +642,23 @@ check(
   `kotlin ${kotlinMetrics.get('transfer.directionGlyph')} vs template ${directionGlyph ? directionGlyph[1] : 'not found'}`,
 );
 
+// The broadcast sender's nested recipient rows draw the recipient's avatar inline at
+// 20 px with a 9 px letter rather than through the `.av` default, so the row belongs to
+// the file above it.
+const nestedAvatar = /<span class="av" style="width:(\d+)px;height:\d+px;font-size:(\d+)px;background:/.exec(html);
+check(
+  'Inline surface constants',
+  'broadcast.recipientAvatar',
+  nestedAvatar !== null && Number(nestedAvatar[1]) === kotlinMetrics.get('broadcast.recipientAvatar'),
+  `kotlin ${kotlinMetrics.get('broadcast.recipientAvatar')} vs template ${nestedAvatar ? nestedAvatar[1] : 'not found'}`,
+);
+check(
+  'Inline surface constants',
+  'broadcast.recipientAvatarText',
+  nestedAvatar !== null && Number(nestedAvatar[2]) === kotlinMetrics.get('broadcast.recipientAvatarText'),
+  `kotlin ${kotlinMetrics.get('broadcast.recipientAvatarText')} vs template ${nestedAvatar ? nestedAvatar[2] : 'not found'}`,
+);
+
 /* ------------------------------------------------------------------ 6. icons */
 
 const iconsJson = JSON.parse(read(ICONS_JSON));

@@ -495,6 +495,10 @@
         <item quantity="one">%d cancelled</item>
         <item quantity="other">%d cancelled</item>
     </plurals>
+    <plurals name="transfer_summary_checksum_differs">
+        <item quantity="one">%1$d checksum differs</item>
+        <item quantity="other">%1$d checksums differ</item>
+    </plurals>
     <plurals name="transfer_summary_skipped">
         <item quantity="one">%d skipped</item>
         <item quantity="other">%d skipped</item>
@@ -517,6 +521,101 @@
     <string name="transfer_end_kept">Files already transferred stay on both devices.</string>
     <string name="transfer_end_confirm">End session</string>
     <string name="transfer_end_keep">Keep transferring</string>
+
+    <!-- Broadcast: the picker, the sender, one receiver, and both completions. -->
+    <string name="broadcast_title">Broadcast</string>
+    <string name="broadcast_pick_searching">Searching for phones</string>
+    <string name="broadcast_pick_searching_body">Look for peers on the same Wi-Fi network</string>
+    <string name="broadcast_pick_sample_title">Sample devices</string>
+    <string name="broadcast_pick_sample_body">Discovery is not live yet — LAN arrives in milestone 6 and Nearby in milestone 7. The phones below are the reference\'s own sample devices, so this picker can be reviewed before then.</string>
+    <string name="broadcast_transport_label">TRANSPORT</string>
+    <string name="broadcast_transport_value">LAN or Nearby</string>
+    <string name="broadcast_queue_label">QUEUE</string>
+    <plurals name="broadcast_queue_files">
+        <item quantity="one">%1$d file · %2$s</item>
+        <item quantity="other">%1$d files · %2$s</item>
+    </plurals>
+    <string name="broadcast_selected_label">SELECTED</string>
+    <string name="broadcast_selected_none">None yet</string>
+    <plurals name="broadcast_selected_phones">
+        <item quantity="one">%1$d phone</item>
+        <item quantity="other">%1$d phones</item>
+    </plurals>
+    <string name="broadcast_discovered">Discovered</string>
+    <string name="broadcast_refresh">Refresh</string>
+    <string name="broadcast_rescanning">Rescanning…</string>
+    <string name="broadcast_pick_hint">Each phone gets its own session.</string>
+    <plurals name="broadcast_pick_more">
+        <item quantity="one">Pick at least two phones to broadcast — %1$d more.</item>
+        <item quantity="other">Pick at least two phones to broadcast — %1$d more.</item>
+    </plurals>
+    <string name="broadcast_start">Connect &amp; broadcast to (%1$d)</string>
+    <plurals name="broadcast_started">
+        <item quantity="one">Broadcasting to %1$d phone</item>
+        <item quantity="other">Broadcasting to %1$d phones</item>
+    </plurals>
+    <string name="broadcast_no_devices">No phones found yet</string>
+    <string name="broadcast_no_devices_body">Phones running Morsecode on the same network appear here.</string>
+
+    <string name="broadcast_sender_title">Broadcasting</string>
+    <string name="broadcast_file_meta">%1$s · %2$s</string>
+    <plurals name="broadcast_file_deliveries">
+        <item quantity="one">%1$d of %2$d phone</item>
+        <item quantity="other">%1$d of %2$d phones</item>
+    </plurals>
+    <string name="broadcast_chip_verified">VERIFIED</string>
+    <string name="broadcast_chip_incomplete">INCOMPLETE</string>
+    <plurals name="broadcast_summary_to_phones">
+        <item quantity="one">Broadcasting to %1$d phone</item>
+        <item quantity="other">Broadcasting to %1$d phones</item>
+    </plurals>
+    <string name="broadcast_summary_throughput">combined throughput %1$s</string>
+    <string name="broadcast_percent_none">–</string>
+    <string name="broadcast_recipient_progress">%1$s: %2$s of %3$s, %4$s</string>
+    <string name="broadcast_retry_delivery">Retry %1$s for %2$s</string>
+    <string name="broadcast_open_recipient">Open this phone\'s session</string>
+    <string name="broadcast_see_completion">See completion</string>
+    <string name="broadcast_tile_phones">phones</string>
+    <string name="broadcast_tile_files_each">files each</string>
+    <string name="broadcast_tile_to_send">to send MB</string>
+    <string name="broadcast_tile_delivered">delivered MB</string>
+    <string name="broadcast_tile_files">files</string>
+    <string name="broadcast_tile_received">received MB</string>
+    <string name="broadcast_destination">Saved to Download/Morsecode</string>
+    <plurals name="broadcast_summary_delivered">
+        <item quantity="one">%1$d delivered</item>
+        <item quantity="other">%1$d delivered</item>
+    </plurals>
+
+    <string name="broadcast_receiver_title">Receiving</string>
+    <string name="broadcast_peer_source">Broadcast · %1$s · %2$s</string>
+    <string name="broadcast_from_badge">FROM</string>
+    <string name="broadcast_receiver_from">Receiving from %1$s</string>
+    <string name="broadcast_device_phone">Phone</string>
+    <string name="broadcast_device_tablet">Tablet</string>
+    <string name="broadcast_device_other">Device</string>
+    <string name="broadcast_open_folder">Open folder</string>
+
+    <string name="broadcast_complete_title">Complete</string>
+    <string name="broadcast_sender_complete">Broadcast complete</string>
+    <plurals name="broadcast_all_verified">
+        <item quantity="one">All %1$d phone verified</item>
+        <item quantity="other">All %1$d phones verified</item>
+    </plurals>
+    <plurals name="broadcast_partial_verified">
+        <item quantity="one">%1$d of %2$d delivery verified</item>
+        <item quantity="other">%1$d of %2$d deliveries verified</item>
+    </plurals>
+    <string name="broadcast_delivered_to">Delivered to</string>
+    <plurals name="broadcast_recipient_result">
+        <item quantity="one">%1$d of %2$d file · %3$s</item>
+        <item quantity="other">%1$d of %2$d files · %3$s</item>
+    </plurals>
+    <string name="broadcast_recipient_verified">%1$s · verified</string>
+    <string name="broadcast_peer_count_chip">×%1$d</string>
+    <string name="broadcast_nothing_delivered">Nothing delivered yet</string>
+    <string name="broadcast_nothing_delivered_body">Cleared deliveries stay in the history.</string>
+    <string name="broadcast_section_received">Received</string>
 
     <!-- Accessibility -->
     <string name="cd_avatar">Avatar for %1$s</string>

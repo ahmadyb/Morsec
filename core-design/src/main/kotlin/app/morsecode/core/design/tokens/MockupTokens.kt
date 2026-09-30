@@ -386,6 +386,12 @@ public object MockupTokens {
         // on the file-kind icon's wash.
         "transfer.directionGlyph" to 30f,
 
+        // The broadcast sender's nested per-recipient row: the reference draws the
+        // recipient's avatar inline at 20 px with a 9 px letter, so a row that sits under
+        // a file reads as belonging to it rather than competing with it.
+        "broadcast.recipientAvatar" to 20f,
+        "broadcast.recipientAvatarText" to 9f,
+
         // Address / breadcrumb bars.
         "addressBar.minHeight" to 44f,
         "addressBar.radius" to 12f,
