@@ -106,6 +106,14 @@ public fun FilesScreen(
      */
     onOpenViewer: (MediaItem, SortOrder) -> Unit,
     onOpenMusic: (MediaItem, SortOrder) -> Unit,
+    /**
+     * Opens the video player at [item].
+     *
+     * No sort order travels with this one, unlike the two above: the player shows a
+     * single clip and keeps no queue, so there is no second list whose order could
+     * disagree with the one this grid was showing.
+     */
+    onOpenVideo: (MediaItem) -> Unit,
     viewModel: FilesViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -195,6 +203,9 @@ public fun FilesScreen(
                         // §4.6: tracks open in the player the app draws, in the
                         // order this list was showing them.
                         is MediaOpen.MusicPlayer -> onOpenMusic(target.item, state.sortOrder)
+
+                        // §4.7: clips open in the video player the app draws.
+                        is MediaOpen.VideoPlayer -> onOpenVideo(target.item)
 
                         is MediaOpen.HandOff -> {
                             if (!ShareFiles.open(context, target.item)) {

@@ -7,11 +7,10 @@ import app.morsecode.core.model.MediaKind
  * What tapping a file in Files means.
  *
  * One rule, in one place: a photograph opens in the viewer the app draws (master
- * prompt §4.5), a track opens in the player the app draws (§4.6), and anything else
- * is handed to whatever on the device can open it. Stating it here rather than inside
- * a click lambda means the rule can be asserted in a test instead of only implied by
- * a screen — and the video player joins this type when it lands, rather than growing
- * a second decision in a second file.
+ * prompt §4.5), a track opens in the music player the app draws (§4.6), a clip opens in
+ * the video player the app draws (§4.7), and anything else is handed to whatever on the
+ * device can open it. Stating it here rather than inside a click lambda means the rule
+ * can be asserted in a test instead of only implied by a screen.
  */
 public sealed interface MediaOpen {
     /** The image viewer, opened at this item. */
@@ -19,6 +18,9 @@ public sealed interface MediaOpen {
 
     /** The music player, opened at this track. */
     public data class MusicPlayer(public val item: MediaItem) : MediaOpen
+
+    /** The video player, opened at this clip. */
+    public data class VideoPlayer(public val item: MediaItem) : MediaOpen
 
     /** The platform's own handler for this file's type. */
     public data class HandOff(public val item: MediaItem) : MediaOpen
@@ -28,12 +30,13 @@ public sealed interface MediaOpen {
  * The destination a tap on [item] means.
  *
  * A folder always hands off, whatever kind its rows happen to be: the app's players
- * open one photograph or one track at a time, and a container is the platform's file
- * manager's business.
+ * open one photograph, one track or one clip at a time, and a container is the
+ * platform's file manager's business.
  */
 public fun mediaOpenFor(item: MediaItem): MediaOpen = when {
     item.isFolder -> MediaOpen.HandOff(item)
     item.kind == MediaKind.IMAGE -> MediaOpen.Viewer(item)
     item.kind == MediaKind.AUDIO -> MediaOpen.MusicPlayer(item)
+    item.kind == MediaKind.VIDEO -> MediaOpen.VideoPlayer(item)
     else -> MediaOpen.HandOff(item)
 }

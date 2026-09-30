@@ -72,6 +72,23 @@ public object Routes {
     /** The media id a [MUSIC] destination was opened with. */
     public fun decodeMusicArg(value: String?): String = decodedArg(value)
 
+    /** Argument name for [VIDEO]. */
+    public const val VIDEO_ARG: String = "itemId"
+    public const val VIDEO: String = "video/{$VIDEO_ARG}"
+
+    /**
+     * Route for one clip in the video player.
+     *
+     * Unlike [viewer] and [music] this carries no sort token, and the difference is the
+     * screen's rather than an oversight: a video player shows one clip and has no queue,
+     * so there is no second list whose order could disagree with the one Files was
+     * showing. The id alone says everything the destination needs.
+     */
+    public fun video(encodedItemId: String): String = "video/$encodedItemId"
+
+    /** The media id a [VIDEO] destination was opened with. */
+    public fun decodeVideoArg(value: String?): String = decodedArg(value)
+
     /**
      * Navigation decodes a path argument on the way in, but a restored or
      * deep-linked value can still carry the encoding, so the rule lives here

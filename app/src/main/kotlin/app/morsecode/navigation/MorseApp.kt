@@ -20,6 +20,7 @@ import app.morsecode.ui.help.HelpScreen
 import app.morsecode.ui.logs.LogsScreen
 import app.morsecode.ui.onboarding.OnboardingScreen
 import app.morsecode.ui.settings.SettingsScreen
+import app.morsecode.ui.video.VideoPlayerScreen
 import app.morsecode.ui.viewer.ViewerScreen
 
 /**
@@ -64,6 +65,9 @@ public fun MorseApp(
                 onOpenMusic = { item, sort ->
                     navController.navigateSimple(Routes.music(Uri.encode(item.id), sort))
                 },
+                onOpenVideo = { item ->
+                    navController.navigateSimple(Routes.video(Uri.encode(item.id)))
+                },
             )
         }
 
@@ -98,6 +102,18 @@ public fun MorseApp(
                 onBack = navController::back,
                 onNavigate = navController::navigateTopLevel,
             )
+        }
+
+        // The video player: the tapped clip on a true-black stage, with the shared
+        // scrubber, the ±10 second nudges, volume and mute above nothing else — no
+        // bottom nav, because §4.7's screen is immersive the way the viewer's is.
+        composable(
+            route = Routes.VIDEO,
+            arguments = listOf(
+                navArgument(Routes.VIDEO_ARG) { type = NavType.StringType },
+            ),
+        ) {
+            VideoPlayerScreen(onBack = navController::back)
         }
 
         // The internal folder browser. One entry holds the whole walk: the browser
