@@ -90,6 +90,19 @@ public object Routes {
     public fun decodeVideoArg(value: String?): String = decodedArg(value)
 
     /**
+     * The argument that says which of the two duplex views to draw.
+     *
+     * One destination, two layouts: "Sending + receiving" and "Receiving + sending back" are
+     * one session read from each end, so the route carries which end rather than there being
+     * two screens that could drift apart.
+     */
+    public const val TRANSFER_ARG: String = "layout"
+    public const val TRANSFER: String = "session/{$TRANSFER_ARG}"
+
+    /** The route for one of the two duplex transfer views. */
+    public fun transfer(layoutId: String): String = "session/$layoutId"
+
+    /**
      * Navigation decodes a path argument on the way in, but a restored or
      * deep-linked value can still carry the encoding, so the rule lives here
      * rather than being re-derived in each destination: a value that is already a

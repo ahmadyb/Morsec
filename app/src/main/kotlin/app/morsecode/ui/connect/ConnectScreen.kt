@@ -52,6 +52,7 @@ import app.morsecode.core.model.RecentDevice
 import app.morsecode.navigation.MorseDestination
 import app.morsecode.ui.common.MorseTabScaffold
 import app.morsecode.ui.common.rememberFeatureGate
+import app.morsecode.ui.transfer.TransferLayout
 
 /**
  * The Connect destination.
@@ -65,6 +66,15 @@ import app.morsecode.ui.common.rememberFeatureGate
 public fun ConnectScreen(
     onNavigate: (MorseDestination) -> Unit,
     onOpenHelp: () -> Unit,
+    /**
+     * Opens one of the two duplex transfer views.
+     *
+     * Send and Receive used to be gates: there was nowhere to go, so they said which
+     * milestone delivers the engine. The session screens exist now, so these open them and
+     * it is the session's own engine work — adding files, running in the background — that
+     * says what this build cannot do yet.
+     */
+    onOpenTransfer: (TransferLayout) -> Unit,
     viewModel: ConnectViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -143,12 +153,12 @@ public fun ConnectScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         MorseButton(
                             text = stringResource(R.string.connect_send),
-                            onClick = { gate.run(FeatureArea.TRANSFER_ENGINE) { } },
+                            onClick = { onOpenTransfer(TransferLayout.SENDING_FIRST) },
                             modifier = Modifier.weight(1f),
                         )
                         MorseButton(
                             text = stringResource(R.string.connect_receive),
-                            onClick = { gate.run(FeatureArea.TRANSFER_ENGINE) { } },
+                            onClick = { onOpenTransfer(TransferLayout.RECEIVING_FIRST) },
                             variant = MorseButtonVariant.GHOST,
                             modifier = Modifier.weight(1f),
                         )

@@ -405,7 +405,118 @@
     <string name="gated_area_discovery">Device discovery over LAN or Nearby</string>
     <string name="gated_area_webshare">The embedded WebShare server</string>
     <string name="gated_area_playback">In-app media playback</string>
+    <string name="gated_area_background">Keeping a transfer alive in the background</string>
     <string name="gated_action">Understood</string>
+
+    <!-- Duplex transfer screens (master prompt §5 "Transfers"). Two symmetrical views
+         of one session, so the section words are the only thing that changes between them. -->
+    <string name="transfer_title_sending">Sending + receiving</string>
+    <string name="transfer_title_receiving">Receiving + sending back</string>
+    <string name="transfer_peer_connected">Connected · Phone · %1$s</string>
+    <string name="transfer_section_sending">Sending</string>
+    <string name="transfer_section_receiving">Receiving</string>
+    <string name="transfer_section_sending_back">Sending back</string>
+    <plurals name="transfer_section_files">
+        <item quantity="one">%1$s · %2$d file</item>
+        <item quantity="other">%1$s · %2$d files</item>
+    </plurals>
+    <string name="transfer_clear_completed">Clear completed</string>
+    <string name="transfer_cleared_done">Completed transfers cleared</string>
+    <string name="transfer_cleared_none">No completed transfers</string>
+    <string name="transfer_empty_sending_title">Nothing to send</string>
+    <string name="transfer_empty_sending_body">Files you add appear here and go to the connected phone.</string>
+    <string name="transfer_empty_receiving_title">Nothing incoming</string>
+    <string name="transfer_empty_receiving_body">The peer can send back at any time without re-pairing.</string>
+
+    <!-- One transfer row: the second line states what is happening to that file. -->
+    <string name="transfer_meta_transferring">%1$s / %2$s · %3$s</string>
+    <string name="transfer_meta_waiting">%1$s · waiting</string>
+    <string name="transfer_meta_paused">%1$s / %2$s · resume %3$s</string>
+    <string name="transfer_meta_verifying">%1$s · verifying</string>
+    <string name="transfer_meta_delivered">%1$s · CRC verified</string>
+    <string name="transfer_meta_mismatch">%1$s · checksum differs</string>
+    <string name="transfer_meta_failed">%1$s / %2$s · failed</string>
+    <string name="transfer_meta_cancelled">%1$s / %2$s · cancelled</string>
+    <string name="transfer_meta_skipped">%1$s · skipped</string>
+    <string name="transfer_progress_description">%1$s of %2$s, %3$s</string>
+    <string name="transfer_chip_sending">SENDING</string>
+    <string name="transfer_chip_receiving">RECV</string>
+    <string name="transfer_chip_queued">QUEUED</string>
+    <string name="transfer_chip_paused">PAUSED</string>
+    <string name="transfer_chip_verifying">VERIFYING</string>
+    <string name="transfer_chip_done">DONE</string>
+    <string name="transfer_chip_failed">FAILED</string>
+    <string name="transfer_chip_cancelled">CANCELLED</string>
+    <string name="transfer_chip_skipped">SKIPPED</string>
+
+    <!-- Per-file controls. Each names the file it acts on. -->
+    <string name="transfer_pause_file">Pause %1$s</string>
+    <string name="transfer_resume_file">Resume %1$s</string>
+    <string name="transfer_cancel_file">Cancel %1$s</string>
+    <string name="transfer_retry_file">Retry %1$s</string>
+
+    <!-- The batch line under a section. -->
+    <string name="transfer_summary_in_progress">Batch in progress</string>
+    <string name="transfer_summary_complete">✓ Batch complete</string>
+    <string name="transfer_summary_average">avg %1$s</string>
+    <plurals name="transfer_summary_sending">
+        <item quantity="one">%d sending</item>
+        <item quantity="other">%d sending</item>
+    </plurals>
+    <plurals name="transfer_summary_receiving">
+        <item quantity="one">%d receiving</item>
+        <item quantity="other">%d receiving</item>
+    </plurals>
+    <plurals name="transfer_summary_queued">
+        <item quantity="one">%d queued</item>
+        <item quantity="other">%d queued</item>
+    </plurals>
+    <plurals name="transfer_summary_paused">
+        <item quantity="one">%d paused</item>
+        <item quantity="other">%d paused</item>
+    </plurals>
+    <plurals name="transfer_summary_verifying">
+        <item quantity="one">%d verifying</item>
+        <item quantity="other">%d verifying</item>
+    </plurals>
+    <plurals name="transfer_summary_sent">
+        <item quantity="one">%d sent</item>
+        <item quantity="other">%d sent</item>
+    </plurals>
+    <plurals name="transfer_summary_received">
+        <item quantity="one">%d received</item>
+        <item quantity="other">%d received</item>
+    </plurals>
+    <plurals name="transfer_summary_failed">
+        <item quantity="one">%d failed</item>
+        <item quantity="other">%d failed</item>
+    </plurals>
+    <plurals name="transfer_summary_cancelled">
+        <item quantity="one">%d cancelled</item>
+        <item quantity="other">%d cancelled</item>
+    </plurals>
+    <plurals name="transfer_summary_skipped">
+        <item quantity="one">%d skipped</item>
+        <item quantity="other">%d skipped</item>
+    </plurals>
+
+    <!-- The bottom transfer action bar. Four actions, fixed. -->
+    <string name="transfer_add_files">Add files</string>
+    <string name="transfer_pause_all">Pause all</string>
+    <string name="transfer_resume_all">Resume all</string>
+    <string name="transfer_background">Background</string>
+    <string name="transfer_end">End</string>
+
+    <!-- Ending a session asks first, and says what happens to what is unfinished. -->
+    <string name="transfer_end_title">End this session?</string>
+    <plurals name="transfer_end_unfinished">
+        <item quantity="one">1 unfinished transfer will be cancelled.</item>
+        <item quantity="other">%d unfinished transfers will be cancelled.</item>
+    </plurals>
+    <string name="transfer_end_nothing_unfinished">Nothing is still transferring.</string>
+    <string name="transfer_end_kept">Files already transferred stay on both devices.</string>
+    <string name="transfer_end_confirm">End session</string>
+    <string name="transfer_end_keep">Keep transferring</string>
 
     <!-- Accessibility -->
     <string name="cd_avatar">Avatar for %1$s</string>

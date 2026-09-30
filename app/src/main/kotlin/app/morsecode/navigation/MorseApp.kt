@@ -20,6 +20,8 @@ import app.morsecode.ui.help.HelpScreen
 import app.morsecode.ui.logs.LogsScreen
 import app.morsecode.ui.onboarding.OnboardingScreen
 import app.morsecode.ui.settings.SettingsScreen
+import app.morsecode.ui.transfer.TransferLayout
+import app.morsecode.ui.transfer.TransferScreen
 import app.morsecode.ui.video.VideoPlayerScreen
 import app.morsecode.ui.viewer.ViewerScreen
 
@@ -50,7 +52,13 @@ public fun MorseApp(
         }
 
         composable(Routes.CONNECT) {
-            ConnectScreen(onNavigate = navController::navigateTopLevel, onOpenHelp = { navController.navigateSimple(Routes.HELP) })
+            ConnectScreen(
+                onNavigate = navController::navigateTopLevel,
+                onOpenHelp = { navController.navigateSimple(Routes.HELP) },
+                onOpenTransfer = { layout ->
+                    navController.navigateSimple(Routes.transfer(layout.id))
+                },
+            )
         }
 
         composable(Routes.FILES) {
@@ -114,6 +122,29 @@ public fun MorseApp(
             ),
         ) {
             VideoPlayerScreen(onBack = navController::back)
+        }
+
+        // The duplex transfer session: one destination, two layouts. "Sending + receiving"
+        // and "Receiving + sending back" are the same session seen from each end, so which
+        // one is drawn comes from the route rather than from a second copy of the screen.
+        composable(
+            route = Routes.TRANSFER,
+            arguments = listOf(
+                navArgument(Routes.TRANSFER_ARG) { type = NavType.StringType },
+            ),
+        ) {
+            TransferScreen(
+                onBack = navController::back,
+                onNavigate = navController::navigateTopLevel,
+                // Ending a session leaves it: the reference returns to Connect, and the
+                // session it just closed is not somewhere to go back to.
+                onEnded = {
+                    navController.navigate(Routes.CONNECT) {
+                        popUpTo(Routes.TRANSFER) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
+            )
         }
 
         // The internal folder browser. One entry holds the whole walk: the browser

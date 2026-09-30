@@ -92,8 +92,12 @@ private fun FeatureGateDialog(area: FeatureArea, onDismiss: () -> Unit) {
 
 @StringRes
 private fun areaNameRes(area: FeatureArea): Int = when (area) {
-    FeatureArea.TRANSFER_ENGINE, FeatureArea.SESSIONS_AND_BROADCAST, FeatureArea.BACKGROUND_SERVICE ->
+    FeatureArea.TRANSFER_ENGINE, FeatureArea.SESSIONS_AND_BROADCAST ->
         R.string.gated_area_send
+
+    // Backgrounding a session is the foreground service's job, and saying so names what is
+    // actually missing rather than repeating the sending message.
+    FeatureArea.BACKGROUND_SERVICE -> R.string.gated_area_background
 
     FeatureArea.LAN_TRANSPORT, FeatureArea.NEARBY_TRANSPORT, FeatureArea.DOCTOR_NEARBY ->
         R.string.gated_area_discovery

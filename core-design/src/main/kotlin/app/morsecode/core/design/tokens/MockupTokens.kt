@@ -382,6 +382,9 @@ public object MockupTokens {
         "video.volumeStepRadius" to 3f,
         "video.volumeLabelWidth" to 30f,
         "video.volumeLabelSize" to 10f,
+        // txRow's leading arrow: `.ico` inline at 30 px, transparent rather than
+        // on the file-kind icon's wash.
+        "transfer.directionGlyph" to 30f,
 
         // Address / breadcrumb bars.
         "addressBar.minHeight" to 44f,

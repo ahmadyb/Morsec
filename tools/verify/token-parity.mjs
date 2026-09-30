@@ -632,6 +632,16 @@ for (const [key, pattern] of INLINE_CONSTANTS) {
     `kotlin ${kotlinRaw.get(key)} vs template ${found ? found[1] : 'not found'}`);
 }
 
+// The transfer row's leading arrow is the one size in `txRow` that is neither a colour
+// nor a `.ico` default: 30 px inline, on no wash at all.
+const directionGlyph = /width:(\d+)px;height:\d+px;background:transparent;color:var\(--t2\)/.exec(html);
+check(
+  'Inline surface constants',
+  'transfer.directionGlyph',
+  directionGlyph !== null && Number(directionGlyph[1]) === kotlinMetrics.get('transfer.directionGlyph'),
+  `kotlin ${kotlinMetrics.get('transfer.directionGlyph')} vs template ${directionGlyph ? directionGlyph[1] : 'not found'}`,
+);
+
 /* ------------------------------------------------------------------ 6. icons */
 
 const iconsJson = JSON.parse(read(ICONS_JSON));
