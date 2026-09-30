@@ -16,8 +16,9 @@ import org.robolectric.Shadows.shadowOf
  * looper between attempts so the continuation that starts it can run, and gives up only
  * after a bound nobody's machine should need.
  *
- * [idle] is the caller's own settle step: these tests drive Compose, and a Compose test
- * rule has to be told to wait as well as the looper.
+ * [idle] is the caller's own settle step and comes last so a call site reads as a call
+ * with a body: these tests drive Compose, and a Compose test rule has to be told to wait
+ * as well as the looper.
  *
  * The file is named for what it waits for rather than for the Android class it
  * returns, because tools/verify reads a file called *Activity.kt as a component this
@@ -26,9 +27,9 @@ import org.robolectric.Shadows.shadowOf
  */
 internal fun awaitStartedActivity(
     context: Context,
-    idle: () -> Unit,
     attempts: Int = 200,
     pauseMillis: Long = 10L,
+    idle: () -> Unit,
 ): Intent? {
     val application = context.applicationContext as Application
     repeat(attempts) {
