@@ -331,9 +331,19 @@ class TransferRulesTest {
     fun `resume all reaches only rows that are actually held`() {
         val resumed = TransferRules.resumeAll(session)
 
-        assertEquals("nothing was paused in the outbound direction", TransferState.SENDING, resumed.item("a")!!.state)
-        assertEquals("the held row stays held: resume is for rows that are held", TransferState.PAUSED, resumed.item("c")!!.state)
-        assertEquals(TransferState.RECEIVING, resumed.item("f")!!.state)
+        assertEquals(
+            "a row that was moving is left where it is",
+            TransferState.SENDING,
+            resumed.item("a")!!.state,
+        )
+        assertEquals(
+            "the one held row goes again",
+            TransferState.SENDING,
+            resumed.item("c")!!.state,
+        )
+        assertEquals("a queued row is not a held one", TransferState.QUEUED, resumed.item("b")!!.state)
+        assertEquals("a receiving row keeps receiving", TransferState.RECEIVING, resumed.item("f")!!.state)
+        assertEquals(TransferState.DONE, resumed.item("d")!!.state)
     }
 
     @Test
@@ -379,6 +389,15 @@ class TransferRulesTest {
             "the bytes a cancelled file reached are kept",
             48_900_000L,
             ended.item("a")!!.transferredBytes,
+        )
+
+        val verifying = session.withItem(
+            item("v", TransferDirection.OUTGOING, TransferState.VERIFYING, 64_000_000L, 64_000_000L),
+        )
+        assertEquals(
+            "a file still being checked is unfinished, and the dialog says it will stop",
+            TransferState.CANCELLED,
+            TransferRules.end(verifying).item("v")!!.state,
         )
     }
 

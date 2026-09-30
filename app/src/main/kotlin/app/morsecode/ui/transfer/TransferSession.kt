@@ -518,6 +518,16 @@ public object TransferRules {
      * would be blaming them for it.
      */
     public fun end(session: TransferSession): TransferSession = overSession(session) { item ->
-        if (item.state.isUnfinished) cancel(item) else item
+        if (item.state.isUnfinished) {
+            // Everything unfinished stops, including a file that is being verified: the
+            // question the user answered was about the whole session, and a checksum
+            // comparison outliving it would make that question's answer untrue. The
+            // per-row eligibility flags are deliberate here — they are the *engine's*
+            // terms for a row it is still working on, and once the session is over there
+            // is no engine left to ask.
+            item.copy(state = TransferState.CANCELLED, speedBytesPerSecond = 0L)
+        } else {
+            item
+        }
     }
 }

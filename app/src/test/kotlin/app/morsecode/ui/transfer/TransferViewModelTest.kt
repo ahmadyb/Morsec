@@ -49,7 +49,8 @@ class TransferViewModelTest {
         val rows = viewModel(TransferLayout.SENDING_FIRST).state.value.outbound
         val holiday = rows.first { it.item.id == "v1" }
 
-        assertEquals("48.9 MB", holiday.transferred)
+        // The bytes label follows the app's own rule: whole megabytes above ten.
+        assertEquals("49 MB", holiday.transferred)
         assertEquals("144 MB", holiday.total)
         assertEquals("6.2 MB/s", holiday.speed)
         assertEquals("34%", holiday.percent)

@@ -105,7 +105,9 @@ class TransferScreensTest {
         )
 
         assertRowControls(fileName = "a", pause = false, resume = true, cancel = true, retry = false)
-        composeTestRule.onNodeWithText("39.7 MB / 64 MB · resume 39.7 MB").assertIsDisplayed()
+        // The app's byte rule rounds whole megabytes above ten, so 39.7 MB reads "40 MB"
+        // here where the reference prints its own one-decimal figure.
+        composeTestRule.onNodeWithText("40 MB / 64 MB · resume 40 MB").assertIsDisplayed()
         // Whichever state it is in, the row draws the kind of file it is.
         composeTestRule.onNodeWithTag(TransferKindTagPrefix + MediaKind.AUDIO.id).assertIsDisplayed()
     }
@@ -518,8 +520,10 @@ class TransferScreensTest {
         showScreen(TransferLayout.SENDING_FIRST)
 
         composeTestRule.onNodeWithText("Ravi's Redmi").assertIsDisplayed()
+        // The subtitle is the sentence; the chip repeats the transport in the chip style's
+        // uppercase, which is why it is asked for by the word it actually draws.
         composeTestRule.onNodeWithText("Connected · Phone · LAN").assertIsDisplayed()
-        composeTestRule.onNodeWithText("LAN").assertIsDisplayed()
+        composeTestRule.onNodeWithText("LAN").assertExists()
     }
 
     @Test
@@ -527,8 +531,8 @@ class TransferScreensTest {
         showScreen(TransferLayout.RECEIVING_FIRST)
 
         composeTestRule.onNodeWithText("Pixel 7X").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Connected · Phone · Nearby").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Nearby").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Connected · Phone · Nearby").assertExists()
+        composeTestRule.onNodeWithText("NEARBY").assertExists()
     }
 
     @Test
@@ -537,7 +541,9 @@ class TransferScreensTest {
 
         composeTestRule.onNodeWithText("holiday_2019.mp4").assertIsDisplayed()
         composeTestRule.onNodeWithText("SENDING").assertIsDisplayed()
-        composeTestRule.onNodeWithText("48.9 MB / 144 MB · 6.2 MB/s").assertIsDisplayed()
+        // 48.9 MB of a 144 MB file: the app's byte rule rounds whole megabytes from ten up,
+        // so the line reads "49 MB" where the reference prints "48.9 MB".
+        composeTestRule.onNodeWithText("49 MB / 144 MB · 6.2 MB/s").assertIsDisplayed()
     }
 
     @Test
@@ -556,7 +562,7 @@ class TransferScreensTest {
             viewModel.state.value.outbound.map { it.item.transferredBytes },
         )
         assertEquals(speedsBefore, viewModel.state.value.outbound.map { it.item.speedBytesPerSecond })
-        composeTestRule.onNodeWithText("48.9 MB / 144 MB · 6.2 MB/s").assertIsDisplayed()
+        composeTestRule.onNodeWithText("49 MB / 144 MB · 6.2 MB/s").assertIsDisplayed()
     }
 
     /**

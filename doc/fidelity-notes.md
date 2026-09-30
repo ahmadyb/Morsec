@@ -498,6 +498,18 @@ The differences from the reference, each a decision:
   held file does not drag the figure down. Nothing on either screen counts up: the fixtures are
   deterministic, and a test idles the looper and reads the same bytes, speeds and labels twice — which is
   the only form of "no simulated engine" a test can actually check.
+* **A byte label rounds where the reference keeps a decimal.** `MorseFormatters.bytes` prints one
+  decimal below ten megabytes and whole megabytes above it, a rule the viewer, the music player and
+  history already share, so a row the reference draws as "48.9 MB / 144 MB" reads "49 MB / 144 MB"
+  here and a held row's "39.7 MB" reads "40 MB". Changing the rule for one screen would make the
+  same file's size read two ways in one app, so the screens keep the shared rule and this note
+  records the difference. Speeds are always one decimal ("6.2 MB/s"), as the reference prints them.
+* **Ending a session stops a file that is being verified, which is a decision rather than a
+  technicality.** `TransferRules.end` cancels everything still unfinished — moving, queued, held or
+  checksumming — because the dialog promises the user that unfinished files will be cancelled, and a
+  verification that outlived the session it belonged to would make that sentence untrue. Per-row
+  eligibility, which the engine owns, deliberately does not apply: once the session is over there is
+  no engine left to ask. A done, skipped or failed row is left exactly as it is.
 * **The direction arrow is dropped before the file's name is.** The reference puts a direction arrow before
   the kind icon at every width. Below the row's width need the arrow goes, because which way a file is going
   is the section's job and the screen has exactly two sections; the kind icon, the name, the chip and the
@@ -506,7 +518,7 @@ The differences from the reference, each a decision:
   48 dp controls, depending on how many the row's state offers; that sum is what the 30 dp token added
   for the glyph is measured against.
 * **Rows are named for anything that reads them.** Every per-file control carries a content description
-  naming its file ("Pause holiday_2019.mp4"), the progress bar exposes a range and a "48.9 MB of 144 MB,
+  naming its file ("Pause holiday_2019.mp4"), the progress bar exposes a range and a "49 MB of 144 MB,
   34%" description, and the bottom bar's cells are named by their own words. The one thing deliberately
   silent is the file-kind glyph: `FileKindIcon` draws with no description because the file's name is
   announced immediately beside it, and a row that says "Video, holiday_2019.mp4" says the same thing twice.
