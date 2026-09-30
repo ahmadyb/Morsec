@@ -89,7 +89,7 @@ class TransferScreensTest {
 
     @Test
     fun `a moving inbound row offers pause and cancel, the same way`() {
-        showStateless(session(inbound = listOf(row("a", TransferState.RECEIVING, MediaKind.IMAGE, TransferDirection.INCOMING))))
+        showStateless(session(inbound = listOf(row("a", TransferState.RECEIVING, TransferDirection.INCOMING, MediaKind.IMAGE))))
 
         assertRowControls(fileName = "a", pause = true, resume = false, cancel = true, retry = false)
         // Whichever state it is in, the row draws the kind of file it is.
@@ -498,8 +498,8 @@ class TransferScreensTest {
     @Test
     fun `nothing on the screen moves on its own`() {
         showScreen(TransferLayout.SENDING_FIRST)
-        val bytesBefore = viewModel.state.value.outbound.map { it.transferredBytes }
-        val speedsBefore = viewModel.state.value.outbound.map { it.speedBytesPerSecond }
+        val bytesBefore = viewModel.state.value.outbound.map { it.item.transferredBytes }
+        val speedsBefore = viewModel.state.value.outbound.map { it.item.speedBytesPerSecond }
 
         settle()
         ShadowLooper.idleMainLooper()
@@ -508,9 +508,9 @@ class TransferScreensTest {
         assertEquals(
             "there is no clock in a transfer row: idle as long as you like",
             bytesBefore,
-            viewModel.state.value.outbound.map { it.transferredBytes },
+            viewModel.state.value.outbound.map { it.item.transferredBytes },
         )
-        assertEquals(speedsBefore, viewModel.state.value.outbound.map { it.speedBytesPerSecond })
+        assertEquals(speedsBefore, viewModel.state.value.outbound.map { it.item.speedBytesPerSecond })
         composeTestRule.onNodeWithText("48.9 MB / 144 MB · 6.2 MB/s").assertIsDisplayed()
     }
 

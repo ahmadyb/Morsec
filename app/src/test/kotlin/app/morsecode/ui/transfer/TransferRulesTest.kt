@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
+import org.junit.runners.Parameterized.Parameters
 
 /**
  * The per-file matrix, state by state and direction by direction.
@@ -329,7 +330,7 @@ class TransferRulesTest {
         val resumed = TransferRules.resumeAll(session)
 
         assertEquals("nothing was paused in the outbound direction", TransferState.SENDING, resumed.item("a")!!.state)
-        assertEquals(TransferState.PAUSED, "the held row cannot be held again", resumed.item("c")!!.state)
+        assertEquals("the held row stays held: resume is for rows that are held", TransferState.PAUSED, resumed.item("c")!!.state)
         assertEquals(TransferState.RECEIVING, resumed.item("f")!!.state)
     }
 
@@ -516,8 +517,8 @@ class TransferRulesTest {
         id: String,
         direction: TransferDirection,
         state: TransferState,
-        totalBytes: Long,
-        transferredBytes: Long,
+        totalBytes: Long = 144_000_000L,
+        transferredBytes: Long = 48_900_000L,
         speed: Long = if (state.isActive) 6_200_000L else 0L,
         pauseEligible: Boolean = true,
     ) = TransferItem(
