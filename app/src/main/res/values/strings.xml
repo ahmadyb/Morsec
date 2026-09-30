@@ -174,10 +174,10 @@
     <!-- Video player (§4.7). The two mute toasts are the reference's own wording. Its
          nudge toast also printed the time it landed on; here the nudge says what it did
          and the elapsed time above the scrubber is the answer, because that label moves
-         on the same rule the toast would have quoted. -->
+         on the same rule the toast would have quoted. The header has no fullscreen or
+         about-playback label because the approved header holds neither control. -->
     <string name="video_play">Play</string>
     <string name="video_pause">Pause</string>
-    <string name="video_playback_info">About playback in this build</string>
     <string name="video_seek">Seek position in clip</string>
     <string name="video_position">%1$s of %2$s</string>
     <string name="video_skip_back">Back 10 seconds</string>
@@ -192,8 +192,6 @@
     <string name="video_subtitles_off">Subtitles · off</string>
     <string name="video_subtitles_on">Subtitles · on</string>
     <string name="video_no_subtitles">No subtitles in this file</string>
-    <string name="video_fullscreen">Fullscreen</string>
-    <string name="video_exit_fullscreen">Exit fullscreen</string>
     <string name="video_loading">Loading video</string>
     <string name="video_empty_title">No video to play</string>
     <string name="video_empty_body">The clip that was opened is not on this device any more.</string>

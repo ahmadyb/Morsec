@@ -399,20 +399,23 @@ and nowhere else; the two colours it runs between are tokens.
   needs is computed from the tokens it is drawn with, and on a narrower device the volume control takes the
   line below the transport. Nothing moves at the reference's width and no control is ever pushed off the
   screen; the screen test renders it at 360 dp to say so.
-* **The header ends in two switches rather than nothing.** The reference's phone header has no trailing
-  control, and fullscreen is drawn on the WebShare player instead; §4.7 asks this player for fullscreen
-  handling, and the control row below could not take a sixth control at any width, so the switch goes where
-  there is room. Beside it is the app's gate for `MEDIA_PLAYBACK` — the same idiom as the music player's
-  header — which becomes a spacer of the same size once playback is real.
+* **The header is back, the name and its metadata, and nothing else.** No overflow menu (§4.7), no
+  fullscreen switch — the reference draws that on its WebShare player, not on the phone's — and no standing
+  feature badge. The gate for `MEDIA_PLAYBACK` is an answer to an action a user asks for, not furniture on a
+  screen they are merely looking at, so this header renders it nowhere: it is the music player, whose
+  approved header does carry one, that invokes it. The screen test asserts the header by the exact set of
+  content descriptions rendered, so a control added later has to be added to that set deliberately.
 * **It opens at 0:00, paused.** The reference opens a clip already playing at 28% of its length because its
   clock is a simulation with something to show for it. Nothing here advances on its own, so a position nobody
   put there would be a claim about playback that is not happening. `VideoTransportRules.skip` and `.seek` are
   pure functions, so the ±10 second controls and the scrubber clamp by one rule rather than three that agree
   today, and the twenty-two tests that ask for the same input twice are checking that no clock exists.
-* **Fullscreen is the player's own layout state.** The title block gives its height to the picture, and the
-  state is written to `SavedStateHandle` with everything else, so it survives recomposition and process
-  death. Locking the orientation and hiding the system bars are the window's business and arrive with the
-  real player in milestone 10, which is why nothing here reaches for an Activity.
+* **Fullscreen is model state with no control in this screen.** `VideoTransport.fullscreen`,
+  `VideoTransportRules.toggleFullscreen` and its `SavedStateHandle` round-trip are kept and tested because
+  §4.7 asks this player for fullscreen/orientation handling and Media3 will need somewhere to put it, but the
+  approved Milestone 2 header exposes no such action and the state changes nothing on screen today. Locking
+  the orientation and hiding the system bars are the window's business and arrive with the real player in
+  milestone 10, which is why nothing here reaches for an Activity.
 * **Subtitles have three states and honestly report the one this build can have.** Nothing here can open a
   container and enumerate its tracks until Media3 lands, so a clip reports `UNAVAILABLE` and the control
   says so when pressed rather than switching a track that cannot appear. The state behind it already knows
@@ -424,6 +427,12 @@ and nowhere else; the two colours it runs between are tokens.
   the same clamp the toast would have quoted — carries the position. The two mute toasts keep the
   reference's wording and its remembered level, that level being formatted in the view model so the
   sentence can be composed before the click happens.
+* **A header correction, recorded because it is the shape of thing that drifts.** The first version of this
+  screen carried a fullscreen switch and a standing `MEDIA_PLAYBACK` badge in the header, on the reasoning
+  that §4.7 asks for fullscreen handling and every other gated screen shows its gate. Both were wrong for
+  this screen: the approved header is three things, and a badge that is always on display is a claim about
+  the build rather than an answer to a request. The three strings those controls used are deleted with them,
+  so lint's unused-resource warning does not grow a tail.
 * **The 42nd lint warning was mine, and it is fixed rather than documented.** `AutoboxingStateCreation` at
   `Scrubber.kt:118` appeared when the scrubber's gesture was rewritten: the track width is an Int, and
   `mutableStateOf` boxes it on every size change. It is held in `mutableIntStateOf` now, so the count is back

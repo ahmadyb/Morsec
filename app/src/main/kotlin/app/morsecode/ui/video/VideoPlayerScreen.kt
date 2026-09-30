@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -42,8 +41,6 @@ import app.morsecode.core.design.theme.ImmersiveBackdrop
 import app.morsecode.core.design.theme.MorseTextStyles
 import app.morsecode.core.design.theme.MorseTheme
 import app.morsecode.core.design.theme.VideoSurfaceGlow
-import app.morsecode.core.model.FeatureArea
-import app.morsecode.ui.common.rememberFeatureGate
 import kotlin.math.hypot
 
 /**
@@ -58,15 +55,13 @@ import kotlin.math.hypot
  * this screen is immersive the way the photo viewer is, and §4.7 forbids the button the
  * reference removed.
  *
- * Four deliberate differences, each because a dead control is worse than a different one:
+ * The header is the approved one and nothing more: back, the file name, and the
+ * resolution, size and length under it. No overflow menu, no fullscreen switch, no
+ * standing feature badge — a gate says what this build cannot do when a user asks for it,
+ * not while they are merely looking at the screen.
  *
- * - The header ends in the app's own gate for [FeatureArea.MEDIA_PLAYBACK] while
- *   playback is gated, and in the fullscreen switch. The reference's phone header ends
- *   in nothing, and its WebShare player is the one that draws fullscreen; §4.7 asks this
- *   player for fullscreen handling, and the row below is already full at 360 dp wide, so
- *   the switch goes where there is room rather than squeezing a sixth control into a row
- *   of five. Once playback is live the gate becomes a spacer of the same size, so the
- *   header's layout does not move on the day the engine lands.
+ * Three deliberate differences, each because a dead control is worse than a different one:
+ *
  * - The reference opens a clip already playing at 28% of its length, because its clock
  *   is a simulation with something to show for it. This build opens at 0:00 paused:
  *   nothing here advances on its own, so a position nobody put there would be a claim
@@ -86,14 +81,12 @@ public fun VideoPlayerScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val gate = rememberFeatureGate()
 
     // Resolved in composition: the click lambdas below must not read resources through
     // LocalContext, which is what lint's resource-in-lambda check rejects.
     val backDescription = stringResource(R.string.action_back)
     val playDescription = stringResource(R.string.video_play)
     val pauseDescription = stringResource(R.string.video_pause)
-    val playbackDescription = stringResource(R.string.video_playback_info)
     val seekDescription = stringResource(R.string.video_seek)
     val skipBackDescription = stringResource(R.string.video_skip_back)
     val skipForwardDescription = stringResource(R.string.video_skip_forward)
@@ -117,9 +110,6 @@ public fun VideoPlayerScreen(
             SubtitleState.ON -> R.string.video_subtitles_on
         },
     )
-    val fullscreenDescription = stringResource(
-        if (state.fullscreen) R.string.video_exit_fullscreen else R.string.video_fullscreen,
-    )
 
     Box(
         modifier = Modifier
@@ -130,14 +120,8 @@ public fun VideoPlayerScreen(
             VideoHeader(
                 fileName = state.fileName,
                 metadata = state.metadata,
-                fullscreen = state.fullscreen,
                 backDescription = backDescription,
-                playbackDescription = playbackDescription,
-                fullscreenDescription = fullscreenDescription,
-                playbackAvailable = gate.isAvailable(FeatureArea.MEDIA_PLAYBACK),
                 onBack = onBack,
-                onToggleFullscreen = viewModel::toggleFullscreen,
-                onPlaybackInfo = { gate.run(FeatureArea.MEDIA_PLAYBACK) { } },
             )
 
             when {
@@ -219,28 +203,22 @@ public fun VideoPlayerScreen(
 }
 
 /**
- * The header: back, the file name over its resolution, size and length, and the two
- * switches that belong to the player rather than to the clip.
+ * The header: back, and the file name over its resolution, size and length.
  *
- * In fullscreen the title block gives its height to the picture, which is the whole of
- * what fullscreen means in a build with no decoder to hand the window to; back stays,
- * because a player that hides its own way out is a trap.
+ * Nothing else, because that is what the approved screen has. It carries no overflow
+ * menu (§4.7 forbids the button the reference removed), no fullscreen switch — fullscreen
+ * is drawn on the reference's WebShare player, and the phone header has no such action —
+ * and no standing feature badge: a gate says what this build cannot do when the user asks
+ * for it, not before they ask.
  */
 @Composable
 private fun VideoHeader(
     fileName: String,
     metadata: String,
-    fullscreen: Boolean,
     backDescription: String,
-    playbackDescription: String,
-    fullscreenDescription: String,
-    playbackAvailable: Boolean,
     onBack: () -> Unit,
-    onToggleFullscreen: () -> Unit,
-    onPlaybackInfo: () -> Unit,
 ) {
     val colors = MorseTheme.colors
-    val metrics = MorseTheme.metrics
 
     Row(
         modifier = Modifier
@@ -258,51 +236,25 @@ private fun VideoHeader(
             pressedBackground = VideoOverlayWash,
         )
 
-        if (fullscreen) {
-            Spacer(modifier = Modifier.weight(1f))
-        } else {
-            Column(modifier = Modifier.weight(1f)) {
-                if (fileName.isNotEmpty()) {
-                    Text(
-                        text = fileName,
-                        style = MorseTextStyles.listTitle,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                if (metadata.isNotEmpty()) {
-                    Text(
-                        text = metadata,
-                        style = MorseTextStyles.meta,
-                        color = colors.viewerMetaText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+        Column(modifier = Modifier.weight(1f)) {
+            if (fileName.isNotEmpty()) {
+                Text(
+                    text = fileName,
+                    style = MorseTextStyles.listTitle,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-        }
-
-        MorseIconButton(
-            iconRes = MorseIcons.expand,
-            contentDescription = fullscreenDescription,
-            onClick = onToggleFullscreen,
-            tint = colors.viewerIconContent,
-            pressedBackground = VideoOverlayWash,
-        )
-
-        if (playbackAvailable) {
-            // The same width the gate button had, so the header does not reflow on the
-            // day playback becomes real.
-            Spacer(modifier = Modifier.size(metrics.iconButtonSize))
-        } else {
-            MorseIconButton(
-                iconRes = MorseIcons.info,
-                contentDescription = playbackDescription,
-                onClick = onPlaybackInfo,
-                tint = colors.viewerIconContent,
-                pressedBackground = VideoOverlayWash,
-            )
+            if (metadata.isNotEmpty()) {
+                Text(
+                    text = metadata,
+                    style = MorseTextStyles.meta,
+                    color = colors.viewerMetaText,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

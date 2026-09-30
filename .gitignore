@@ -30,4 +30,7 @@ coverage/
 
 # Test / tooling output
 tools/verify/out/
+
+# Working backups of an in-flight diff. Never committed, never cleaned.
+.agent-backups/
 *.hprof

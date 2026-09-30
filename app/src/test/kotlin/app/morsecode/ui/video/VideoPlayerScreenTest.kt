@@ -7,6 +7,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -268,35 +269,58 @@ class VideoPlayerScreenTest {
     }
 
     @Test
-    fun `fullscreen gives the title block to the picture and gives it back`() {
+    fun `the header is the name over its metadata and nothing else`() {
         showPlayer()
-        composeTestRule.onNodeWithText("clip_07.mp4").assertIsDisplayed()
 
-        composeTestRule.onNodeWithContentDescription(string(R.string.video_fullscreen)).performClick()
-        settle()
-
-        assertTrue(viewModel.state.value.fullscreen)
-        composeTestRule.onNodeWithText("clip_07.mp4").assertDoesNotExist()
-        composeTestRule.onNodeWithText("1080p · 64 MB · 3:12").assertDoesNotExist()
-        composeTestRule.onNodeWithContentDescription(string(R.string.video_exit_fullscreen)).assertIsDisplayed()
-        // A player that hides its own way out is a trap, so the way out stays.
         composeTestRule.onNodeWithContentDescription(string(R.string.action_back)).assertIsDisplayed()
-
-        composeTestRule.onNodeWithContentDescription(string(R.string.video_exit_fullscreen)).performClick()
-        settle()
-
-        assertFalse(viewModel.state.value.fullscreen)
         composeTestRule.onNodeWithText("clip_07.mp4").assertIsDisplayed()
-    }
+        composeTestRule.onNodeWithText("1080p · 64 MB · 3:12").assertIsDisplayed()
 
-    @Test
-    fun `there is no overflow button on this player`() {
-        showPlayer()
+        // Every description on the screen, so a control added later has to be added here
+        // too. The approved header holds three things and no action of its own: no
+        // overflow menu (§4.7 forbids the button the reference removed), no fullscreen
+        // switch — the reference draws that on its WebShare player, not on this one — and
+        // no standing feature badge.
+        assertEquals(
+            setOf(
+                string(R.string.action_back),
+                string(R.string.video_seek),
+                string(R.string.video_skip_back),
+                string(R.string.video_skip_forward),
+                string(R.string.video_volume),
+                string(R.string.video_mute),
+                string(R.string.video_subtitles_unavailable),
+                string(R.string.video_play),
+            ),
+            descriptionsOnScreen(),
+        )
 
-        // §4.7 forbids the button the reference removed, the way §4.5 does for the viewer.
+        // And nothing that looks like the removed controls, by the words they would use.
+        composeTestRule.onNodeWithContentDescription("Fullscreen").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Exit fullscreen").assertDoesNotExist()
         composeTestRule.onNodeWithContentDescription(string(R.string.action_more)).assertDoesNotExist()
         composeTestRule.onNodeWithText(string(R.string.action_more)).assertDoesNotExist()
     }
+
+    @Test
+    fun `no feature badge is rendered until an action asks for one`() {
+        showPlayer()
+
+        // The gate is an answer to a request, not furniture on the screen: nothing is
+        // gated merely by opening a clip, so nothing about milestone 10 is on display and
+        // no dialog is waiting behind the header.
+        composeTestRule.onNodeWithText(string(R.string.gated_title)).assertDoesNotExist()
+        composeTestRule.onNodeWithText(string(R.string.gated_area_playback)).assertDoesNotExist()
+        assertFalse(viewModel.state.value.loading)
+    }
+
+    /** Every content description rendered, in the order the semantics tree reports them. */
+    private fun descriptionsOnScreen(): Set<String> =
+        composeTestRule
+            .onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.ContentDescription))
+            .fetchSemanticsNodes()
+            .flatMap { node -> node.config[SemanticsProperties.ContentDescription] }
+            .toSet()
 
     @Test
     fun `every icon-only action on the screen carries a description`() {
@@ -309,8 +333,6 @@ class VideoPlayerScreenTest {
             R.string.video_mute,
             R.string.video_volume,
             R.string.video_subtitles_unavailable,
-            R.string.video_fullscreen,
-            R.string.video_playback_info,
         ).forEach { description ->
             composeTestRule.onNodeWithContentDescription(string(description)).assertIsDisplayed()
         }
