@@ -529,3 +529,94 @@ The differences from the reference, each a decision:
   infrastructure — no Paparazzi, no Roborazzi, no golden images — so theme fidelity is asserted the only way
   it can be here: both themes render the same rows, chips, controls and bar, from the same `MorseTheme`
   tokens every other screen uses. This is a gap, recorded as one rather than implied to be covered.
+
+### Duplex transfer screens (§4.8)
+
+The reference writes `SC.sending` and `SC.receiving` as two blocks that call the same helpers —
+`peerCard`, `txRow`, `summaryCard`, `actionBar`, `chipFor`, `rowMeta`. The app does the same thing
+one level up rather than two: `DuplexTransferScreen` is stateless and draws whichever session it is
+handed, and `TransferScreen` composes it from the view model using the layout the route named
+(`session/sending`, `session/receiving`). The two views differ only in `TransferLayout`: which
+section leads, which words its headings use, and which directions own a batch line. A row, a chip,
+a control and the bar are the same code in both, so a fix lands in both, and the stateless half is
+what lets a test hand it one row in one state — the whole per-file matrix — without a fixture or a
+scrolling list in the way. Action availability is derived in exactly one place per scope:
+`TransferActions.of(item)` for a row and `TransferAllAction.of(session)` for the bar, so a control
+and the thing it does cannot disagree.
+
+The differences from the reference, each a decision:
+
+* **Cancel and failure are two different things, and the reference conflates them.** Its cancel and
+  End paths set a row's status to `failed`, so a file the user stopped reads FAILED, offers Retry
+  and counts as a failure. The master prompt's matrix keeps them apart. `CANCELLED` therefore sits
+  beside `FAILED`: no controls, a neutral chip rather than the failed chip's red, and
+  `TransferRules.end` maps unfinished rows to it while leaving a row that failed earlier still
+  failed — the user ended a session; they did not retry a broken file.
+* **Three states the reference only gestures at.** It prints "Verify" on a row and counts "skipped"
+  in its summary text without having a state behind either, and §4.8's matrix names VERIFYING,
+  CANCELLED and SKIPPED. Each has its own facts: a verifying row tells the bytes reached (the file
+  is all there, the check is not), a skipped one the total (the file was never wanted), a cancelled
+  one where it was abandoned. Verification is not cancellable in this model, so a verifying row
+  offers no control rather than a wrong one, and a test pins that.
+* **A delivered file's line reports what the checksum said rather than asserting it.** Done plus
+  VERIFIED reads "CRC verified"; a done row whose check did not match reads "checksum differs".
+  That a file arrived and what the checksum made of it are two facts, and both matter to someone
+  deciding whether to open it. Retrying a failed file clears the outcome, so a second attempt never
+  inherits the first one's verdict.
+* **No Queue sheet.** `SC.queue` sits in the reference with its "Send now" ordering and its own
+  screen, and nothing in the accepted behaviour opens it: the master prompt keeps queue management
+  inside these two views. There is no queue route and no queue control, and two tests say so — one
+  beside the routes, one on the screen — because the cheapest way to keep a dormant screen dormant
+  is to make its absence fail a test when someone wires it back in.
+* **Background, not Minimise.** The reference's floating-window wording ("Minimised") describes a
+  behaviour this app does not have. The bar's third action is Background, and pressing it opens the
+  `BACKGROUND_SERVICE` gate naming milestone 8: keeping a session alive is a foreground service's
+  job and this build has none, so the control says what is missing instead of shrinking a window
+  that does not exist. Add files opens the same kind of gate for `TRANSFER_ENGINE`. The tests press
+  both and assert the dialog; a fixture row must never look like a transfer that started.
+* **Pause all is one control, over the whole session, and it is not in a heading.** The reference's
+  bar pauses the list it belongs to. The master prompt asks for a single Pause all / Resume all
+  whose effect is "change only eligible active rows of the displayed session", so the bar's cell
+  drives `TransferRules.pauseAll`/`resumeAll` across both directions, skips rows the engine says
+  cannot be held, and never touches queued, held, finished, failed or verifying rows. Its label and
+  its behaviour come from the same `TransferAllAction`, so it reads Resume all exactly when
+  something is held and nothing needs pausing; it keeps its place when disabled, and the label is
+  the only thing about it that changes.
+* **Clear completed is a heading action, and it is section-scoped.** Each section may carry one
+  clear icon aligned with its own heading, and it removes that section's delivered rows only,
+  asserted both ways round — clearing the outbound section keeps the inbound delivered file, and
+  the reverse. When there was nothing to clear the action says so rather than silently doing
+  nothing.
+* **The average speed is the average of what is moving, or it is absent.** The reference's summary
+  prints its sample figure even when nothing in the sample is moving; here `hasAverageSpeed` is
+  false then and the card prints its counts alone, and when rows are moving the mean is over the
+  moving rows so a held file does not drag it down. Nothing on either screen counts up: the
+  fixtures are deterministic, and a test lets the looper run dry twice and reads the same bytes,
+  speeds and labels — which is the only form of "no timer-driven fake engine" a test can check.
+* **The bytes line follows the app's own rule.** `MorseFormatters.bytes` prints one decimal below
+  ten megabytes and whole megabytes above it, as the viewer, the music player and history already
+  do, so a row the reference draws as "48.9 MB / 144 MB" reads "49 MB / 144 MB" here and a held
+  row's "39.7 MB" reads "40 MB". Changing the rule for one screen would make one file's size read
+  two ways in one app. Speeds keep their single decimal ("6.2 MB/s") exactly as the reference
+  prints them.
+* **The direction arrow is dropped before the file's name is.** The reference puts a direction arrow
+  before the kind icon at every width. Below the row's width need the arrow goes, because which way
+  a file is going is the section's job and there are exactly two sections; the kind icon, the name,
+  the chip and the controls stay, asserted at 360 dp. The row's need is ScreenPadding × 2 +
+  directionGlyph 30 + fileIcon 34 + four 12 dp gaps + a 96 dp floor for the name + a 72 dp floor for
+  the chip + one or two 48 dp controls, depending on how many the row's state offers; that sum is
+  what the 30 dp glyph token is measured against.
+* **Rows are named for anything that reads them.** Every per-file control carries a content
+  description naming its file ("Pause holiday_2019.mp4"), the progress bar exposes a range and a
+  "49 MB of 144 MB, 34%" description, and the bar's cells take their names from their own words —
+  which is why the assertions count nodes that answer to "Add files" and "End". The one thing
+  deliberately silent is the file-kind glyph: `FileKindIcon` draws with no description because the
+  file's name is announced immediately beside it, and a row that says "Video, holiday_2019.mp4"
+  says the same thing twice. That left the glyph invisible to a test, so a row tags it
+  (`transfer-kind-<kind>`); there is no user-facing text for a file kind anywhere in the app, and
+  inventing seven labels to make one assertion possible would be inventing copy.
+* **Dark and light are smoke-tested, not screenshot-compared.** The repository has no screenshot
+  infrastructure — no Paparazzi, no Roborazzi, no golden images — so theme fidelity is asserted the
+  only way it can be here: both themes render the same rows, chips, controls and bar, from the same
+  `MorseTheme` tokens every other screen uses. This is a gap, recorded as one rather than implied to
+  be covered.
