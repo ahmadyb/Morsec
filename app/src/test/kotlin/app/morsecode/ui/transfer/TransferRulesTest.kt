@@ -391,8 +391,10 @@ class TransferRulesTest {
             ended.item("a")!!.transferredBytes,
         )
 
-        val verifying = session.withItem(
-            item("v", TransferDirection.OUTGOING, TransferState.VERIFYING, 64_000_000L, 64_000_000L),
+        // `withItem` replaces a row the session already has, so the new one is appended.
+        val verifying = session.withItems(
+            TransferDirection.OUTGOING,
+            session.outbound + item("v", TransferDirection.OUTGOING, TransferState.VERIFYING, 64_000_000L, 64_000_000L),
         )
         assertEquals(
             "a file still being checked is unfinished, and the dialog says it will stop",
