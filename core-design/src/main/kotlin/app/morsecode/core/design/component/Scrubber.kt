@@ -144,8 +144,10 @@ public fun MorseScrubber(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = metrics.scrubberPaddingVertical)
-            .onSizeChanged { trackWidth = it.width }
+            // The gesture and its name come *before* the vertical padding, so the
+            // padding is part of the touch target: `.scrub{padding:7px 0}` (10 dp
+            // here) exists to give the finger room around a 4 dp bar, and a modifier
+            // placed after the padding would only ever see the bar itself.
             .pointerInput(durationMillis) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -168,7 +170,9 @@ public fun MorseScrubber(
             .semantics {
                 this.contentDescription = contentDescription
                 if (positionDescription != null) this.stateDescription = positionDescription
-            },
+            }
+            .padding(vertical = metrics.scrubberPaddingVertical)
+            .onSizeChanged { trackWidth = it.width },
         contentAlignment = Alignment.CenterStart,
     ) {
         Box(

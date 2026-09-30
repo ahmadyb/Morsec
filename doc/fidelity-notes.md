@@ -317,7 +317,15 @@ of it above `bottomNav('files')`, because a track is opened from Files and belon
 * **Two sizes are the transcribed ones, not the CSS ones.** `progress.knob` is 14 dp where the CSS
   says 13 px, and `progress.scrubberPadding` is 10 dp where `.scrub` says `padding:7px 0`. Both
   were transcribed in milestone 1 as touch-floor enlargements and are asserted by the token
-  harness, so the player follows the tokens.
+  harness, so the player follows the tokens. That padding is also part of the touch target: the
+  gesture modifier is applied before it, so the finger has 24 dp to hit rather than the 4 dp bar,
+  which is the only reason `padding:7px 0` is in the reference at all.
+* **A tap seeks, and that needed the gesture written out.** The reference seeks in its
+  `pointerdown` handler; Compose's `draggable` reports nothing until touch slop is exceeded, so a
+  scrubber built on it would drag and would not answer a tap at all — half of "click anywhere on
+  the track or drag the knob to seek" missing. `MorseScrubber` reads the gesture itself, seeking on
+  the way down and consuming every move, which is also what `.scrub{touch-action:none}` means for
+  a scrubber inside a scrolling list.
 * **There is no clock, and nothing pretends to be one.** The reference advances `S.music.pos` in
   its ticker; this build has no audio engine, so the position moves only when the user seeks it,
   and a track ends only when `MusicPlayerViewModel.trackEnded()` is called. That method exists now
