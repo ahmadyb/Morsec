@@ -454,7 +454,7 @@ class BroadcastScreensTest {
     }
 
     @Test
-    fun `a receiver keeps every row: the reference offers no way to dismiss one`() {
+    fun `a receiver keeps every row since the reference offers no way to dismiss one`() {
         val viewModel = BroadcastReceiverViewModel(
             SavedStateHandle(mapOf(Routes.BROADCAST_RECIPIENT_ARG to "s")),
             formatters,

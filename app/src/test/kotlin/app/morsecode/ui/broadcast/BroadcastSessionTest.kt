@@ -461,8 +461,8 @@ class BroadcastSessionTest {
         assertFalse("the batch as a whole is not", after.result.complete)
         assertEquals(
             "every other phone's deliveries are exactly as they were",
-            session.allDeliveries.filterKeys { it.recipientId != "p" },
-            after.allDeliveries.filterKeys { it.recipientId != "p" },
+            session.allDeliveries.filter { it.key.recipientId != "p" },
+            after.allDeliveries.filter { it.key.recipientId != "p" },
         )
         assertTrue(
             "and the others still have work in hand",
