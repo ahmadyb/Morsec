@@ -18,9 +18,11 @@ Last confirmed code commit on the session branch:
 136711e2da47d612a9b898527296a025c5324168
 
 The session branch was created from baseline SHA
-`13d8bf1312c7e39064d9a398935f2f9830ce0eed`. Do not switch branches or push to
-the baseline. Trust `git ls-remote origin refs/heads/arena/01a0f8ba-morsec` for
-the session head; query `arena/01a0e98a-morsec` separately.
+`13d8bf1312c7e39064d9a398935f2f9830ce0eed`. PR #1 was merged into the upstream
+baseline by merge commit `ed7e841e0c3ccb867e76aaaad3953dcedd9f2098`; the session
+branch remains the active Arena branch. Do not switch branches or push directly
+to the baseline. Trust `git ls-remote origin refs/heads/arena/01a0f8ba-morsec`
+for the session head; query `arena/01a0e98a-morsec` separately.
 
 Before changing anything:
 
@@ -129,12 +131,24 @@ invented or enabled.
 **Verification and evidence.**
 
 - Code commit: `136711e2da47d612a9b898527296a025c5324168` on
-  `arena/01a0f8ba-morsec`; the remote ref matched after push. Draft PR #1:
-  https://github.com/ahmadyb/Morsec/pull/1.
-- Green Android CI: https://github.com/ahmadyb/Morsec/actions/runs/36910240632
-  (run `36910240632`, head SHA `136711e2da47d612a9b898527296a025c5324168`).
-  The earlier run `36909332385` found a test assertion import and a Robolectric
-  permission setup problem; both were fixed before the green run.
+  `arena/01a0f8ba-morsec`; its green handoff-tip commit is
+  `bfcbed643170041eed577d3bc642a8315be3f114`. PR #1 was marked ready and merged
+  into `arena/01a0e98a-morsec` without rewriting history; merge commit:
+  `ed7e841e0c3ccb867e76aaaad3953dcedd9f2098`.
+- Green Android CI on the code commit:
+  https://github.com/ahmadyb/Morsec/actions/runs/36910240632 (run
+  `36910240632`, head SHA `136711e2da47d612a9b898527296a025c5324168`). The
+  accepted session tip also passed
+  https://github.com/ahmadyb/Morsec/actions/runs/36911164456 (`36911164456`,
+  head SHA `bfcbed643170041eed577d3bc642a8315be3f114`). The merge commit passed
+  https://github.com/ahmadyb/Morsec/actions/runs/36917643526 (`36917643526`,
+  head SHA `ed7e841e0c3ccb867e76aaaad3953dcedd9f2098`). The earlier run
+  `36909332385` found a test assertion import and a Robolectric permission
+  setup problem; both were fixed before the green run.
+- The sandbox's local Git metadata had rolled back to the baseline while the
+  SAF worktree remained. Before recovery, tracked changes and untracked files
+  were backed up under ignored `.agent-backups/`; the local session branch was
+  then safely advanced to the verified remote tip without discarding work.
 - CI completed hygiene, JVM unit tests, Android lint, debug APK assembly and
   Android-test APK assembly: **800 tests, 0 failed, 0 skipped** (56 reports);
   **0 lint errors, 45 warnings** (7 reports, matching the documented warning
@@ -151,11 +165,18 @@ invented or enabled.
   draft PR triggered CI. Artifact metadata is available from GitHub, but
   downloading the artifact blob failed with EOF in this environment.
 
-**Next task and protected scope.** This focused task does not claim Milestone 3
-delivery: `CURRENT_MILESTONE` remains 2. The next unstarted work is the master
-prompt §6 pure-Kotlin transfer state machine (framed chunks, sequence/offset,
-per-chunk CRC32 and full-file SHA-256) with tests. Do not start it without
-explicit approval. All previously recorded protected UI/product decisions,
+**Current status:** Milestone 3 in progress; SAF integration complete; transfer engine unstarted.
+
+`FeatureReadiness.CURRENT_MILESTONE = 2` remains a feature-readiness release
+gate: `TRANSFER_ENGINE` is still gated until durable persistence, source and
+destination streams, Android service lifecycle, real transport, and UI
+repositories are integrated. This value does not mean no Milestone 3 work has
+started; the SAF integration slice is complete, and the pure Kotlin engine is
+the current approved group. Do not mark the production feature ready merely
+because this core slice is implemented.
+
+**Next approved focused group:** master prompt §6 pure-Kotlin transfer state
+machine and framing. All previously recorded protected UI/product decisions,
 minSdk 23, toolchain pins, lint error checks, honest feature gates, and the
 prohibition on fake transfer/discovery/playback behavior remain in force.
 
