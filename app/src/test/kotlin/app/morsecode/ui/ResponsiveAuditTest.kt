@@ -12,6 +12,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.unit.Density
 import androidx.lifecycle.SavedStateHandle
@@ -106,8 +107,10 @@ class ResponsiveAuditTest {
         composeTestRule.onNodeWithText("Sort by").assertIsDisplayed()
         composeTestRule.onNodeWithText("Name").assertIsDisplayed()
         composeTestRule.onNodeWithText("Date").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Ascending").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Descending").assertIsDisplayed()
+        // The button row sits under the four radio rows; it is proven reachable the way the
+        // walklist proves reachability — by the sheet's own scrolling bringing it into view.
+        composeTestRule.onNodeWithText("Ascending").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("Descending").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -182,7 +185,9 @@ class ResponsiveAuditTest {
             composeTestRule.onNodeWithText(tab).assertIsDisplayed()
         }
         composeTestRule.onNodeWithContentDescription("Sort").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Select").assertIsDisplayed()
+        // The grid's section icons carry the same "Select" description as the header action,
+        // so the first node is the header's — the same indexing the 320 dp test uses.
+        composeTestRule.onAllNodesWithContentDescription("Select")[0].assertIsDisplayed()
 
         // The content the wide grid shows is still content, not an empty frame.
         composeTestRule.onNodeWithText("Videos").performClick()
@@ -349,7 +354,10 @@ class ResponsiveAuditTest {
     )
 
     private fun settle() {
-        ShadowLooper.idleMainLooper()
+        // The modal bottom sheet animates its own translation on frames the Robolectric
+        // scheduler schedules with a delay; idleMainLooper alone never reaches them, so the
+        // clock is advanced first and the compose side is then waited out.
+        ShadowLooper.idleFor(java.time.Duration.ofMillis(1_000))
         composeTestRule.waitForIdle()
         ShadowLooper.idleMainLooper()
         composeTestRule.waitForIdle()

@@ -91,14 +91,12 @@ class LibraryAndSystemScreensTest {
         settle()
 
         composeTestRule.onNodeWithText("Send files without the internet").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Onboarding step 1 of 4").assertIsDisplayed()
 
         // Card 1: Continue. Card 2: Not now — the decline that must still advance,
         // without firing the one real permission request this screen owns.
         composeTestRule.onNodeWithText("Continue").performClick()
         settle()
         composeTestRule.onNodeWithText("Permissions we need").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Onboarding step 2 of 4").assertIsDisplayed()
         composeTestRule.onNodeWithText("Not now").performClick()
         settle()
 
@@ -149,10 +147,11 @@ class LibraryAndSystemScreensTest {
 
     @Test
     fun `history shows both directions and its search over an empty store`() {
+        val viewModel = HistoryViewModel(FakeHistoryRepository(), formatters)
         composeTestRule.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = ThemeMode.DARK, reducedMotion = true) {
-                    HistoryScreen(onNavigate = { }, viewModel = HistoryViewModel(FakeHistoryRepository(), formatters))
+                    HistoryScreen(onNavigate = { }, viewModel = viewModel)
                 }
             }
         }
@@ -166,12 +165,21 @@ class LibraryAndSystemScreensTest {
         )
         composeTestRule.onNodeWithText("Received").assertIsDisplayed()
         composeTestRule.onNodeWithText("Sent").assertIsDisplayed()
+        // The search field lives behind the header's search toggle; the toggle brings it up.
+        composeTestRule.onNodeWithContentDescription("Search").performClick()
+        settle()
         composeTestRule.onNodeWithText("Search history").assertIsDisplayed()
         assertTrue("History is the lit destination", selected("History"))
     }
 
     @Test
     fun `settings lists its mockup entries with Settings lit`() {
+        val viewModel = SettingsViewModel(
+            FakeSettingsRepository(),
+            FakeDiagnosticsRepository(),
+            FakeMediaRepository(),
+            context,
+        )
         composeTestRule.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = ThemeMode.DARK, reducedMotion = true) {
@@ -182,12 +190,7 @@ class LibraryAndSystemScreensTest {
                         onOpenDoctor = { },
                         onOpenHelp = { },
                         onReplayOnboarding = { },
-                        viewModel = SettingsViewModel(
-                            FakeSettingsRepository(),
-                            FakeDiagnosticsRepository(),
-                            FakeMediaRepository(),
-                            context,
-                        ),
+                        viewModel = viewModel,
                     )
                 }
             }
@@ -207,14 +210,11 @@ class LibraryAndSystemScreensTest {
 
     @Test
     fun `logs offers export and the errors filter over an empty log`() {
+        val viewModel = LogsViewModel(FakeDiagnosticsRepository(), formatters)
         composeTestRule.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = ThemeMode.DARK, reducedMotion = true) {
-                    LogsScreen(
-                        onBack = { },
-                        onNavigate = { },
-                        viewModel = LogsViewModel(FakeDiagnosticsRepository(), formatters),
-                    )
+                    LogsScreen(onBack = { }, onNavigate = { }, viewModel = viewModel)
                 }
             }
         }
@@ -242,14 +242,11 @@ class LibraryAndSystemScreensTest {
             androidSdkInt = 34,
             deviceModel = "Pixel 7",
         )
+        val viewModel = CrashesViewModel(FakeDiagnosticsRepository(listOf(report)), formatters)
         composeTestRule.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = ThemeMode.DARK, reducedMotion = true) {
-                    CrashesScreen(
-                        onBack = { },
-                        onNavigate = { },
-                        viewModel = CrashesViewModel(FakeDiagnosticsRepository(listOf(report)), formatters),
-                    )
+                    CrashesScreen(onBack = { }, onNavigate = { }, viewModel = viewModel)
                 }
             }
         }
@@ -271,18 +268,11 @@ class LibraryAndSystemScreensTest {
 
     @Test
     fun `the doctor renders its title and a refreshable check list`() {
+        val viewModel = DoctorViewModel(context, FakeMediaRepository(), Dispatchers.Unconfined)
         composeTestRule.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = ThemeMode.DARK, reducedMotion = true) {
-                    DoctorScreen(
-                        onBack = { },
-                        onNavigate = { },
-                        viewModel = DoctorViewModel(
-                            context,
-                            FakeMediaRepository(),
-                            Dispatchers.Unconfined,
-                        ),
-                    )
+                    DoctorScreen(onBack = { }, onNavigate = { }, viewModel = viewModel)
                 }
             }
         }

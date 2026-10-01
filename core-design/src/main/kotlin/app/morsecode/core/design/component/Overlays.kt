@@ -20,8 +20,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -262,6 +264,9 @@ public fun MorseModalSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // A tall sheet — a long sort menu at 320 dp, or a large system font — must
+                // never clip its last button off the bottom: the content scrolls instead.
+                .verticalScroll(rememberScrollState())
                 .padding(
                     start = metrics.sheetPaddingHorizontal,
                     end = metrics.sheetPaddingHorizontal,

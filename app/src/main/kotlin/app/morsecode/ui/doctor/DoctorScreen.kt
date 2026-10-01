@@ -87,7 +87,7 @@ public fun DoctorScreen(
                 contentPadding = PaddingValues(horizontal = metrics.screenPaddingHorizontal),
             ) {
                 items(checks, key = { it.id }) { check ->
-                    CheckRow(check = check) { handled ->
+                    CheckRow(check = check, runAction = viewModel::runAction) { handled ->
                         if (!handled) {
                             Toast.makeText(context, R.string.error_generic, Toast.LENGTH_SHORT).show()
                         }
@@ -136,9 +136,12 @@ public fun DoctorScreen(
 }
 
 @Composable
-private fun CheckRow(check: DiagnosticCheck, onAction: (Boolean) -> Unit) {
+private fun CheckRow(
+    check: DiagnosticCheck,
+    runAction: (DiagnosticCheck) -> Boolean,
+    onAction: (Boolean) -> Unit,
+) {
     val colors = MorseTheme.colors
-    val viewModel: DoctorViewModel = hiltViewModel()
     val statusColor = when (check.status) {
         CheckStatus.OK -> colors.ok
         CheckStatus.WARN -> colors.warn
@@ -184,7 +187,7 @@ private fun CheckRow(check: DiagnosticCheck, onAction: (Boolean) -> Unit) {
             null
         },
         onClick = if (check.action != null) {
-            { onAction(viewModel.runAction(check)) }
+            { onAction(runAction(check)) }
         } else {
             null
         },
