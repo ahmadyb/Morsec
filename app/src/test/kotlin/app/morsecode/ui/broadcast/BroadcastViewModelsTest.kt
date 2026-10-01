@@ -204,7 +204,7 @@ class BroadcastViewModelsTest {
 
         assertTrue(state.complete)
         assertFalse("the bar's one control is disabled rather than wrong", state.allAction.enabled)
-        assertTrue(state.files.allMatch { it.state.isFinished })
+        assertTrue(state.files.all { it.state.isFinished })
         assertTrue(state.files.all { file -> file.recipients.all { !it.actions.any } })
     }
 
@@ -326,7 +326,7 @@ class BroadcastViewModelsTest {
     fun `a partial broadcast is complete and is not reported as a success`() {
         val state = broadcastSentState(BroadcastFixtures.partialSession(), formatters)
 
-        assertTrue(state.complete)
+        assertTrue("every delivery reached a terminal state", state.result.complete)
         assertFalse("one delivery failed and one was skipped", state.result.fullySuccessful)
         assertEquals(1, state.result.failed)
         assertEquals(1, state.result.skipped)

@@ -134,6 +134,7 @@ class BroadcastReachabilityTest {
     }
 
     private fun showPicker() {
+        val viewModel = BroadcastPickerViewModel(SavedStateHandle(), formatters)
         composeTestRule.setContent {
             windowWidthDp = LocalConfiguration.current.screenWidthDp
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
@@ -142,7 +143,7 @@ class BroadcastReachabilityTest {
                         onBack = { },
                         onNavigate = { },
                         onBroadcastTo = { },
-                        viewModel = BroadcastPickerViewModel(SavedStateHandle(), formatters),
+                        viewModel = viewModel,
                     )
                 }
             }
@@ -151,6 +152,10 @@ class BroadcastReachabilityTest {
     }
 
     private fun showSender() {
+        val viewModel = BroadcastSenderViewModel(
+            SavedStateHandle(mapOf(Routes.BROADCAST_CHOSEN_ARG to "r,p,s")),
+            formatters,
+        )
         composeTestRule.setContent {
             windowWidthDp = LocalConfiguration.current.screenWidthDp
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
@@ -161,10 +166,7 @@ class BroadcastReachabilityTest {
                         onSeeCompletion = { },
                         onOpenRecipient = { },
                         onEnded = { },
-                        viewModel = BroadcastSenderViewModel(
-                            SavedStateHandle(mapOf(Routes.BROADCAST_CHOSEN_ARG to "r,p,s")),
-                            formatters,
-                        ),
+                        viewModel = viewModel,
                     )
                 }
             }
@@ -173,6 +175,10 @@ class BroadcastReachabilityTest {
     }
 
     private fun showReceiver(recipientId: String) {
+        val viewModel = BroadcastReceiverViewModel(
+            SavedStateHandle(mapOf(Routes.BROADCAST_RECIPIENT_ARG to recipientId)),
+            formatters,
+        )
         composeTestRule.setContent {
             windowWidthDp = LocalConfiguration.current.screenWidthDp
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
@@ -183,10 +189,7 @@ class BroadcastReachabilityTest {
                         onSeeCompletion = { },
                         onOpenFolder = { },
                         onEnded = { },
-                        viewModel = BroadcastReceiverViewModel(
-                            SavedStateHandle(mapOf(Routes.BROADCAST_RECIPIENT_ARG to recipientId)),
-                            formatters,
-                        ),
+                        viewModel = viewModel,
                     )
                 }
             }
@@ -195,6 +198,7 @@ class BroadcastReachabilityTest {
     }
 
     private fun showSent() {
+        val viewModel = BroadcastSentViewModel(formatters)
         composeTestRule.setContent {
             windowWidthDp = LocalConfiguration.current.screenWidthDp
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
@@ -203,7 +207,7 @@ class BroadcastReachabilityTest {
                         onBack = { },
                         onNavigate = { },
                         onEnded = { },
-                        viewModel = BroadcastSentViewModel(formatters),
+                        viewModel = viewModel,
                     )
                 }
             }

@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -53,6 +54,9 @@ import app.morsecode.navigation.MorseDestination
 import app.morsecode.ui.common.MorseTabScaffold
 import app.morsecode.ui.common.rememberFeatureGate
 import app.morsecode.ui.transfer.TransferLayout
+
+/** The Connect list, tagged so a test can walk it to a control the viewport hides. */
+internal const val ConnectListTag: String = "connect-list"
 
 /**
  * The Connect destination.
@@ -104,7 +108,7 @@ public fun ConnectScreen(
         )
 
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().testTag(ConnectListTag),
             contentPadding = PaddingValues(
                 horizontal = metrics.screenPaddingHorizontal,
                 vertical = metrics.headerPaddingBottom,

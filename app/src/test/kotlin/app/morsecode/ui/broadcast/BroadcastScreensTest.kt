@@ -714,6 +714,10 @@ class BroadcastScreensTest {
 
     private fun showReceived(recipientId: String) {
         reset()
+        val viewModel = BroadcastReceivedViewModel(
+            SavedStateHandle(mapOf(Routes.BROADCAST_RECIPIENT_ARG to recipientId)),
+            formatters,
+        )
         composeTestRule.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = ThemeMode.DARK, reducedMotion = true) {
@@ -722,10 +726,7 @@ class BroadcastScreensTest {
                         onNavigate = { navigations = navigations + it },
                         onOpenFolder = { folderClicks += 1 },
                         onEnded = { endedClicks += 1 },
-                        viewModel = BroadcastReceivedViewModel(
-                            SavedStateHandle(mapOf(Routes.BROADCAST_RECIPIENT_ARG to recipientId)),
-                            formatters,
-                        ),
+                        viewModel = viewModel,
                     )
                 }
             }
