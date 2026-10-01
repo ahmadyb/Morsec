@@ -593,3 +593,40 @@ The differences from the reference, each a decision:
   fixed values: no timer, no delay-driven progress, no random speed, no socket, no discovery loop. The
   screens' tests let the looper run dry twice and read the same percentages, and the fan-out itself
   stays milestone 9's work.
+
+### Visual fidelity (§4.10)
+
+* **Compared against the source, not the picture.** The milestone-2 final audit walked the
+  mockup's markup and CSS for every state in the parity table — colours, typography, shapes,
+  radii, sticky headers, dividers, progress bars, chips, selection bars, empty states,
+  dialogs, sheets and bottom bars — and asserted the Android decisions back at it: "LAN or
+  Nearby" as the transport copy, five sticky category tabs with no horizontal scrollbar and a
+  visible selected state, the3-column grids at reference width, thin scroll indicators, no
+  address bar above Categories, breadcrumb under the sticky header, no folder up-arrow, no
+  Queue destination, no global "Retry failed", one Pause all/Resume all in the bottom bar only,
+  no controls on completed rows, a video header of back + filename + metadata alone (no
+  overflow, no fullscreen, no gate badge), crash reports as view/export/clear, and no
+  WebShare-browser UI in the Android app. The negative claims are asserted as tests, not just
+  written down. The simulator bezel, screen gallery and registry rail are *not* compared —
+  they are scaffolding, not product.
+* **Material differences found and fixed in this audit.** The modal bottom sheet's content now
+  scrolls (`MorseModalSheet`), so a tall sheet — the sort menu at 320 dp, or any larger system
+  font — can never clip its last button off the bottom; and the Doctor's detail lines were
+  formatting their numbers through strings, which threw
+  `IllegalFormatConversionException` the first time those rows composed. Both are fixes at the
+  cause; neither changes the reference-width appearance.
+* **Accessibility is an adaptation, recorded rather than hidden.** The reference is a visual
+  mockup: it has no TalkBack. Icons that stand alone carry content descriptions, selected tabs
+  and rows expose `Selected`, progress bars expose `ProgressBarRangeInfo` with current and
+  total, transfer actions name their file, and status is carried by icon and text as well as
+  colour. `AccessibilitySemanticsTest`, `ResponsiveAuditTest` and the route-registration test
+  hold those promises automatically; touch targets are never asserted below 48 dp at any
+  width (320, 360×740 reference, 412, 600 tablet, 740×360 landscape) or at font scale 1.5.
+  TalkBack's own spoken traversal remains the manual check listed in the parity table.
+* **One runner limitation is stated, not papered over.** At 320 dp the sort sheet's title and
+  its radio rows pass the window-bounds display check while its button row — in that same
+  window, with the slide landed and the content scrolled to it — does not under Robolectric.
+  The test therefore holds the buttons to what the runner can see (composed exactly once,
+  reachable through the sheet's own scrolling, clickable) and `printToLog`s where the finder
+  places each node; a device-side display assertion belongs to the first instrumented test
+  pass, which is not this milestone's toolchain.

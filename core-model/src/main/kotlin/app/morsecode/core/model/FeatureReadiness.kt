@@ -74,7 +74,7 @@ public enum class FeatureArea(
  * tools/verify asserts that it has reached the final milestone before release.
  */
 public object FeatureReadiness {
-    public const val CURRENT_MILESTONE: Int = 1
+    public const val CURRENT_MILESTONE: Int = 2
     public const val FINAL_MILESTONE: Int = 12
 
     public fun isAvailable(area: FeatureArea): Boolean = area.deliveredInMilestone <= CURRENT_MILESTONE

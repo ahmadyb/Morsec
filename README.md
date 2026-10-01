@@ -69,8 +69,8 @@ see [`doc/release.md`](doc/release.md).
 | # | Scope | Status |
 | --- | --- | --- |
 | 1 | Structure, tokens, navigation, DI, persistence, storage readers, static screens, platform doctor | **delivered** |
-| 2–4 | Depth inside the milestone‑1 areas: full Files browsing/selection and the per-file action matrix, History search and filters, Settings completeness, Logs/Crashes export | next |
-| 5 | Transfer engine — sessions, chunking, hashing, resume, verification (`TRANSFER_ENGINE`) | planned |
+| 2–4 | Depth inside the milestone‑1 areas: full Files browsing/selection and the per-file action matrix, History search and filters, Settings completeness, Logs/Crashes export | **delivered** as milestone 2 — viewer, music, video, duplex and broadcast screens plus the parity/navigation/responsive/accessibility audit; see [`doc/qa/milestone-2-screen-parity.md`](doc/qa/milestone-2-screen-parity.md) |
+| 5 | Transfer engine — sessions, chunking, hashing, resume, verification (`TRANSFER_ENGINE`) | next |
 | 6 | LAN transport — multicast discovery, TCP control/data, foreground service (`LAN_TRANSPORT`) | planned |
 | 7 | Nearby Connections transport + the doctor's Play services checks (`NEARBY_TRANSPORT`, `DOCTOR_NEARBY`) | planned |
 | 8 | Background service, notification controls, process-death recovery (`BACKGROUND_SERVICE`) | planned |

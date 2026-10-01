@@ -10,7 +10,40 @@ Actions log and artifact hosts are unreachable from some environments. On a gree
 headline numbers arrive as `::notice::` annotations (`unit tests`, `lint`, `apk`); on a red
 run every error-severity finding arrives with its file and line.
 
-## Position at the first green run
+## Position at the milestone-2 final audit
+
+Run [36894415703](https://github.com/ahmadyb/Morsec/actions/runs/36894415703), commit `f506510`:
+**0 lint errors, 45 warnings** across 5 check ids.
+
+| Check | Count | Verdict |
+| --- | --- | --- |
+| `UnusedResources` | 27 | **Accepted** — unchanged, see below |
+| `PluralsCandidate` | 11 | **Accepted** — unchanged |
+| `ConfigurationScreenWidthHeight` | 4 | **Documented** — test-only, see below |
+| `SelectedPhotoAccess` | 2 | **Deferred** to the media-depth milestone |
+| `OldTargetApi` | 1 | **Accepted** — targetSdk 36 is deliberate (ADR-0001) |
+
+The audit's own delta (41 → 47 during the group commits) was settled without a baseline and
+without lowering any severity: `ComposableNaming` and `LocalContextResourcesRead` were
+**fixed at the exact site** (`BroadcastSenderScreen`'s completion rows renamed to their
+composable's name; `MediaFullImage` reads `LocalWindowInfo` instead of a context resource),
+and the five `ViewModelConstructorInComposable` **errors** the audit's own tests briefly
+introduced were repaired by hoisting every view model out of `setContent`. No check was
+disabled beyond the four warning-severity ones already recorded in ADR-0001, and no
+suppression was added anywhere.
+
+**`ConfigurationScreenWidthHeight` (4).** All four are in
+`app/src/test/kotlin/app/morsecode/navigation/BroadcastReachabilityTest.kt`, where the test
+declares each window size it exercises with `@Config(qualifiers = …)` and then reads
+`LocalConfiguration.screenWidthDp` back to *prove* the qualifier took effect — a deliberate
+assertion about the test's own configuration, not production screen reading. Production
+code takes the same information from `LocalWindowInfo.containerSize`, which every new test
+added in the audit also uses (`ResponsiveAuditTest`, for instance, asserts its width through
+`LocalDensity` + `LocalWindowInfo` rather than the configuration). The four controlled test
+reads stay visible rather than suppressed: §8 of the audit forbids suppression, and a
+suppressed configuration read could no longer prove the window it claims to test.
+
+## Position at the first green run (history)
 
 Run [#16](https://github.com/ahmadyb/Morsec/actions/runs/36568731048), commit `d29cd4c`:
 **0 lint errors, 111 warnings** across 13 check ids.

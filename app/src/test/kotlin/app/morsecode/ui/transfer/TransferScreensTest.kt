@@ -625,7 +625,7 @@ class TransferScreensTest {
                 R.string.gated_body,
                 string(R.string.gated_area_send),
                 5,
-                1,
+                2,
             ),
         ).assertIsDisplayed()
     }
@@ -639,7 +639,7 @@ class TransferScreensTest {
 
         assertEquals(0, backgroundClicks)
         composeTestRule.onNodeWithText(
-            string(R.string.gated_body, string(R.string.gated_area_background), 8, 1),
+            string(R.string.gated_body, string(R.string.gated_area_background), 8, 2),
         ).assertIsDisplayed()
     }
 

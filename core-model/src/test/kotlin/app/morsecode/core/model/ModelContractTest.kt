@@ -204,8 +204,8 @@ class ModelContractTest {
     }
 
     @Test
-    fun `milestone one areas are live and transport areas are gated`() {
-        assertEquals(1, FeatureReadiness.CURRENT_MILESTONE)
+    fun `the current milestone is two and transport areas stay gated`() {
+        assertEquals(2, FeatureReadiness.CURRENT_MILESTONE)
         assertTrue(FeatureReadiness.isAvailable(FeatureArea.ONBOARDING))
         assertTrue(FeatureReadiness.isAvailable(FeatureArea.SETTINGS))
         assertTrue(FeatureReadiness.isAvailable(FeatureArea.FILE_BROWSING))
@@ -213,7 +213,7 @@ class ModelContractTest {
         assertFalse(FeatureReadiness.isAvailable(FeatureArea.LAN_TRANSPORT))
         assertFalse(FeatureReadiness.isAvailable(FeatureArea.WEBSHARE_SERVER))
         assertFalse(FeatureReadiness.isAvailable(FeatureArea.MEDIA_PLAYBACK))
-        assertFalse("the product is not complete at milestone one", FeatureReadiness.isComplete())
+        assertFalse("the product is not complete at milestone two", FeatureReadiness.isComplete())
         assertTrue(FeatureReadiness.gated.isNotEmpty())
         // Gated areas must be listed in delivery order so the report is readable.
         val milestones = FeatureReadiness.gated.map { it.deliveredInMilestone }

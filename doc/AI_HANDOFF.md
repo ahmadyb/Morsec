@@ -12,11 +12,11 @@ Working branch:
 arena/01a0e98a-morsec
 
 Last confirmed pushed commit:
-d9cd14965255f4f096195d09a253da3a4f78b1e4
+f5065108e7c063e22746d788fea9aaea8fc90d83
 
-(The commit that adds the "Session state" section below is docs-only and sits on
-top of it. Always trust `git ls-remote origin arena/01a0e98a-morsec` over any SHA
-written in this file.)
+(The milestone-2 docs commit that contains this file sits on top of it. Always
+trust `git ls-remote origin arena/01a0e98a-morsec` over any SHA written in this
+file.)
 
 Before changing anything:
 
@@ -31,6 +31,90 @@ Before changing anything:
 
 If the branch has commits newer than the SHA above, continue from the
 newest remote commit. Never reset to the older SHA or overwrite newer work.
+
+---
+
+## Session state — 2026-10-01: MILESTONE 2 FINAL AUDIT is COMPLETE
+
+Written by the agent that ran the twelve-part final audit you specified. Every
+number comes from GitHub Actions annotations.
+
+**Green evidence.**
+
+- Green run: https://github.com/ahmadyb/Morsec/actions/runs/36894415703
+  (`test-and-lint-reports`, `Android CI` on `arena/01a0e98a-morsec`).
+- Content-final SHA: `f5065108e7c063e22746d788fea9aaea8fc90d83`
+  (`f506510`); the milestone-2 docs commit described below sits on top of it.
+  `git ls-remote origin arena/01a0e98a-morsec` is the truth, not this file.
+- Audit commit chain on top of the approved group-5 SHA `c5927a9`:
+  `9da552f` (route/responsive/accessibility tests + 2 lint fixes) → `c3835b4`
+  (window/range-query repairs) → `2c0603a` (library+system screen tests) →
+  `afc9896` (sheet scroll, doctor's actions un-Hilted, 5 view models hoisted) →
+  `b16e1dd` (looper interval API) → `5201971` (doctor `%d` integer args, compose
+  clock settle) → `f506510` (sort-sheet buttons held to what the runner sees).
+
+**Completed M2 groups.** Groups 1–4 approved at `2b7d292`, `82fd7a0`, `a860791`
+(group 4 run `36719322299`); group 5 (Broadcast UI) approved at `c5927a9`
+(run `36855116083`); the final audit is the run above. M2 = the `2–4` UI-depth
+row of the README table, delivered as one milestone.
+
+**Screen inventory (exact).** 19 registered routes — `onboarding`, `connect`,
+`files`, `viewer`, `music`, `video`, `session/{layout}`, `broadcast/pick`,
+`broadcast/sender`, `broadcast/sender/complete`,
+`broadcast/receiver/{recipient}(+/complete)`, `folder/{treeUri}`, `history`,
+`settings`, `logs`, `crashes`, `doctor`, `help` — plus one declared-unregistered
+route, `webshare`, reserved for milestone 11. The parity table
+(`doc/qa/milestone-2-screen-parity.md`) covers all 33 mobile registry states:
+**28 implemented and tested, 5 gated with a milestone, 0 missing**. The gated
+five: `discover` live peer lists (milestones 6–7), peer consent `consentP`
+(5+6/7), browser consent `consentB` and the WebShare control screen `webshare`
+(11), and the receive screen's idle listener state (5+8). The WebShare *browser*
+pages (`wHome`…`wPlayer`) are the TypeScript client, milestones 11–12, not
+Android screens.
+
+**Totals.**
+
+- Unit tests: **786, 0 failed, 0 skipped** (51 reports).
+- Lint: **0 errors, 45 warnings** (7 reports) — UnusedResources 27,
+  PluralsCandidate 11, ConfigurationScreenWidthHeight 4 (test-only, documented),
+  SelectedPhotoAccess 2, OldTargetApi 1. No baseline, no severity lowered, no
+  new suppressions; dispositions in `doc/qa/lint-and-warnings.md`.
+- APK: `app-debug.apk` **18.48 MiB** and `app-debug-androidTest.apk` **1.10 MiB**
+  as published by the green run; `test-and-lint-reports` artifact carries the
+  HTML.
+- Wrapper: committed and used as-is (no regeneration).
+- Verifiers: `refs.mjs` 31/31, `token-parity.mjs` 195/195, `icons.mjs --check`
+  61/61 at `CURRENT_MILESTONE = 2`.
+
+**Intentional differences from the reference** are recorded in
+`doc/fidelity-notes.md` §4.9 (broadcast) and the new §4.10 (visual fidelity):
+TalkBack labels and `Selected` semantics are Android adaptations the HTML
+reference cannot express; onboarding draws its progress as dots (the
+`onb_progress` sentence is a kept token, unused by the screen); the sheet's
+content scrolls so a tall menu cannot clip its last button; one Robolectric
+limitation is stated — the sort sheet's button row passes composition and
+clickability but not the runner's window-bounds display check.
+
+**Non-reversible decisions (do not relitigate).** Transport copy "LAN or
+Nearby"; no Manual IP entry and no QR screen; no separate Queue destination; no
+global "Retry failed"; one Pause all/Resume all in the bottom bar only;
+completed rows carry no controls; five sticky category tabs; video header =
+back + filename + metadata only; crash reports = view/export/clear; WebShare
+browser UI stays out of the Android app; minSdk 23 / targetSdk 36 / toolchain
+pins (ADR-0001); no lint baseline; the mockup and master prompt are read-only
+unless asked; `CURRENT_MILESTONE = 2` was bumped with its three test pins and
+is bumped only at a delivered milestone.
+
+**Next unstarted milestone.** Milestone 3 — the ladder's name for the next
+work, whose feature areas are `TRANSFER_ENGINE` (area 5) and the real
+storage/media integration behind the UI-state controllers M2 was explicitly
+built with. **Nothing of it has started.** Exact first task: replace the
+explicit UI-state controllers with the real storage/media path — wire the real
+`MediaRepository` (SAF readers in `core-storage`) into the Files, viewer and
+player screens that currently render fixtures, keeping `FeatureReadiness` gates
+where the engine is still absent — then begin master prompt §6's transfer state
+machine (framed chunks, sequence/offset, per-chunk CRC32, full-file SHA-256)
+as pure Kotlin with tests. Do not start it without explicit approval.
 
 ---
 
@@ -490,8 +574,12 @@ executions across 9 reports, 0 failures), the project really compiles, Hilt and
 Room really process, lint really runs (0 errors) and both APKs really assemble.
 See "Session state" for the runs.
 
-Milestone 1 is therefore **implemented and CI-verified**; it is still waiting for
-your explicit acceptance before Milestone 2 begins.
+Milestone 1 is therefore **implemented and CI-verified**.
+
+**Update 2026-10-01:** Milestone 2 (the `2–4` UI-depth row) is also delivered and
+CI-verified — see "Session state — 2026-10-01" above for the green run, the
+totals and the parity summary. Milestone 3 has not started and must not start
+without explicit approval.
 
 The previous environment could not compile Android code because it had
 no JDK, Gradle, or Android SDK and could not download them. That is still true of
