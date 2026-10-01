@@ -8,29 +8,38 @@ replace, or regenerate the repository.
 GitHub repository:
 https://github.com/ahmadyb/Morsec
 
-Working branch:
+Working branch for this Arena session:
+arena/01a0f8ba-morsec
+
+Upstream baseline branch:
 arena/01a0e98a-morsec
 
-Last confirmed pushed commit:
-f5065108e7c063e22746d788fea9aaea8fc90d83
+Last confirmed code commit on the session branch:
+136711e2da47d612a9b898527296a025c5324168
 
-(The milestone-2 docs commit that contains this file sits on top of it. Always
-trust `git ls-remote origin arena/01a0e98a-morsec` over any SHA written in this
-file.)
+The session branch was created from baseline SHA
+`13d8bf1312c7e39064d9a398935f2f9830ce0eed`. Do not switch branches or push to
+the baseline. Trust `git ls-remote origin refs/heads/arena/01a0f8ba-morsec` for
+the session head; query `arena/01a0e98a-morsec` separately.
 
 Before changing anything:
 
-1. Clone or open the existing repository.
-2. Fetch all remote branches.
-3. Check out `arena/01a0e98a-morsec`.
-4. Run `git status`.
+1. Open the existing repository.
+2. Fetch both known refs without rewriting them:
+   `git fetch origin refs/heads/arena/01a0e98a-morsec:refs/remotes/origin/arena/01a0e98a-morsec`
+   and
+   `git fetch origin refs/heads/arena/01a0f8ba-morsec:refs/remotes/origin/arena/01a0f8ba-morsec`.
+3. Continue on `arena/01a0f8ba-morsec`; never switch away from the Arena
+   session branch.
+4. Run `git status` and compare `HEAD` with the session branch's `git ls-remote`
+   SHA. Preserve any surviving uncommitted work.
 5. Run `git log --oneline --decorate -10`.
 6. Read the files listed below.
 7. Report the actual repository state.
 8. Do not write code until you confirm the branch and existing work.
 
-If the branch has commits newer than the SHA above, continue from the
-newest remote commit. Never reset to the older SHA or overwrite newer work.
+Continue from the newest remote session-branch commit. Never reset, rewrite
+history, or overwrite newer work.
 
 ---
 
@@ -105,16 +114,50 @@ pins (ADR-0001); no lint baseline; the mockup and master prompt are read-only
 unless asked; `CURRENT_MILESTONE = 2` was bumped with its three test pins and
 is bumped only at a delivered milestone.
 
-**Next unstarted milestone.** Milestone 3 — the ladder's name for the next
-work, whose feature areas are `TRANSFER_ENGINE` (area 5) and the real
-storage/media integration behind the UI-state controllers M2 was explicitly
-built with. **Nothing of it has started.** Exact first task: replace the
-explicit UI-state controllers with the real storage/media path — wire the real
-`MediaRepository` (SAF readers in `core-storage`) into the Files, viewer and
-player screens that currently render fixtures, keeping `FeatureReadiness` gates
-where the engine is still absent — then begin master prompt §6's transfer state
-machine (framed chunks, sequence/offset, per-chunk CRC32, full-file SHA-256)
-as pure Kotlin with tests. Do not start it without explicit approval.
+**Focused storage/media integration task — complete (2026-10-01).** Source
+inspection confirmed the production Files, viewer and player view models already
+use `MediaRepository`; no replacement of production fixture rows was needed.
+The actual gap was that Photos, Videos and Music did not merge matching media
+beneath persisted SAF trees, and nested SAF descendants could not all be
+resolved by ID. The implementation adds MediaStore/SAF data-source interfaces
+and Hilt bindings, breadth-first SAF descendant traversal, kind-filtered and
+deduplicated SAF + MediaStore category feeds, nested SAF item lookup, and Files
+access-state behavior that keeps tree-granted media usable without broad media
+permission. Existing `FeatureReadiness` gates remain; no transfer behavior was
+invented or enabled.
+
+**Verification and evidence.**
+
+- Code commit: `136711e2da47d612a9b898527296a025c5324168` on
+  `arena/01a0f8ba-morsec`; the remote ref matched after push. Draft PR #1:
+  https://github.com/ahmadyb/Morsec/pull/1.
+- Green Android CI: https://github.com/ahmadyb/Morsec/actions/runs/36910240632
+  (run `36910240632`, head SHA `136711e2da47d612a9b898527296a025c5324168`).
+  The earlier run `36909332385` found a test assertion import and a Robolectric
+  permission setup problem; both were fixed before the green run.
+- CI completed hygiene, JVM unit tests, Android lint, debug APK assembly and
+  Android-test APK assembly: **800 tests, 0 failed, 0 skipped** (56 reports);
+  **0 lint errors, 45 warnings** (7 reports, matching the documented warning
+  baseline); `app-debug.apk` **18.48 MiB** and
+  `app-debug-androidTest.apk` **1.10 MiB**. The run uploaded the
+  `morsecode-debug-apk` artifact (18,156,590 bytes), `test-and-lint-reports`,
+  and `gradle-wrapper`. The Android-test APK was assembled successfully but is
+  not a separate uploaded artifact in this workflow.
+- `node tools/verify/refs.mjs`: 31/31; `node
+  tools/verify/token-parity.mjs`: 195/195; `git diff --check`: clean.
+- The sandbox has no Java/JDK or Android SDK, so local Gradle compilation,
+  tests, lint and APK assembly could not run; the green Actions run is the
+  actual Android verification. Workflow dispatch returned HTTP 403, so the
+  draft PR triggered CI. Artifact metadata is available from GitHub, but
+  downloading the artifact blob failed with EOF in this environment.
+
+**Next task and protected scope.** This focused task does not claim Milestone 3
+delivery: `CURRENT_MILESTONE` remains 2. The next unstarted work is the master
+prompt §6 pure-Kotlin transfer state machine (framed chunks, sequence/offset,
+per-chunk CRC32 and full-file SHA-256) with tests. Do not start it without
+explicit approval. All previously recorded protected UI/product decisions,
+minSdk 23, toolchain pins, lint error checks, honest feature gates, and the
+prohibition on fake transfer/discovery/playback behavior remain in force.
 
 ---
 
