@@ -354,10 +354,10 @@ class ResponsiveAuditTest {
     )
 
     private fun settle() {
-        // The modal bottom sheet animates its own translation on frames the Robolectric
-        // scheduler schedules with a delay; idleMainLooper alone never reaches them, so the
-        // clock is advanced first and the compose side is then waited out.
-        ShadowLooper.idleFor(java.time.Duration.ofMillis(1_000))
+        // The modal bottom sheet slides up on frames the Robolectric scheduler posts with a
+        // delay; the plain idle only runs what is already due, so the clock is advanced a
+        // second first to land the translation, and the compose side is then waited out.
+        ShadowLooper.idleMainLooper(1_000, java.util.concurrent.TimeUnit.MILLISECONDS)
         composeTestRule.waitForIdle()
         ShadowLooper.idleMainLooper()
         composeTestRule.waitForIdle()
