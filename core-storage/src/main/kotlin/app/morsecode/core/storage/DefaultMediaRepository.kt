@@ -8,11 +8,11 @@ import app.morsecode.core.data.repository.DeviceRepository
 import app.morsecode.core.model.MediaItem
 import app.morsecode.core.model.MediaKind
 import app.morsecode.core.model.SafGrant
-import app.morsecode.core.storage.apps.InstalledAppsReader
-import app.morsecode.core.storage.media.MediaStoreReader
-import app.morsecode.core.storage.permissions.PermissionMatrix
-import app.morsecode.core.storage.saf.SafTreeReader
 import app.morsecode.core.model.di.IoDispatcher
+import app.morsecode.core.storage.apps.InstalledAppsReader
+import app.morsecode.core.storage.media.MediaStoreDataSource
+import app.morsecode.core.storage.permissions.PermissionMatrix
+import app.morsecode.core.storage.saf.SafTreeDataSource
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
@@ -30,16 +30,16 @@ import javax.inject.Singleton
  *
  * Queries are re-run when [refresh] is called (after a permission grant, a
  * folder pick or a completed transfer) and every read happens on the IO
- * dispatcher. When a permission is missing the flow emits an empty list and
- * [observeAccess] explains why, so the screen can offer the exact grant instead
- * of showing a silently empty grid.
+ * dispatcher. Missing media permissions suppress MediaStore reads, but never
+ * hide files inside a still-valid SAF grant; [observeAccess] tells the screen
+ * which source is available so it can explain an empty category honestly.
  */
 @Singleton
 internal class DefaultMediaRepository @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val mediaStore: MediaStoreReader,
+    private val mediaStore: MediaStoreDataSource,
     private val installedApps: InstalledAppsReader,
-    private val saf: SafTreeReader,
+    private val saf: SafTreeDataSource,
     private val devices: DeviceRepository,
     @IoDispatcher private val io: CoroutineDispatcher,
 ) : MediaRepository {
@@ -50,11 +50,14 @@ internal class DefaultMediaRepository @Inject constructor(
     override fun observeAccess(): Flow<StorageAccess> =
         combine(devices.observeGrants(), tick) { grants, _ -> access(grants) }.flowOn(io)
 
-    override fun observeImages(): Flow<List<MediaItem>> = mediaFlow { it.images() }
+    override fun observeImages(): Flow<List<MediaItem>> =
+        mediaFlow(MediaKind.IMAGE) { images() }
 
-    override fun observeVideos(): Flow<List<MediaItem>> = mediaFlow { it.videos() }
+    override fun observeVideos(): Flow<List<MediaItem>> =
+        mediaFlow(MediaKind.VIDEO) { videos() }
 
-    override fun observeAudio(): Flow<List<MediaItem>> = mediaFlow { it.audio() }
+    override fun observeAudio(): Flow<List<MediaItem>> =
+        mediaFlow(MediaKind.AUDIO) { audio() }
 
     override fun observeApps(): Flow<List<MediaItem>> =
         tick.map { installedApps.apps() }.flowOn(io)
@@ -182,14 +185,32 @@ internal class DefaultMediaRepository @Inject constructor(
 
     private fun canReadMedia(): Boolean = PermissionMatrix.granted(context, PermissionMatrix.mediaRead())
 
-    private fun mediaFlow(query: (MediaStoreReader) -> List<MediaItem>): Flow<List<MediaItem>> =
-        tick.map { if (canReadMedia()) query(mediaStore) else emptyList() }.flowOn(io)
+    /** MediaStore plus every matching file below a valid user-granted SAF tree. */
+    private fun mediaFlow(
+        kind: MediaKind,
+        query: MediaStoreDataSource.() -> List<MediaItem>,
+    ): Flow<List<MediaItem>> = tick.map {
+        val fromMediaStore = if (canReadMedia()) query(mediaStore) else emptyList()
+        val fromSaf = safMediaItems(kind)
+        (fromMediaStore + fromSaf)
+            .filter { !it.isFolder && it.kind == kind }
+            .distinctBy { it.id }
+    }.flowOn(io)
+
+    private suspend fun safMediaItems(kind: MediaKind): List<MediaItem> =
+        devices.observeGrants().first()
+            .asSequence()
+            .filter { saf.isValid(it.treeUri) }
+            .flatMap { grant -> saf.descendants(grant.treeUri).asSequence() }
+            .filter { !it.isFolder && it.kind == kind }
+            .toList()
 
     private suspend fun findBySafId(id: String): MediaItem? {
         val grants = devices.observeGrants().first()
         grants.forEach { grant ->
+            if (!saf.isValid(grant.treeUri)) return@forEach
             if ("saf:${grant.id}" == id) return saf.folderItem(grant)
-            val match = saf.children(grant.treeUri).firstOrNull { it.id == id }
+            val match = saf.descendants(grant.treeUri).firstOrNull { it.id == id }
             if (match != null) return match
         }
         return null

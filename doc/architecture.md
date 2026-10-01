@@ -143,7 +143,10 @@ The adapters that turn "the user's files" into `MediaItem`s on every supported A
 `MediaStoreReader` (API 29+ and the legacy MediaStore), `SafTreeReader` (tree grants via
 `DocumentFile`, with persisted-permission release), `InstalledAppsReader` (the Apps tab,
 using the manifest's `<queries>` LAUNCHER intent rather than `QUERY_ALL_PACKAGES`), and
-`DefaultMediaRepository` which composes them into one `MediaRepository`.
+`DefaultMediaRepository` which composes them into one `MediaRepository`. The Photos,
+Videos and Music flows merge MediaStore rows with matching files discovered recursively
+inside valid SAF grants; the folder browser keeps using direct children so it remains
+hierarchical. MediaStore permission is not required to read a file the user granted via SAF.
 
 `permissions/PermissionMatrix` is the single source of truth for *which* permission a
 feature needs *at this API level* — media read (split at 33), media write (23–28 only),
@@ -169,22 +172,23 @@ Graph shape:
 - `:core-data/di/DataModule` — database, DAOs, DataStore, logger, crash recorder.
 - `:core-data/di/RepositoryModule` — `@Binds` from each implementation to its repository
   interface.
-- `:core-storage/di/StorageModule` — SAF/MediaStore/app readers and `MediaRepository`.
+- `:core-storage/di/StorageModule` — SAF and MediaStore data-source adapters, app reader
+  and `MediaRepository`.
 - Dispatchers are qualified (`IoDispatcher`, `DefaultDispatcher`, …) and provided once.
 
 The graph is complete: every `@Inject` constructor's dependencies are satisfiable, which
-`tools/verify/refs.mjs` checks statically (21 `@Inject` constructors, 14 `@Provides`,
-8 `@Binds`, 0 unsatisfied) and KSP/Hilt verifies for real in CI
+`tools/verify/refs.mjs` checks statically (31 `@Inject` constructors, 14 `@Provides`,
+10 `@Binds`, 0 unsatisfied) and KSP/Hilt verifies for real in CI
 (`:app:hiltJavaCompileDebug`).
 
 ## Feature readiness and the no-fake-behaviour rule
 
 `core-model/FeatureReadiness.kt` pairs every feature area with the milestone that delivers
-it (`CURRENT = 1`, `FINAL = 12`). At Milestone 1 the ready areas are `ONBOARDING`,
-`SETTINGS`, `DESIGN_SYSTEM`, `PERSISTENCE`, `FILE_BROWSING`, `DIAGNOSTICS` and
-`DOCTOR_PLATFORM`; `TRANSFER_ENGINE`, `LAN_TRANSPORT`, `NEARBY_TRANSPORT`,
-`BACKGROUND_SERVICE`, `SESSIONS_AND_BROADCAST`, `MEDIA_PLAYBACK`, `WEBSHARE_SERVER`,
-`WEBSHARE_CLIENT` and `DOCTOR_NEARBY` are not.
+it (`CURRENT = 2`, `FINAL = 12`). The ready areas are `ONBOARDING`, `SETTINGS`,
+`DESIGN_SYSTEM`, `PERSISTENCE`, `FILE_BROWSING`, `DIAGNOSTICS` and `DOCTOR_PLATFORM`;
+`TRANSFER_ENGINE`, `LAN_TRANSPORT`, `NEARBY_TRANSPORT`, `BACKGROUND_SERVICE`,
+`SESSIONS_AND_BROADCAST`, `MEDIA_PLAYBACK`, `WEBSHARE_SERVER`, `WEBSHARE_CLIENT` and
+`DOCTOR_NEARBY` remain gated for their delivery milestones.
 
 `ui/common/FeatureGate.kt` is how that stays honest on screen: an action whose area is not
 ready opens an explanation sheet instead of pretending to work. There is no simulated

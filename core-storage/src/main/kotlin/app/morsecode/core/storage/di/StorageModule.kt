@@ -2,6 +2,10 @@ package app.morsecode.core.storage.di
 
 import app.morsecode.core.storage.DefaultMediaRepository
 import app.morsecode.core.storage.MediaRepository
+import app.morsecode.core.storage.media.MediaStoreDataSource
+import app.morsecode.core.storage.media.MediaStoreReader
+import app.morsecode.core.storage.saf.SafTreeDataSource
+import app.morsecode.core.storage.saf.SafTreeReader
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -14,6 +18,14 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 internal abstract class StorageModule {
+
+    @Binds
+    @Singleton
+    internal abstract fun bindMediaStoreDataSource(impl: MediaStoreReader): MediaStoreDataSource
+
+    @Binds
+    @Singleton
+    internal abstract fun bindSafTreeDataSource(impl: SafTreeReader): SafTreeDataSource
 
     @Binds
     @Singleton

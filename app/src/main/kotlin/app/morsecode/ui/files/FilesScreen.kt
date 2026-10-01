@@ -306,8 +306,8 @@ private fun FilesCategoryPage(
     onOpen: (MediaItem) -> Unit,
 ) {
     val content = state.contentFor(tab)
-    val needsPermission = !state.access.canListMedia &&
-        (tab == FilesTab.PHOTOS || tab == FilesTab.VIDEOS || tab == FilesTab.MUSIC)
+    val isMediaTab = tab == FilesTab.PHOTOS || tab == FilesTab.VIDEOS || tab == FilesTab.MUSIC
+    val needsPermission = isMediaTab && !state.access.canListMedia
     val needsFolder = tab == FilesTab.FILES && !state.access.canListDocuments
 
     when {
@@ -335,16 +335,28 @@ private fun FilesCategoryPage(
             message = stringResource(emptyBodyRes(tab)),
             iconRes = MorseIcons.folder,
             modifier = Modifier.fillMaxSize(),
-            action = if (needsFolder) {
-                {
-                    MorseButton(
-                        text = stringResource(R.string.files_add_folder),
-                        onClick = onAddFolder,
-                        variant = MorseButtonVariant.WASH,
-                    )
+            action = when {
+                needsFolder -> {
+                    {
+                        MorseButton(
+                            text = stringResource(R.string.files_add_folder),
+                            onClick = onAddFolder,
+                            variant = MorseButtonVariant.WASH,
+                        )
+                    }
                 }
-            } else {
-                null
+
+                isMediaTab && !state.access.mediaReadGranted -> {
+                    {
+                        MorseButton(
+                            text = stringResource(R.string.files_permission_grant),
+                            onClick = onRequestPermission,
+                            variant = MorseButtonVariant.WASH,
+                        )
+                    }
+                }
+
+                else -> null
             },
         )
 
