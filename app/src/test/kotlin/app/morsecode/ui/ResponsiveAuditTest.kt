@@ -2,8 +2,8 @@ package app.morsecode.ui
 
 import android.app.Application
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -36,6 +36,7 @@ import app.morsecode.ui.transfer.TransferPeer
 import app.morsecode.ui.transfer.TransferSession
 import app.morsecode.ui.transfer.TransferState
 import app.morsecode.ui.transfer.transferUiStateTo
+import kotlin.math.roundToInt
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -238,7 +239,9 @@ class ResponsiveAuditTest {
             formatters = formatters,
         )
         composeTestRule.setContent {
-            configuredWidthDp = LocalConfiguration.current.screenWidthDp
+            configuredWidthDp = with(LocalDensity.current) {
+                LocalWindowInfo.current.containerSize.width.toDp().value.roundToInt()
+            }
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = ThemeMode.DARK, reducedMotion = true) {
                     FilesScreen(
@@ -261,7 +264,9 @@ class ResponsiveAuditTest {
             formatters,
         )
         composeTestRule.setContent {
-            configuredWidthDp = LocalConfiguration.current.screenWidthDp
+            configuredWidthDp = with(LocalDensity.current) {
+                LocalWindowInfo.current.containerSize.width.toDp().value.roundToInt()
+            }
             CompositionLocalProvider(LocalLifecycleOwner provides TestLifecycleOwner()) {
                 MorseTheme(themeMode = ThemeMode.DARK, reducedMotion = true) {
                     BroadcastSenderScreen(
@@ -281,7 +286,9 @@ class ResponsiveAuditTest {
     private fun showTransfer(fontScale: Float = 1f) {
         val state = transferUiStateTo(duplexSession(), TransferLayout.SENDING_FIRST, formatters)
         composeTestRule.setContent {
-            configuredWidthDp = LocalConfiguration.current.screenWidthDp
+            configuredWidthDp = with(LocalDensity.current) {
+                LocalWindowInfo.current.containerSize.width.toDp().value.roundToInt()
+            }
             val density = LocalDensity.current
             CompositionLocalProvider(
                 LocalLifecycleOwner provides TestLifecycleOwner(),

@@ -10,6 +10,7 @@ import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onNode
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -114,9 +115,10 @@ class AccessibilitySemanticsTest {
 
         // The progress bar carries both a spoken current/total sentence and the numeric
         // range a screen reader turns into a percentage.
-        val progress = composeTestRule.onNodeWithContentDescription(" of ", substring = true)
-        progress.assertIsDisplayed()
-        progress.assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.ProgressBarRangeInfo))
+        composeTestRule.onNodeWithContentDescription(" of ", substring = true).assertIsDisplayed()
+        composeTestRule
+            .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.ProgressBarRangeInfo))
+            .assertIsDisplayed()
 
         // And every control on the row says which file it would act on.
         composeTestRule.onNodeWithContentDescription("Pause a").assertIsDisplayed()
