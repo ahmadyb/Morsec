@@ -1,9 +1,6 @@
 package app.morsecode.core.storage
 
 import android.app.Application
-import android.content.Context
-import android.content.ContextWrapper
-import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import app.morsecode.core.data.repository.DeviceRepository
@@ -24,9 +21,11 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -70,8 +69,14 @@ class DefaultMediaRepositoryTest {
         isFolder = true,
     )
 
+    @Before
+    fun denyBroadMediaPermission() {
+        Shadows.shadowOf(context).denyPermissions(*PermissionMatrix.mediaRead().toTypedArray())
+    }
+
     @Test
     fun `media categories merge MediaStore with matching files throughout SAF trees`() = runTest {
+        Shadows.shadowOf(context).grantPermissions(*PermissionMatrix.mediaRead().toTypedArray())
         val store = FakeMediaStoreDataSource(
             images = listOf(item("image:1", "store.jpg", MediaKind.IMAGE)),
             videos = listOf(item("video:2", "store.mp4", MediaKind.VIDEO)),
@@ -84,7 +89,6 @@ class DefaultMediaRepositoryTest {
                 SafGrant(id = 12L, treeUri = nestedUri, displayName = "Camera"),
             ),
             store = store,
-            grantedPermissions = PermissionMatrix.mediaRead().toSet(),
         )
 
         assertEquals(
@@ -155,18 +159,14 @@ class DefaultMediaRepositoryTest {
         grants: List<SafGrant>,
         store: FakeMediaStoreDataSource = FakeMediaStoreDataSource(),
         saf: FakeSafTreeDataSource = defaultSafSource(),
-        grantedPermissions: Set<String> = emptySet(),
-    ): DefaultMediaRepository {
-        val permissionContext = PermissionContext(context, grantedPermissions)
-        return DefaultMediaRepository(
-            context = permissionContext,
-            mediaStore = store,
-            installedApps = InstalledAppsReader(permissionContext),
-            saf = saf,
-            devices = FakeDeviceRepository(grants),
-            io = Dispatchers.Unconfined,
-        )
-    }
+    ): DefaultMediaRepository = DefaultMediaRepository(
+        context = context,
+        mediaStore = store,
+        installedApps = InstalledAppsReader(context),
+        saf = saf,
+        devices = FakeDeviceRepository(grants),
+        io = Dispatchers.Unconfined,
+    )
 
     private fun defaultSafSource() = FakeSafTreeDataSource(
         childrenByUri = mapOf(
@@ -192,15 +192,6 @@ class DefaultMediaRepositoryTest {
         uriString = uri,
         isFolder = isFolder,
     )
-
-    private class PermissionContext(
-        base: Context,
-        private val grantedPermissions: Set<String>,
-    ) : ContextWrapper(base) {
-        override fun checkSelfPermission(permission: String): Int =
-            if (permission in grantedPermissions) PackageManager.PERMISSION_GRANTED
-            else PackageManager.PERMISSION_DENIED
-    }
 
     private class FakeMediaStoreDataSource(
         private val images: List<MediaItem> = emptyList(),
