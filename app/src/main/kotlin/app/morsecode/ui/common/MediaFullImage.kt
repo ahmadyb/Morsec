@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.core.net.toUri
 import app.morsecode.R
@@ -55,10 +56,13 @@ public fun MediaFullImage(
     val context = LocalContext.current
     val uriString = item.uriString
     val loadingText = stringResource(R.string.viewer_loading)
-    // The screen, in pixels, is the budget a decoded frame has to fit inside.
-    val maxEdge = remember(context) {
-        val display = context.resources.displayMetrics
-        maxOf(display.widthPixels, display.heightPixels)
+    // The window, in pixels, is the budget a decoded frame has to fit inside. It is read from
+    // the window rather than from the context's Resources so a configuration change —
+    // rotation, a fold, a resized window — recomputes the budget instead of composition
+    // holding the screen it first saw.
+    val containerSize = LocalWindowInfo.current.containerSize
+    val maxEdge = remember(containerSize) {
+        maxOf(containerSize.width, containerSize.height)
     }
 
     val bitmap by produceState<ImageBitmap?>(initialValue = null, key1 = uriString, key2 = maxEdge) {

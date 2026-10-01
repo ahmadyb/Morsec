@@ -411,7 +411,7 @@ private fun BroadcastSummaryCard(
                 color = if (state.complete) colors.ok else colors.textPrimary,
             )
             Text(
-                text = BroadcastCountsText(state),
+                text = broadcastCountsText(state),
                 style = MorseTextStyles.meta,
                 color = colors.textTertiary,
             )
@@ -463,7 +463,7 @@ private fun BroadcastSummaryCard(
  * exactly what a user reads the summary for.
  */
 @Composable
-private fun BroadcastCountsText(state: BroadcastSenderUiState): String {
+private fun broadcastCountsText(state: BroadcastSenderUiState): String {
     val result = state.result
     val pieces = buildList {
         if (state.complete) {
