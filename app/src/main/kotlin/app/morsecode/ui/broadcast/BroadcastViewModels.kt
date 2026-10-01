@@ -560,7 +560,13 @@ internal fun broadcastReceiverState(
     endConfirmationVisible: Boolean = false,
 ): BroadcastReceiverUiState {
     val recipient = session.recipient(recipientId) ?: session.uniqueRecipients.first()
-    val deliveries = session.deliveriesTo(recipient.peerId)
+    // What this phone's list draws is what the session has recorded for it: a receipt the
+    // user cleared leaves the screen, and a pair the engine has not queued yet has nothing
+    // to draw — the engine records QUEUED when it queues, rather than the screen inventing
+    // a row from the pair's existence alone.
+    val deliveries = session.uniqueFiles.mapNotNull { file ->
+        session.deliveries[DeliveryKey(recipient.peerId, file.id)]
+    }
     val moving = deliveries.filter { it.state.isActive && it.speedBytesPerSecond > 0L }
     val average = if (moving.isEmpty()) 0L else moving.sumOf { it.speedBytesPerSecond } / moving.size
     return BroadcastReceiverUiState(

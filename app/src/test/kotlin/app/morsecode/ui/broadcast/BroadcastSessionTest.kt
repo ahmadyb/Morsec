@@ -218,8 +218,11 @@ class BroadcastSessionTest {
             files = listOf(file("a", 100_000_000L)),
             recipients = listOf(ravi, pixel),
             deliveries = listOf(
-                delivery("r", "a", TransferState.SENDING, transferred = 25_000_000L, speed = 1_000_000L),
-                delivery("p", "a", TransferState.QUEUED),
+                delivery(
+                    "r", "a", TransferState.SENDING,
+                    transferred = 25_000_000L, speed = 1_000_000L, totalBytes = 100_000_000L,
+                ),
+                delivery("p", "a", TransferState.QUEUED, totalBytes = 100_000_000L),
             ).associateBy { it.key },
         )
 
@@ -339,13 +342,22 @@ class BroadcastSessionTest {
 
         val retried = BroadcastRules.apply(session, key, TransferRowAction.RETRY)
 
-        assertEquals("a retry restarts the file rather than resuming it", TransferState.SENDING, retried.delivery(key)!!.state)
+        assertEquals(
+            "an outgoing retry re-queues the file from the beginning, for the engine to run",
+            TransferState.QUEUED,
+            retried.delivery(key)!!.state,
+        )
         assertEquals(0L, retried.delivery(key)!!.transferred)
         assertEquals("and the old checksum answer is cleared", VerificationOutcome.PENDING, retried.delivery(key)!!.verification)
         assertEquals(
-            "exactly one more delivery is moving, so nobody else was retried with it",
-            1,
-            retried.result.active - session.result.active,
+            "the retry moves nothing on its own, and nobody else was retried with it",
+            session.result.active,
+            retried.result.active,
+        )
+        assertEquals(
+            "every other delivery is the same object it was",
+            session.allDeliveries.filter { it.key != key },
+            retried.allDeliveries.filter { it.key != key },
         )
     }
 
@@ -440,16 +452,21 @@ class BroadcastSessionTest {
     }
 
     @Test
-    fun `ending one phone's session leaves the batch running for the others`() {
+    fun `ending one phone's session leaves the batch open for the others`() {
         val session = mixed()
 
         val after = BroadcastRules.end(session, recipientId = "p")
 
         assertTrue("that phone is finished", after.resultFor("p").complete)
         assertFalse("the batch as a whole is not", after.result.complete)
+        assertEquals(
+            "every other phone's deliveries are exactly as they were",
+            session.allDeliveries.filterKeys { it.recipientId != "p" },
+            after.allDeliveries.filterKeys { it.recipientId != "p" },
+        )
         assertTrue(
             "and the others still have work in hand",
-            after.allDeliveries.any { it.recipientId != "p" && it.state.isActive },
+            after.allDeliveries.any { it.recipientId != "p" && it.state != TransferState.DONE },
         )
     }
 
@@ -642,9 +659,10 @@ class BroadcastSessionTest {
         assertTrue("a phone partway through is between nothing and everything", partway in 0f..1f)
         assertEquals("85.5 MB of a 212.1 MB batch", 0.403f, partway, 0.001f)
         assertEquals(
-            "and a phone that has received nothing reads nothing",
+            "and a phone whose arrived deliveries have all been cleared reads nothing",
             0f,
-            BroadcastRules.clearCompleted(mixed(), recipientId = "p").fractionFor("p"),
+            BroadcastRules.clearCompleted(BroadcastFixtures.completedSession(), recipientId = "p")
+                .fractionFor("p"),
             0.0001f,
         )
     }

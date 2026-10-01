@@ -56,7 +56,7 @@ class BroadcastViewModelsTest {
         viewModel.toggle("p")
         assertTrue(viewModel.state.value.canStart)
         assertEquals(0, viewModel.state.value.shortfall)
-        assertEquals("r,p", viewModel.chosenToken())
+        assertEquals("the token is the phones in a stable order, not the order of the taps", "p,r", viewModel.chosenToken())
     }
 
     @Test
@@ -140,7 +140,11 @@ class BroadcastViewModelsTest {
             listOf("33%", "100%", ""),
             after.map { it.percent },
         )
-        assertEquals(TransferState.SENDING, after[2].state)
+        assertEquals(
+            "an outgoing retry re-queues the file for an engine this build does not have",
+            TransferState.QUEUED,
+            after[2].state,
+        )
         assertEquals(
             "and the two phones that were fine are the same values they were",
             listOf(before[0], before[1]),

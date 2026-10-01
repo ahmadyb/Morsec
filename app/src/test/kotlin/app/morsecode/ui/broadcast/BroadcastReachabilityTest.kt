@@ -104,7 +104,8 @@ class BroadcastReachabilityTest {
         scrollTo("1 paused · 1 failed")
         composeTestRule.onNodeWithText("1 paused · 1 failed").assertIsDisplayed()
 
-        composeTestRule.onNodeWithText("Pause all").assertIsDisplayed()
+        // This phone holds a file and moves nothing, so the bar's one control offers Resume.
+        composeTestRule.onNodeWithText("Resume all").assertIsDisplayed()
         composeTestRule.onNodeWithText("End").assertIsDisplayed()
     }
 

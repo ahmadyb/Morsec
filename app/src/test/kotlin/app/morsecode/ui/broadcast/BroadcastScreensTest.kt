@@ -307,8 +307,9 @@ class BroadcastScreensTest {
             live.recipients.map { it.percent },
         )
         assertEquals(
-            "the retried delivery is moving again beside the one that never stopped",
-            2,
+            "the retried delivery waits in the queue — there is no engine here to run it — " +
+                "and the phone that never stopped is still the only mover",
+            1,
             viewModel.state.value.result.active,
         )
 
@@ -453,19 +454,23 @@ class BroadcastScreensTest {
     }
 
     @Test
-    fun `clearing on a receiver removes what arrived there and keeps the rest`() {
+    fun `a receiver keeps every row: the reference offers no way to dismiss one`() {
         val viewModel = BroadcastReceiverViewModel(
             SavedStateHandle(mapOf(Routes.BROADCAST_RECIPIENT_ARG to "s")),
             formatters,
         )
         showReceiver(viewModel)
 
-        scrollTo("IMG_2043.jpg")
-        composeTestRule.onNodeWithContentDescription("Clear completed").performClick()
-        settle()
+        // No trash in the heading, no per-row control, nothing that could take a receipt
+        // away — the reference's receiver section carried Pause alone, and this app's one
+        // whole-list control is the bar's.
+        composeTestRule.onAllNodesWithContentDescription("Clear completed").assertCountEquals(0)
+        composeTestRule.onAllNodesWithContentDescription("Clear", substring = true)
+            .assertCountEquals(0)
+        assertEquals("all three files are still listed", 3, viewModel.state.value.rows.size)
 
-        assertEquals("the delivered file left the list", 2, viewModel.state.value.rows.size)
-        composeTestRule.onNodeWithText("DONE").assertDoesNotExist()
+        scrollTo("DONE")
+        composeTestRule.onNodeWithText("DONE").assertIsDisplayed()
         scrollTo("FAILED")
         composeTestRule.onNodeWithText("FAILED").assertIsDisplayed()
     }

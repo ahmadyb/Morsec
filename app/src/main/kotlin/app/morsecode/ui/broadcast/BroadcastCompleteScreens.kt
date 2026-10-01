@@ -238,7 +238,7 @@ private fun verifiedText(state: BroadcastSentUiState): String = if (state.result
 } else {
     pluralStringResource(
         R.plurals.broadcast_partial_verified,
-        state.result.delivered,
+        state.result.expected,
         state.result.delivered,
         state.result.expected,
     )
@@ -250,7 +250,7 @@ private fun RecipientResultRow(row: BroadcastRecipientResultRow) {
     val colors = MorseTheme.colors
     val deliveryText = pluralStringResource(
         R.plurals.broadcast_recipient_result,
-        row.delivered,
+        row.expected,
         row.delivered,
         row.expected,
         row.bytes,

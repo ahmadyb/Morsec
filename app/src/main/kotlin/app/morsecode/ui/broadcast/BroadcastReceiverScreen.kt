@@ -23,7 +23,6 @@ import app.morsecode.core.design.component.MorseButton
 import app.morsecode.core.design.component.MorseButtonVariant
 import app.morsecode.core.design.component.MorseWash
 import app.morsecode.core.design.component.SectionHeader
-import app.morsecode.core.design.icon.MorseIcons
 import app.morsecode.core.design.theme.MorseTextStyles
 import app.morsecode.core.design.theme.MorseTheme
 import app.morsecode.core.model.DeviceKind
@@ -37,7 +36,6 @@ import app.morsecode.ui.transfer.ScreenPadding
 import app.morsecode.ui.transfer.TransferPeerCard
 import app.morsecode.ui.transfer.TransferRowView
 import app.morsecode.ui.transfer.TransferScreenHeader
-import app.morsecode.ui.transfer.TransferState
 
 /**
  * The broadcast receiver: the one screen that draws any phone's share of a batch (master
@@ -70,7 +68,6 @@ public fun BroadcastReceiverScreen(
         state = state,
         onBack = onBack,
         onNavigate = onNavigate,
-        onClearCompleted = viewModel::clearCompleted,
         onToggleAll = viewModel::toggleAll,
         onAddFiles = { gate.run(FeatureArea.TRANSFER_ENGINE) { } },
         onBackground = { gate.run(FeatureArea.BACKGROUND_SERVICE) { } },
@@ -92,7 +89,6 @@ internal fun BroadcastReceiverContent(
     state: BroadcastReceiverUiState,
     onBack: () -> Unit,
     onNavigate: (MorseDestination) -> Unit,
-    onClearCompleted: () -> Unit,
     onToggleAll: () -> Unit,
     onAddFiles: () -> Unit,
     onBackground: () -> Unit,
@@ -103,7 +99,6 @@ internal fun BroadcastReceiverContent(
     onOpenFolder: () -> Unit,
 ) {
     val colors = MorseTheme.colors
-    val hasDelivered = state.rows.any { it.item.state == TransferState.DONE }
 
     MorseTabScaffold(selected = MorseDestination.FILES, onNavigate = onNavigate) {
         TransferScreenHeader(
@@ -129,6 +124,10 @@ internal fun BroadcastReceiverContent(
             }
 
             item(key = "section") {
+                // The reference's receiver heading carried one action — Pause — and this app's
+                // one control lives in the bar instead. There is deliberately no clear here:
+                // the reference offers no way to dismiss a receipt from this screen, so the
+                // heading states the section and nothing else.
                 SectionHeader(
                     text = pluralStringResource(
                         R.plurals.broadcast_queue_files,
@@ -136,13 +135,6 @@ internal fun BroadcastReceiverContent(
                         state.rows.size,
                         state.batchBytes,
                     ),
-                    actionIconRes = if (hasDelivered) MorseIcons.trash else null,
-                    actionIconDescription = if (hasDelivered) {
-                        stringResource(R.string.transfer_clear_completed)
-                    } else {
-                        null
-                    },
-                    onActionIcon = if (hasDelivered) onClearCompleted else null,
                     modifier = Modifier.padding(horizontal = ScreenPadding),
                 )
             }

@@ -559,7 +559,12 @@ The differences from the reference, each a decision:
 * **No phone frame says "Pause".** The reference's receiver section heading offers Pause. The master
   prompt allows one Pause all / Resume all, in the bottom action bar only, so that is the only control
   a receiver has: per-file controls on a receiving phone would be a second way to do the bar's job.
-  Completed rows carry no controls at all, and the tests count them.
+  Completed rows carry no controls at all, and the tests count them. Nor does a receiver clear its
+  list: the reference's heading carries Pause and nothing else, so "clear-completed where approved"
+  approves nothing here, and the heading is left stating the section alone. The scoped clear the
+  model offers stays the engine's to wire; what a receiving phone lists is what its session has
+  recorded, so a receipt the user could dismiss would leave — and a pair the engine has not queued
+  has no row to invent.
 * **No average speed where nothing is moving.** Both completion screens in the reference print an
   average rate from its sample data. This app prints one only while something is actually moving:
   `BroadcastMath.combinedThroughput` sums the active deliveries' own speeds, and a finished batch has
