@@ -95,7 +95,7 @@ class BroadcastScreensTest {
         composeTestRule.onNodeWithText("Samsung A14").assertIsDisplayed()
 
         // The laptop is in the discovered list and is not offered: a broadcast goes to phones.
-        composeTestRule.onNodeWithText("Studio Laptop", substring = true).assertDoesNotExist()
+        composeTestRule.onNodeWithText("Office Laptop", substring = true).assertDoesNotExist()
     }
 
     @Test
@@ -106,6 +106,7 @@ class BroadcastScreensTest {
         scrollTo("3 files · 212 MB")
         composeTestRule.onNodeWithText("3 files · 212 MB").assertIsDisplayed()
         composeTestRule.onNodeWithText("None yet").assertIsDisplayed()
+        scrollTo("Pick at least two phones to broadcast — 2 more.")
         composeTestRule.onNodeWithText("Pick at least two phones to broadcast — 2 more.")
             .assertIsDisplayed()
     }
@@ -122,7 +123,7 @@ class BroadcastScreensTest {
         assertFalse(viewModel.state.value.canStart)
         assertEquals(1, viewModel.state.value.selectedCount)
 
-        scrollTo("Connect & broadcast to (1)")
+        scrollTo("Pick at least two phones to broadcast — 1 more.")
         composeTestRule.onNodeWithText("1 phone").assertIsDisplayed()
         composeTestRule.onNodeWithText("Pick at least two phones to broadcast — 1 more.")
             .assertIsDisplayed()
@@ -148,9 +149,10 @@ class BroadcastScreensTest {
         assertTrue(viewModel.state.value.canStart)
         assertEquals(2, viewModel.state.value.selectedCount)
 
-        scrollTo("Connect & broadcast to (2)")
+        scrollTo("Each phone gets its own session.")
         composeTestRule.onNodeWithText("2 phones").assertIsDisplayed()
         composeTestRule.onNodeWithText("Each phone gets its own session.").assertIsDisplayed()
+        scrollTo("Connect & broadcast to (2)")
         composeTestRule.onNodeWithText("Connect & broadcast to (2)").assertIsEnabled()
     }
 
@@ -212,21 +214,40 @@ class BroadcastScreensTest {
         }
 
         scrollTo("holiday_2019.mp4")
-        composeTestRule.onNodeWithText("Ravi's Redmi").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Pixel 7X").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Samsung A14").assertIsDisplayed()
+        composeTestRule.onNodeWithText("holiday_2019.mp4").assertIsDisplayed()
+        // One row per phone, once per file: three of each name in the tree, because the
+        // name repeats under every file — a single-node assertion would be a lie here.
+        composeTestRule.onAllNodesWithText("Ravi's Redmi").assertCountEquals(3)
+        composeTestRule.onAllNodesWithText("Pixel 7X").assertCountEquals(3)
+        composeTestRule.onAllNodesWithText("Samsung A14").assertCountEquals(3)
     }
 
     @Test
     fun `three phones under one file show three different positions`() {
-        showSender()
+        val viewModel = senderViewModel()
+        showSender(viewModel)
 
         // The audio file is the one the phones disagree about: part-way to Ravi, delivered to
-        // the Pixel, failed part-way to Samsung. Nothing here is a batch-wide percentage.
-        listOf("33%", "100%", "19%").forEach { percent ->
-            scrollTo(percent)
-            composeTestRule.onNodeWithText(percent).assertIsDisplayed()
-        }
+        // the Pixel, failed part-way to Samsung. Nothing here is a batch-wide percentage —
+        // the three numbers are the three rows' own, asserted where they live.
+        val live = viewModel.state.value.files.first { it.file.id == BroadcastFixtures.live.id }
+        assertEquals(
+            "each phone is at its own position on the same file",
+            listOf("33%", "100%", "19%"),
+            live.recipients.map { it.percent },
+        )
+
+        // And the screen draws them: the two unique positions by name, the shared "100%"
+        // as whatever one node answers to — it repeats in every finished file block, so
+        // a single-node lookup would be measuring the test, not the screen.
+        scrollTo("33%")
+        composeTestRule.onNodeWithText("33%").assertIsDisplayed()
+        scrollTo("19%")
+        composeTestRule.onNodeWithText("19%").assertIsDisplayed()
+        assertTrue(
+            "a delivered row draws its full bar",
+            composeTestRule.onAllNodesWithText("100%").fetchSemanticsNodes().isNotEmpty(),
+        )
     }
 
     @Test
@@ -246,9 +267,13 @@ class BroadcastScreensTest {
         composeTestRule.onNodeWithText("Broadcasting to 3 phones").assertIsDisplayed()
         composeTestRule.onNodeWithText("1 sending · 1 paused · 1 failed").assertIsDisplayed()
         composeTestRule.onNodeWithText("combined throughput 4.8 MB/s").assertIsDisplayed()
-        composeTestRule.onNodeWithText("phones").assertIsDisplayed()
-        composeTestRule.onNodeWithText("files each").assertIsDisplayed()
-        composeTestRule.onNodeWithText("to send MB").assertIsDisplayed()
+
+        // The tiles sit under the counts in the same card; walking to the last of them brings
+        // the row into the viewport. StatTile draws its label upper-cased, so that is the text.
+        scrollTo("636 MB")
+        composeTestRule.onNodeWithText("PHONES").assertIsDisplayed()
+        composeTestRule.onNodeWithText("FILES EACH").assertIsDisplayed()
+        composeTestRule.onNodeWithText("TO SEND MB").assertIsDisplayed()
         composeTestRule.onNodeWithText("636 MB").assertIsDisplayed()
     }
 
@@ -291,7 +316,10 @@ class BroadcastScreensTest {
         // exactly as they were, and the failed phone no longer showing its last position.
         scrollTo("33%")
         composeTestRule.onNodeWithText("33%").assertIsDisplayed()
-        composeTestRule.onNodeWithText("100%").assertIsDisplayed()
+        assertTrue(
+            "the phone that never stopped still shows a full bar",
+            composeTestRule.onAllNodesWithText("100%").fetchSemanticsNodes().isNotEmpty(),
+        )
         composeTestRule.onNodeWithText("19%").assertDoesNotExist()
     }
 
@@ -419,9 +447,9 @@ class BroadcastScreensTest {
     fun `the receiver counts its own deliveries, not the batch's`() {
         showReceiver("s")
 
+        composeTestRule.onNodeWithText("Receiving from MYA-L10").assertIsDisplayed()
         scrollTo("1 paused · 1 failed")
         composeTestRule.onNodeWithText("1 paused · 1 failed").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Receiving from MYA-L10").assertIsDisplayed()
     }
 
     @Test
@@ -478,10 +506,12 @@ class BroadcastScreensTest {
 
         scrollTo("Ravi's Redmi")
         composeTestRule.onNodeWithText("Ravi's Redmi").assertIsDisplayed()
-        composeTestRule.onNodeWithText("3 of 3 files · 212 MB · verified").assertIsDisplayed()
+        // Every clean phone prints the same summary line — three of them is the report.
+        composeTestRule.onAllNodesWithText("3 of 3 files · 212 MB · verified").assertCountEquals(3)
 
         scrollTo("9 delivered")
         composeTestRule.onNodeWithText("9 delivered").assertIsDisplayed()
+        scrollTo("636 MB")
         composeTestRule.onNodeWithText("636 MB").assertIsDisplayed()
     }
 
@@ -504,6 +534,7 @@ class BroadcastScreensTest {
 
         scrollTo("Samsung A14")
         composeTestRule.onNodeWithText("Samsung A14").assertIsDisplayed()
+        scrollTo("1 of 3 files · 156 MB · 1 failed · 1 skipped")
         composeTestRule.onNodeWithText("1 of 3 files · 156 MB · 1 failed · 1 skipped")
             .assertIsDisplayed()
         composeTestRule.onAllNodesWithContentDescription("Retry", substring = true)
@@ -536,7 +567,8 @@ class BroadcastScreensTest {
         composeTestRule.onNodeWithText("✓ Batch complete").assertIsDisplayed()
         composeTestRule.onNodeWithText("3 received").assertIsDisplayed()
         composeTestRule.onNodeWithText("Saved to Download/Morsecode").assertIsDisplayed()
-        composeTestRule.onNodeWithText("files").assertIsDisplayed()
+        scrollTo("FILES")
+        composeTestRule.onNodeWithText("FILES").assertIsDisplayed()
     }
 
     @Test

@@ -119,6 +119,7 @@ class BroadcastReachabilityTest {
 
         scrollTo("9 delivered")
         composeTestRule.onNodeWithText("9 delivered").assertIsDisplayed()
+        scrollTo("636 MB")
         composeTestRule.onNodeWithText("636 MB").assertIsDisplayed()
 
         composeTestRule.onNodeWithText("Add files").assertIsDisplayed()

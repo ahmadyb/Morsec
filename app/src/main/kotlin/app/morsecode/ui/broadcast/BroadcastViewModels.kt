@@ -303,12 +303,14 @@ public class BroadcastReceiverViewModel @Inject constructor(
 
     private val endConfirmation = MutableStateFlow(false)
 
+    // Declared before the first publish below reads it: Kotlin initializes properties in
+    // declaration order, and publish() names this phone by [recipient]'s id.
+    private val recipient: Peer =
+        session.value.recipient(recipientId) ?: session.value.uniqueRecipients.first()
+
     private val _state = MutableStateFlow(publish(session.value, endConfirmation.value))
 
     public val state: StateFlow<BroadcastReceiverUiState> = _state.asStateFlow()
-
-    private val recipient: Peer =
-        session.value.recipient(recipientId) ?: session.value.uniqueRecipients.first()
 
     /**
      * Clear what has arrived on this phone.
