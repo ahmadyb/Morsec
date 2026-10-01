@@ -8,9 +8,9 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
-import androidx.compose.ui.test.onNode
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -149,9 +149,15 @@ class AccessibilitySemanticsTest {
 
     // ---------------------------------------------------------------- helpers
 
-    /** The `Selected` semantics a screen reader announces for the node carrying [text]. */
+    /**
+     * The `Selected` semantics a screen reader announces for [text].
+     *
+     * The matcher restricts the query to nodes that carry a selection state, which is how
+     * a screen whose title repeats a bar label would still resolve to the bar's node.
+     */
     private fun selected(text: String): Boolean =
-        composeTestRule.onNodeWithText(text)
+        composeTestRule
+            .onNode(hasText(text) and SemanticsMatcher.keyIsDefined(SemanticsProperties.Selected))
             .fetchSemanticsNode()
             .config[SemanticsProperties.Selected]
 
