@@ -23,9 +23,9 @@ import javax.inject.Singleton
 @Singleton
 internal class MediaStoreReader @Inject constructor(
     @ApplicationContext private val context: Context,
-) {
+) : MediaStoreDataSource {
 
-    public fun images(): List<MediaItem> = read(
+    public override fun images(): List<MediaItem> = read(
         collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
         projection = arrayOf(
             MediaStore.MediaColumns._ID,
@@ -44,7 +44,7 @@ internal class MediaStoreReader @Inject constructor(
         bucket = cursor.stringOf(MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME)
     }
 
-    public fun videos(): List<MediaItem> = read(
+    public override fun videos(): List<MediaItem> = read(
         collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
         projection = arrayOf(
             MediaStore.MediaColumns._ID,
@@ -65,7 +65,7 @@ internal class MediaStoreReader @Inject constructor(
         bucket = cursor.stringOf(MediaStore.Video.VideoColumns.BUCKET_DISPLAY_NAME)
     }
 
-    public fun audio(): List<MediaItem> = read(
+    public override fun audio(): List<MediaItem> = read(
         collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
         projection = arrayOf(
             MediaStore.MediaColumns._ID,
@@ -94,7 +94,7 @@ internal class MediaStoreReader @Inject constructor(
      * shared documents to a media-read permission, and [observeDocuments] serves
      * the user's SAF folders instead.
      */
-    public fun documents(): List<MediaItem> {
+    public override fun documents(): List<MediaItem> {
         if (Build.VERSION.SDK_INT >= 33) return emptyList()
         // RELATIVE_PATH only exists from API 29; older levels expose DATA.
         val usesRelativePath = Build.VERSION.SDK_INT >= 29
@@ -133,7 +133,7 @@ internal class MediaStoreReader @Inject constructor(
     }
 
     /** Resolves one item by its opaque id (`image:123`, `audio:45`, …). */
-    public fun byId(id: String): MediaItem? {
+    public override fun byId(id: String): MediaItem? {
         val prefix = id.substringBefore(':', "")
         val rowId = id.substringAfter(':', "").toLongOrNull() ?: return null
         val collection = when (prefix) {

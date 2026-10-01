@@ -16,36 +16,36 @@ import javax.inject.Singleton
 /**
  * Storage Access Framework access.
  *
- * The user picks a folder once (the Files tab's folder rows and the receive
- * target both come from here), the app takes a persistable permission, and every
- * later read goes through [DocumentFile] — which works identically on API 23 and
- * on API 36, so no version-specific file code is needed for granted folders.
+ * The user picks a folder once (the Files tab's folder rows and media categories,
+ * plus the receive target, come from here), the app takes a persistable permission,
+ * and every later read goes through [DocumentFile] — which works identically on
+ * API 23 and on API 36, so no version-specific file code is needed for granted folders.
  */
 @Singleton
 internal class SafTreeReader @Inject constructor(
     @ApplicationContext private val context: Context,
-) {
+) : SafTreeDataSource {
 
     /** True while the platform still honours this tree grant. */
-    public fun isValid(treeUri: String): Boolean {
+    public override fun isValid(treeUri: String): Boolean {
         val uri = runCatching { treeUri.toUri() }.getOrNull() ?: return false
         val tree = runCatching { DocumentFile.fromTreeUri(context, uri) }.getOrNull() ?: return false
         return tree.exists() && tree.canRead()
     }
 
-    public fun displayName(uri: Uri): String? {
+    public override fun displayName(uri: Uri): String? {
         val tree = runCatching { DocumentFile.fromTreeUri(context, uri) }.getOrNull()
         return tree?.name?.takeIf { it.isNotBlank() } ?: lastSegment(uri)
     }
 
-    public fun children(treeUri: String): List<MediaItem> {
+    public override fun children(treeUri: String): List<MediaItem> {
         val uri = runCatching { treeUri.toUri() }.getOrNull() ?: return emptyList()
         val tree = runCatching { DocumentFile.fromTreeUri(context, uri) }.getOrNull() ?: return emptyList()
         return runCatching { tree.listFiles() }.getOrDefault(emptyArray()).mapNotNull { file -> toItem(file) }
     }
 
     /** The folder row itself, shown above its children and on the Files tab. */
-    public fun folderItem(grant: SafGrant, childCount: Int = 0, sizeBytes: Long = 0L): MediaItem = MediaItem(
+    public override fun folderItem(grant: SafGrant, childCount: Int, sizeBytes: Long): MediaItem = MediaItem(
         id = "saf:${grant.id}",
         displayName = grant.displayName,
         kind = MediaKind.FOLDER,
@@ -58,7 +58,7 @@ internal class SafTreeReader @Inject constructor(
         isFolder = true,
     )
 
-    public fun byUri(documentUri: String): MediaItem? {
+    public override fun byUri(documentUri: String): MediaItem? {
         val uri = runCatching { documentUri.toUri() }.getOrNull() ?: return null
         val file = runCatching { DocumentFile.fromSingleUri(context, uri) }.getOrNull()
             ?: runCatching { DocumentFile.fromTreeUri(context, uri) }.getOrNull()
@@ -82,14 +82,14 @@ internal class SafTreeReader @Inject constructor(
     }
 
     /** Takes a persistable read/write permission; false when the picker denied it. */
-    public fun takePersistablePermission(uri: Uri): Boolean {
+    public override fun takePersistablePermission(uri: Uri): Boolean {
         val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         return runCatching {
             context.contentResolver.takePersistableUriPermission(uri, flags)
         }.isSuccess
     }
 
-    public fun releasePersistablePermission(uri: Uri) {
+    public override fun releasePersistablePermission(uri: Uri) {
         val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         runCatching { context.contentResolver.releasePersistableUriPermission(uri, flags) }
     }

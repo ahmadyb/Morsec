@@ -22,6 +22,7 @@ internal class FakeMediaRepository(
     private val audio: List<MediaItem> = emptyList(),
     private val children: Map<String, List<MediaItem>> = emptyMap(),
     private val folders: Map<String, MediaItem?> = emptyMap(),
+    private val access: StorageAccess = StorageAccess(mediaReadGranted = true),
 ) : MediaRepository {
 
     /**
@@ -36,7 +37,7 @@ internal class FakeMediaRepository(
     /** The uris the app asked the platform to delete, in the order it asked. */
     val deletedUris: MutableList<String> = mutableListOf()
 
-    override fun observeAccess(): Flow<StorageAccess> = flowOf(StorageAccess(mediaReadGranted = true))
+    override fun observeAccess(): Flow<StorageAccess> = flowOf(access)
 
     override fun observeImages(): Flow<List<MediaItem>> = flowOf(images)
 

@@ -22,7 +22,11 @@ public data class StorageAccess(
     /** True when a grant was revoked outside the app since it was recorded. */
     public val revokedGrantUris: List<String> = emptyList(),
 ) {
-    public val canListMedia: Boolean get() = mediaReadGranted
+    /**
+     * True when Photos, Videos or Music can read from MediaStore or at least one
+     * still-valid SAF grant. [mediaReadGranted] separately reports broad access.
+     */
+    public val canListMedia: Boolean get() = mediaReadGranted || grants.isNotEmpty()
 
     /**
      * On API 33+ the platform no longer exposes arbitrary documents through
@@ -74,10 +78,13 @@ public interface MediaRepository {
     /** Current permission and grant state; re-emitted when grants change. */
     public fun observeAccess(): Flow<StorageAccess>
 
+    /** MediaStore images when authorized, plus images inside valid SAF grants. */
     public fun observeImages(): Flow<List<MediaItem>>
 
+    /** MediaStore videos when authorized, plus videos inside valid SAF grants. */
     public fun observeVideos(): Flow<List<MediaItem>>
 
+    /** MediaStore tracks when authorized, plus audio files inside valid SAF grants. */
     public fun observeAudio(): Flow<List<MediaItem>>
 
     /** Launchable user apps, as shareable APK items. */
