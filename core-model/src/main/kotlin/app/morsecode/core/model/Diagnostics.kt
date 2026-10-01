@@ -74,7 +74,7 @@ public data class DiagnosticCheck(
     val detailId: Int,
     val status: CheckStatus,
     /** Optional formatted arguments for the detail string. */
-    val detailArgs: List<String> = emptyList(),
+    val detailArgs: List<Any> = emptyList(),
     /** Present only when the user can fix something from this screen. */
     val actionId: Int? = null,
     val action: DiagnosticAction? = null,

@@ -122,7 +122,7 @@ public class DoctorViewModel @Inject constructor(
             titleId = R.string.doctor_check_multicast,
             detailId = if (ok) R.string.doctor_check_multicast_ok else R.string.doctor_check_multicast_bad,
             status = if (ok) CheckStatus.OK else CheckStatus.ERROR,
-            detailArgs = if (ok) listOf(NetworkPorts.DISCOVERY_BEACON.toString()) else emptyList(),
+            detailArgs = if (ok) listOf(NetworkPorts.DISCOVERY_BEACON) else emptyList(),
         )
     }
 
@@ -133,7 +133,7 @@ public class DoctorViewModel @Inject constructor(
             titleId = R.string.doctor_check_location,
             detailId = if (blocked) R.string.doctor_check_location_bad else R.string.doctor_check_location_ok,
             status = if (blocked) CheckStatus.WARN else CheckStatus.OK,
-            detailArgs = if (blocked) listOf(Build.VERSION.SDK_INT.toString()) else emptyList(),
+            detailArgs = if (blocked) listOf(Build.VERSION.SDK_INT) else emptyList(),
         )
     }
 
@@ -160,7 +160,7 @@ public class DoctorViewModel @Inject constructor(
             titleId = R.string.doctor_check_storage,
             detailId = if (ok) R.string.doctor_check_storage_ok else R.string.doctor_check_storage_bad,
             status = if (ok) CheckStatus.OK else CheckStatus.ERROR,
-            detailArgs = if (ok) listOf(access.grants.size.toString()) else emptyList(),
+            detailArgs = if (ok) listOf(access.grants.size) else emptyList(),
             actionId = if (ok) null else R.string.files_add_folder,
             action = if (ok) null else DiagnosticAction.GRANT_STORAGE_ACCESS,
         )
@@ -171,7 +171,7 @@ public class DoctorViewModel @Inject constructor(
         titleId = R.string.doctor_check_revoked,
         detailId = R.string.doctor_check_revoked_bad,
         status = CheckStatus.WARN,
-        detailArgs = listOf(access.revokedGrantUris.size.toString()),
+        detailArgs = listOf(access.revokedGrantUris.size),
         actionId = R.string.files_add_folder,
         action = DiagnosticAction.GRANT_STORAGE_ACCESS,
     )
@@ -225,12 +225,12 @@ public class DoctorViewModel @Inject constructor(
         status = if (conflict == null) CheckStatus.OK else CheckStatus.ERROR,
         detailArgs = if (conflict == null) {
             listOf(
-                NetworkPorts.WEBSHARE_HTTP.toString(),
-                NetworkPorts.PEER_CONTROL.toString(),
-                NetworkPorts.DISCOVERY_BEACON.toString(),
+                NetworkPorts.WEBSHARE_HTTP,
+                NetworkPorts.PEER_CONTROL,
+                NetworkPorts.DISCOVERY_BEACON,
             )
         } else {
-            listOf(conflict.toString())
+            listOf(conflict)
         },
         actionId = if (conflict == null) null else R.string.doctor_check_ports_bad,
         action = if (conflict == null) null else DiagnosticAction.CHANGE_WEBSHARE_PORT,

@@ -177,7 +177,12 @@ private fun CheckRow(
         trailing = if (check.action != null) {
             {
                 Text(
-                    text = check.actionId?.let { stringResource(it) } ?: stringResource(R.string.action_grant),
+                    // Formatted with the row's own arguments: exactly one action label
+                    // (the port conflict) carries a %1$d, and leaving it raw would print
+                    // the placeholder itself. Strings without specifiers ignore the extra
+                    // arguments, so every other row is unaffected.
+                    text = check.actionId?.let { stringResource(it, *check.detailArgs.toTypedArray()) }
+                        ?: stringResource(R.string.action_grant),
                     style = app.morsecode.core.design.theme.MorseTextStyles.meta,
                     color = colors.accent,
                     modifier = Modifier.padding(start = 8.dp),
