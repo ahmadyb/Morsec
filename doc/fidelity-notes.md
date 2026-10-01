@@ -442,97 +442,6 @@ and nowhere else; the two colours it runs between are tokens.
 ### Duplex transfer screens (§4.8)
 
 The reference writes `SC.sending` and `SC.receiving` as two blocks that call the same helpers —
-`peerCard`, `txRow`, `summaryCard`, `actionBar`, `chipFor`, `rowMeta`. The app does the same thing one
-level up rather than two: `DuplexTransferScreen` is stateless and draws whatever session it is handed, and
-`TransferScreen` composes it from the view model using the layout the route named (`session/sending`,
-`session/receiving`). The two views differ only in `TransferLayout`: which section leads, which words its
-headings use, and which directions own a batch line. A row, a control, a chip and the bar are the same code
-in both, so a fix lands in both, and the stateless half is what lets a test hand it one row in one state —
-the whole per-file matrix — without a fixture or a scrolling list in the way.
-
-The differences from the reference, each a decision:
-
-* **Cancel and failure are two different things, and the reference conflates them.** Its cancel and End
-  paths set a row's status to `failed`, so a file the user stopped reads FAILED and offers Retry. The master
-  prompt treats them separately, and the matrix's rule for a stopped row is that it offers nothing
-  inappropriate. `CANCELLED` therefore sits beside `FAILED`: no controls, a neutral chip rather than the
-  failed chip's red, and `TransferRules.end` maps unfinished rows to it while leaving a row that failed
-  earlier still failed — the user ended a session; they did not retry a broken file.
-* **Three states the reference only gestures at.** It prints "Verify" on a row and counts "skipped" in its
-  summary text, but has no state behind either. §4.8's matrix names VERIFYING, CANCELLED and SKIPPED, so
-  each has its own facts: a verifying row states the bytes reached (the file is all there, the check is
-  not), a skipped one states the total (the file was never wanted), a cancelled one states where it was
-  abandoned. Verification is not cancellable in this model, so a verifying row offers no control rather
-  than a wrong one, and a test pins that.
-* **A delivered file's line reports what the checksum said rather than asserting it.** Done plus VERIFIED
-  reads "CRC verified"; a done row whose check did not match reads "checksum differs" — that the file
-  arrived is one fact and what the checksum made of it is another, and both matter to someone deciding
-  whether to open it. Retrying a failed file clears the outcome, so a second attempt never inherits the
-  first one's verdict.
-* **No Queue sheet.** `SC.queue` sits in the reference with its "Send now" ordering and its own screen, and
-  nothing in the accepted behaviour opens it: the master prompt keeps queue management inside these two
-  views. There is no queue route and no queue control, and two tests say so — one beside the routes, one on
-  the screen — because the cheapest way to keep a dormant screen dormant is to make its absence fail a test
-  when someone wires it back.
-* **Background, not Minimise.** The reference's floating-window wording ("Minimised") describes a behaviour
-  this app does not have. The bar's third action is Background, and pressing it opens the
-  `BACKGROUND_SERVICE` gate naming milestone 8: keeping a session alive is a foreground service's job and
-  this build has none, so the control says what is missing instead of shrinking a window that does not
-  exist. Add files opens the same kind of gate for `TRANSFER_ENGINE`, and the tests press both and assert
-  the dialog rather than a counter — a fixture row must never look like a transfer that started.
-* **Pause all is one control, over the whole session, and it is not in a heading.** The reference's bar
-  pauses the list it belongs to. The master prompt asks for a single Pause all / Resume all whose effect is
-  "change only eligible active rows of the displayed session", so the bar's cell drives
-  `TransferRules.pauseAll`/`resumeAll` across both directions, skips rows the engine says cannot be held,
-  and never touches queued, held, finished, failed or verifying rows. The cell reads Resume all exactly when
-  something is held and nothing needs pausing, keeps its place when disabled, and the label is the only
-  thing about it that changes. Two tests count the label: one above, one below.
-* **Clear completed is a heading action, and it is section-scoped.** Each section may carry one clear icon
-  aligned with its own heading; it removes that section's delivered rows and leaves the other direction
-  alone, asserted both ways round — clearing the outbound section keeps the inbound delivered file and the
-  reverse. When there was nothing to clear the action says so, because a control that silently does nothing
-  reads as broken.
-* **The average speed is the average of what is moving, or it is absent.** The reference's summary prints
-  its sample figure even when nothing in the sample is moving. `TransferSummary.hasAverageSpeed` is false
-  then and the card prints its counts alone; when rows are moving, the mean is over the moving rows, so a
-  held file does not drag the figure down. Nothing on either screen counts up: the fixtures are
-  deterministic, and a test idles the looper and reads the same bytes, speeds and labels twice — which is
-  the only form of "no simulated engine" a test can actually check.
-* **A byte label rounds where the reference keeps a decimal.** `MorseFormatters.bytes` prints one
-  decimal below ten megabytes and whole megabytes above it, a rule the viewer, the music player and
-  history already share, so a row the reference draws as "48.9 MB / 144 MB" reads "49 MB / 144 MB"
-  here and a held row's "39.7 MB" reads "40 MB". Changing the rule for one screen would make the
-  same file's size read two ways in one app, so the screens keep the shared rule and this note
-  records the difference. Speeds are always one decimal ("6.2 MB/s"), as the reference prints them.
-* **Ending a session stops a file that is being verified, which is a decision rather than a
-  technicality.** `TransferRules.end` cancels everything still unfinished — moving, queued, held or
-  checksumming — because the dialog promises the user that unfinished files will be cancelled, and a
-  verification that outlived the session it belonged to would make that sentence untrue. Per-row
-  eligibility, which the engine owns, deliberately does not apply: once the session is over there is
-  no engine left to ask. A done, skipped or failed row is left exactly as it is.
-* **The direction arrow is dropped before the file's name is.** The reference puts a direction arrow before
-  the kind icon at every width. Below the row's width need the arrow goes, because which way a file is going
-  is the section's job and the screen has exactly two sections; the kind icon, the name, the chip and the
-  controls all stay, asserted at 360 dp. The row's need is ScreenPadding × 2 + directionGlyph 30 +
-  fileIcon 34 + four 12 dp gaps + a 96 dp floor for the name + a 72 dp floor for the chip + one or two
-  48 dp controls, depending on how many the row's state offers; that sum is what the 30 dp token added
-  for the glyph is measured against.
-* **Rows are named for anything that reads them.** Every per-file control carries a content description
-  naming its file ("Pause holiday_2019.mp4"), the progress bar exposes a range and a "49 MB of 144 MB,
-  34%" description, and the bottom bar's cells are named by their own words. The one thing deliberately
-  silent is the file-kind glyph: `FileKindIcon` draws with no description because the file's name is
-  announced immediately beside it, and a row that says "Video, holiday_2019.mp4" says the same thing twice.
-  That left the glyph invisible to a test, so the row tags it (`transfer-kind-<kind>`); there is no
-  user-facing text for a file kind anywhere in the app, and inventing seven labels to make one assertion
-  possible would be inventing copy.
-* **Dark and light are smoke-tested, not screenshot-compared.** The repository has no screenshot
-  infrastructure — no Paparazzi, no Roborazzi, no golden images — so theme fidelity is asserted the only way
-  it can be here: both themes render the same rows, chips, controls and bar, from the same `MorseTheme`
-  tokens every other screen uses. This is a gap, recorded as one rather than implied to be covered.
-
-### Duplex transfer screens (§4.8)
-
-The reference writes `SC.sending` and `SC.receiving` as two blocks that call the same helpers —
 `peerCard`, `txRow`, `summaryCard`, `actionBar`, `chipFor`, `rowMeta`. The app does the same thing
 one level up rather than two: `DuplexTransferScreen` is stateless and draws whichever session it is
 handed, and `TransferScreen` composes it from the view model using the layout the route named
@@ -552,6 +461,12 @@ The differences from the reference, each a decision:
   beside `FAILED`: no controls, a neutral chip rather than the failed chip's red, and
   `TransferRules.end` maps unfinished rows to it while leaving a row that failed earlier still
   failed — the user ended a session; they did not retry a broken file.
+* **Ending a session stops a file that is being verified, which is a decision rather than a
+  technicality.** `TransferRules.end` cancels everything still unfinished — moving, queued, held or
+  checksumming — because the dialog promises the user that unfinished files will be cancelled, and a
+  verification that outlived the session it belonged to would make that sentence untrue. Per-row
+  eligibility, which the engine owns, deliberately does not apply: once the session is over there is
+  no engine left to ask. A done, skipped or failed row is left exactly as it is.
 * **Three states the reference only gestures at.** It prints "Verify" on a row and counts "skipped"
   in its summary text without having a state behind either, and §4.8's matrix names VERIFYING,
   CANCELLED and SKIPPED. Each has its own facts: a verifying row tells the bytes reached (the file
@@ -620,3 +535,56 @@ The differences from the reference, each a decision:
   only way it can be here: both themes render the same rows, chips, controls and bar, from the same
   `MorseTheme` tokens every other screen uses. This is a gap, recorded as one rather than implied to
   be covered.
+
+### Broadcast screens (§4.9)
+
+The reference draws the broadcast flow as five states across four screens, and paints the receiving
+state three times — once inside each phone frame — because a mockup page cannot navigate. The app has
+one receiving screen and a route argument: `broadcast/receiver/{recipient}` names the phone, the
+screen asks the session for that phone's slice, and everything on it — the chip under each file, the
+bar, the counts in the wash — is read from that slice. That is why one phone's failure cannot show up
+on another phone's screen, and why the fixture can put three phones in three different positions
+without a single batch-wide percentage existing anywhere in the model.
+
+The differences from the reference, each a decision:
+
+* **One receiver, not three frames.** The reference's three frames become one route plus fixtures
+  (`BroadcastFixtures.session()`), and the multi-recipient preview the master prompt asks for lives in
+  the fixtures and in the screen tests: the same screen is asserted twice, pointed at two different
+  phones, showing two different sets of positions.
+* **The header carries back and a title, and nothing else.** The reference's sender and receiver
+  headers also draw an overflow button. The approved header shape for this app is back plus title
+  (the video player's correction), so the overflow is absent rather than decorative; the one action
+  the receiving screen needs when the batch is over — its own completion — is a button in the wash.
+* **No phone frame says "Pause".** The reference's receiver section heading offers Pause. The master
+  prompt allows one Pause all / Resume all, in the bottom action bar only, so that is the only control
+  a receiver has: per-file controls on a receiving phone would be a second way to do the bar's job.
+  Completed rows carry no controls at all, and the tests count them.
+* **No average speed where nothing is moving.** Both completion screens in the reference print an
+  average rate from its sample data. This app prints one only while something is actually moving:
+  `BroadcastMath.combinedThroughput` sums the active deliveries' own speeds, and a finished batch has
+  none, so the completion screens report bytes and counts and state no speed rather than quoting a
+  number nothing produced. (The reference's own "avg 14.2 MB/s" is not reproducible from its sample
+  either.)
+* **The file's line says how many phones have it.** The reference prints size and state
+  ("144 MB · sending"). The state is already the chip at the end of the row, and the delivery count is
+  nowhere else, so the line reads "144 MB · 2 of 3 phones" — the number a reviewer needs to see that
+  the three nested rows under it are not all in the same place.
+* **"All phones verified" is earned.** The reference prints it over its clean sample. The sender's
+  completion prints it only when every expected delivery is DONE *and* its checksum agreed, and prints
+  "7 of 9 deliveries verified" plus the failed and skipped counts otherwise — with a test for each
+  shape, including the ×N chip that only a fully-verified batch may show.
+* **The folder action explains itself.** "Open folder" on a receiving phone's completion runs through
+  the `TRANSFER_ENGINE` gate this build cannot satisfy yet, so it names the milestone instead of
+  appearing to open a folder no transfer has written to. The receiving phone's wash names the sender
+  (the reference's own wash interpolates the wrong device there) and its destination line reads the
+  app's Download/Morsecode path.
+* **The picker's own rules are the model's.** Only phones and tablets are offered, drawn from
+  `Peer.isBroadcastEligible`; the reference's discovered list includes a laptop, and the app's picker
+  shows that it cannot be chosen rather than hiding the fact. Two phones is the floor, explained on
+  screen when it is not met ("Pick at least two phones to broadcast — 1 more."), and the start button
+  is disabled rather than silently failing.
+* **Nothing ticks.** The reference animates its bars through a script. The broadcast fixtures are
+  fixed values: no timer, no delay-driven progress, no random speed, no socket, no discovery loop. The
+  screens' tests let the looper run dry twice and read the same percentages, and the fan-out itself
+  stays milestone 9's work.

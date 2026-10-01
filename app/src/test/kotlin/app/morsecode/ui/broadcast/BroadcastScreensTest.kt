@@ -450,12 +450,14 @@ class BroadcastScreensTest {
         composeTestRule.onNodeWithText("✓ Batch complete").assertIsDisplayed()
         composeTestRule.onNodeWithText("Saved to Download/Morsecode").assertIsDisplayed()
 
+        scrollTo("See completion")
         composeTestRule.onNodeWithText("See completion").performClick()
         settle()
         assertEquals(listOf("p"), completionsOpened)
 
         // Opening the destination is milestone 5's work, so it explains itself instead of
         // pretending to open a folder that no transfer has written to yet.
+        scrollTo("Open folder")
         composeTestRule.onNodeWithText("Open folder").performClick()
         settle()
         composeTestRule.onNodeWithText(string(R.string.gated_title)).assertIsDisplayed()
@@ -513,6 +515,7 @@ class BroadcastScreensTest {
         val viewModel = BroadcastSentViewModel(formatters)
         showSent(viewModel)
 
+        scrollTo("Clear")
         composeTestRule.onNodeWithText("Clear").performClick()
         settle()
 
