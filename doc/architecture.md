@@ -205,6 +205,33 @@ how to perform. The twenty-eight invariants it enforces are listed in
 [`transfer-protocol.md`](transfer-protocol.md#4-the-twenty-eight-invariants) and asserted
 one by one in `TransferReducerInvariantTest`.
 
+### Android storage adapters and durable persistence (M3)
+
+The pure core names the adapter work — `RequestSourceStream`,
+`RequestDestinationPartial`, `PersistConfirmedOffset`, `BeginVerification`,
+`CommitVerifiedDestination`, `DeletePartialDestination` — and performs none of it. The
+Android half of that work, and the Room persistence that makes it survive a process
+death, live here:
+
+| Module | Owns |
+| --- | --- |
+| `:core-storage` | Android source adapters (MediaStore, SAF, app-private, legacy), destination/partial strategies, incremental verification, the checkpoint coordinator, the duplicate-policy resolver, the restoration coordinator, the cleanup planner |
+| `:core-data` | the Room entities and migration for recovery state, the `TransferSnapshotStore` adapter, and the injected `Clock` |
+| `:core-transfer` | unchanged, plus one added `RestorationDecision` vocabulary |
+
+The direction is one-way: `core-storage` and `core-data` depend on `core-transfer`;
+`core-transfer` depends on neither and gains no Android, `Uri`, Room or stream type.
+
+Nine decisions govern the parts where a plausible default silently loses data — Room
+schema bootstrap without bot commits, session ownership with **no** foreign key,
+durability as an explicit capability rather than an assumed `fsync`, app-private staging
+as the SAF default, single-owner descriptors, a bounded non-seekable zero-progress
+policy, virtual rather than physical large-file tests, the clock in `:core-data`, and
+migration tests that execute rather than merely compile. They are recorded with their
+reasoning in
+[`decisions/ADR-0003-transfer-storage-and-durable-persistence.md`](decisions/ADR-0003-transfer-storage-and-durable-persistence.md);
+this section is the map, not the argument.
+
 ## Dependency injection
 
 Hilt, with `MorseApplication` as the `@HiltAndroidApp` root and nine `@HiltViewModel`s.
@@ -215,8 +242,10 @@ Graph shape:
 - `:core-data/di/DataModule` — database, DAOs, DataStore, logger, crash recorder.
 - `:core-data/di/RepositoryModule` — `@Binds` from each implementation to its repository
   interface.
-- `:core-storage/di/StorageModule` — SAF and MediaStore data-source adapters, app reader
-  and `MediaRepository`.
+- `:core-storage/di/StorageModule` — SAF and MediaStore data-source adapters, app reader,
+  `MediaRepository`, the transfer source and destination adapters and the injected `Clock`.
+- `:core-data/di/DataModule` additionally provides the `Clock` implementation
+  (`app.morsecode.core.data.time`), which is the narrowest shared boundary that needs one.
 - Dispatchers are qualified (`IoDispatcher`, `DefaultDispatcher`, …) and provided once.
 
 The graph is complete: every `@Inject` constructor's dependencies are satisfiable, which
