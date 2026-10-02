@@ -51,6 +51,54 @@ public class OwnedFileDescriptor internal constructor(
 }
 
 /**
+ * Owns an arbitrary closeable and anything derived from it, and closes each
+ * exactly once.
+ *
+ * The generic form of [OwnedSourceResource] for resources that are not
+ * descriptors — a `RandomAccessFile`, for instance. App-private partials use a
+ * `RandomAccessFile` rather than a `FileOutputStream` precisely because a channel
+ * taken from a `FileOutputStream` is write-only, so verification could not read
+ * the file back through it, and rather than `FileChannel.open` because that needs
+ * `java.nio.file` and therefore API 26, while this module supports API 23.
+ */
+public class OwnedResource internal constructor(
+    primary: Closeable,
+) : Closeable {
+
+    private var primary: Closeable? = primary
+    private val derived = mutableListOf<Closeable>()
+
+    /** How many times this object has actually closed the primary resource. */
+    public var closeCount: Int = 0
+        private set
+
+    /** How many derived resources this object has closed. */
+    public var derivedCloseCount: Int = 0
+        private set
+
+    /**
+     * Registers a resource derived from the primary one so that [close] closes it
+     * too. The caller must not close it as well.
+     */
+    internal fun <T : Closeable> adopt(value: T): T {
+        derived += value
+        return value
+    }
+
+    override fun close() {
+        derived.asReversed().forEach { closeable ->
+            derivedCloseCount++
+            runCatching { closeable.close() }
+        }
+        derived.clear()
+        val current = primary ?: return
+        primary = null
+        closeCount++
+        runCatching { current.close() }
+    }
+}
+
+/**
  * Owns a descriptor and a stream derived from it, and closes both exactly once,
  * stream first then descriptor.
  *
