@@ -155,6 +155,77 @@ jobs:
           mkdir -p ci-logs
           ./gradlew --no-daemon --stacktrace --continue test 2>&1 | tee ci-logs/20-unit-tests.log
 
+      # KSP writes the Room schema while :core-data compiles, which the unit-test
+      # task above has just done. The export is published twice on purpose:
+      #
+      #  * as an artifact, for humans and for environments that can reach the
+      #    blob hosts; and
+      #  * as check-run annotations, base64+zlib compressed, because the
+      #    artifact hosts are unreachable from some sandboxes while the
+      #    annotations API is reachable from all of them.
+      #
+      # Nothing here commits back to the branch. CI stays read-only with respect
+      # to repository source: the schema is committed by a human step after it
+      # has been retrieved and inspected. See
+      # doc/decisions/ADR-0003-transfer-storage-and-durable-persistence.md §1.
+      - name: Export and publish the Room schema
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          python3 - <<'PY' 2>&1 | tee ci-logs/25-room-schema.log
+          import base64
+          import glob
+          import json
+          import os
+          import zlib
+
+          CHUNK = 12000
+          MAX_CHUNKS = 8
+
+          files = sorted(glob.glob("core-data/schemas/**/*.json", recursive=True))
+          if not files:
+              print("::error title=room schema::no schema JSON was produced under core-data/schemas")
+              raise SystemExit(1)
+
+          def command(level, title, message):
+              text = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              title = title.replace("%", "%25").replace("\r", " ").replace("\n", " ")
+              return f"::{level} title={title}::{text}"
+
+          for path in files:
+              raw = open(path, "rb").read()
+              parsed = json.loads(raw)
+              version = parsed.get("database", {}).get("version", "?")
+              tables = sorted(e.get("tableName", "?") for e in parsed.get("database", {}).get("entities", []))
+              payload = base64.b64encode(zlib.compress(raw, 9)).decode("ascii")
+              chunks = [payload[i:i + CHUNK] for i in range(0, len(payload), CHUNK)]
+              if len(chunks) > MAX_CHUNKS:
+                  print(f"::error title=room schema::{path} needs {len(chunks)} chunks, limit is {MAX_CHUNKS}")
+                  raise SystemExit(1)
+              for index, chunk in enumerate(chunks, start=1):
+                  print(command(
+                      "notice",
+                      f"room-schema {path} part {index}/{len(chunks)}",
+                      chunk,
+                  ))
+              print(
+                  f"published {path}: {len(raw)} bytes, version {version}, "
+                  f"{len(tables)} tables, {len(payload)} base64 chars in {len(chunks)} chunk(s)"
+              )
+              print(command("notice", f"room-schema {path} summary",
+                            f"version={version} tables={','.join(tables)} bytes={len(raw)}"))
+          PY
+
+      - name: Upload the Room schema export
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-schema-export
+          path: core-data/schemas/**
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Android lint
         if: ${{ !cancelled() }}
         run: |
