@@ -58,6 +58,11 @@ dependencies {
     api(project(":core-model"))
     // SAF grants and their persisted state live in core-data.
     api(project(":core-data"))
+    // The transfer core is pure JVM and defines the vocabulary the storage
+    // adapters are the Android half of: TransferId, RelativeTransferPath,
+    // ConfirmedOffset, Sha256Digest. The direction is one-way — core-transfer
+    // gains no Android type and no dependency on this module.
+    api(project(":core-transfer"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.documentfile)
