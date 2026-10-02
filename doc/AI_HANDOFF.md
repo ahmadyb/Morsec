@@ -50,8 +50,9 @@ shipped green at `0404eb7` (run 36970741133) and was then held to eight findings
 raised against it. Every finding is resolved; nothing outside the eight was
 touched, and no Android, LAN, Nearby, service, Media3 or WebShare work was begun.
 
-**Head:** `f4b8cfd` (this section's commit lands on top of it). **Green run:**
-<https://github.com/ahmadyb/Morsec/actions/runs/36999633087>
+**Content-final source SHA:** `f4b8cfd`. **Green run:**
+<https://github.com/ahmadyb/Morsec/actions/runs/36999633087>. The commit that
+adds this section changes documentation only and touches no source.
 
 | Check | Baseline (`0404eb7`, run 36970741133) | This pass (`f4b8cfd`, run 36999633087) |
 | --- | --- | --- |
