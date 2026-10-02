@@ -168,7 +168,38 @@ jobs:
       # to repository source: the schema is committed by a human step after it
       # has been retrieved and inspected. See
       # doc/decisions/ADR-0003-transfer-storage-and-durable-persistence.md §1.
-      - name: Export and publish the Room schema
+      # KSP writes the Room schema as a *side effect* of the Room processor; it is
+      # not a declared output of `:core-data:kspDebugKotlin`. That distinction is
+      # the whole reason this step exists: when that task is restored FROM-CACHE
+      # the sources compile correctly and no JSON is written at all, so an export
+      # taken straight after an ordinary build is cache-dependent rather than
+      # deterministic. Re-running just that one task, with the build cache off,
+      # is what makes the export reproducible.
+      - name: Generate the Room schema export
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          {
+            ./gradlew --no-daemon --stacktrace --no-build-cache \
+              :core-data:kspDebugKotlin --rerun 2>&1 | tail -25
+            echo "== core-data/schemas =="
+            if [ -d core-data/schemas ]; then
+              find core-data/schemas -type f | sort
+            else
+              echo "(core-data/schemas does not exist)"
+            fi
+          } 2>&1 | tee ci-logs/25-room-schema-build.log
+
+      # The export is published twice on purpose: as an artifact, for humans and
+      # for environments that can reach the blob hosts; and as check-run
+      # annotations, base64+zlib compressed, because those hosts are unreachable
+      # from some sandboxes while the annotations API is reachable from all of
+      # them. Nothing here commits back to the branch: CI stays read-only with
+      # respect to repository source, and the schema is committed by a human step
+      # after it has been retrieved and inspected. See
+      # doc/decisions/ADR-0003-transfer-storage-and-durable-persistence.md §1.
+      - name: Publish the Room schema export
         if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
