@@ -297,6 +297,7 @@ jobs:
 
           lines = ["## Test results", ""]
           total = failed = skipped = 0
+          by_module = {}
           files = sorted(glob.glob("**/build/test-results/**/TEST-*.xml", recursive=True))
           for path in files:
               module = path.split("/build/")[0]
@@ -311,6 +312,8 @@ jobs:
                   f = int(suite.get("failures", 0)) + int(suite.get("errors", 0))
                   s = int(suite.get("skipped", 0))
                   total += t; failed += f; skipped += s
+                  entry = by_module.setdefault(module, [0, 0, 0, 0])
+                  entry[0] += t; entry[1] += f; entry[2] += s; entry[3] += 1
                   lines.append(f"- `{module}` — {suite.get('name', '?')}: {t} tests, {f} failed, {s} skipped")
           failing = []
           for path in files:
@@ -370,6 +373,14 @@ jobs:
               print(f"::notice title={title}::{text}")
 
           notice("unit tests", f"{total} tests, {failed} failed, {skipped} skipped in {len(files)} report(s)")
+          # Per-module counts are what make a per-group test claim checkable
+          # rather than merely assertable: without this line a rising total
+          # cannot be attributed to the module that was actually worked on.
+          per_module = "; ".join(
+              f"{m} {v[0]}/{v[1]}f/{v[2]}s in {v[3]}"
+              for m, v in sorted(by_module.items())
+          )
+          notice("unit tests by module", per_module or "none")
           notice("lint", f"{lint_errors} errors, {lint_warnings} warnings in {len(reports)} report(s)")
           notice("apk", "; ".join(f"{a} = {os.path.getsize(a) / 1048576:.2f} MiB" for a in apks) or "no APK produced")
 
