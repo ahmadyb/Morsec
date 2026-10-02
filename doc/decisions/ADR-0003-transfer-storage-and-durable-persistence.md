@@ -111,6 +111,30 @@ session cleanup cannot silently delete a retryable partial (it is refused, and t
 refusal names the blocking transfer); cleanup is idempotent; a failed cleanup stays
 visible.
 
+### A fact the version-1 export established
+
+The real exported `1.json` shows that **the existing `transfer_items` table already
+carries `onDelete = CASCADE` on `session_id → transfer_sessions.sessionId`.** This is
+pre-existing behaviour and is *not* being changed by this group: pruning a session
+legitimately removes that session's UI rows, and history is expected to disappear when
+its session does.
+
+It matters here for three reasons:
+
+1. **The new tables must not inherit it.** `transfer_snapshots` and `transfer_partials`
+   stay foreign-key-free precisely so that they are not dragged along by that cascade.
+   The cascade is tolerable for rows whose only purpose is display; it is not tolerable
+   for rows that name a partial file on disk.
+2. **The guard has to reason about the rows the cascade *does* reach.** Deleting a
+   session already removes `transfer_items`, so `SessionRetentionGuard` cannot look at
+   `transfer_items` for evidence that recovery data exists — those rows may be gone
+   while the partial is still on disk. The guard consults the recovery tables and
+   storage only.
+3. **It is a concrete, in-repo example of the failure mode.** A future change that adds
+   a recovery column to `transfer_items`, or a recovery row with a `session_id` foreign
+   key, would silently reintroduce cascade deletion of partials. The migration test
+   asserts the new tables have **no** foreign keys, so that mistake fails loudly.
+
 ---
 
 ## Decision 3 — Durability is a capability, not an assumption
