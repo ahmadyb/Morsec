@@ -36,7 +36,7 @@ Companion documents:
 
 `core-transfer` now holds the pure transfer engine — framing, checksums, resume, the
 queue scheduler and the persistence contracts — delivered by Milestone 3 and covered by
-395 JVM tests. See [`transfer-protocol.md`](transfer-protocol.md). The engine is **not yet
+435 JVM tests. See [`transfer-protocol.md`](transfer-protocol.md). The engine is **not yet
 wired to a transport**: `FeatureReadiness.TRANSFER_ENGINE` stays pinned to milestone 5, and
 turning it on for users is milestone 5 work, not this milestone's.
 

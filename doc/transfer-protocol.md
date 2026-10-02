@@ -6,7 +6,7 @@ Milestone 3.
 Everything described here lives in `:core-transfer`, which is a **Kotlin/JVM**
 module: no Android class, no Room, no Hilt, no coroutine, no socket, no clock and
 no `Thread.sleep` appears anywhere in its sources. That is not an aesthetic
-choice — it is what lets the 395 tests that cover this document run on the JVM in
+choice — it is what lets the 435 tests that cover this document run on the JVM in
 milliseconds, and what lets the same engine be driven by a LAN socket, by Nearby
 Connections or by a test harness without changing a line of it. Its only declared
 dependencies are `:core-model` and JUnit.

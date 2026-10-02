@@ -4,7 +4,6 @@ import app.morsecode.core.model.TransferState
 import app.morsecode.core.transfer.error.ErrorCategory
 import app.morsecode.core.transfer.error.ErrorOrigin
 import app.morsecode.core.transfer.error.TransferError
-import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.model.VerificationOutcome
 
 /*
@@ -166,25 +165,25 @@ public sealed class Rejection {
         override val error: TransferError = protocolError()
     }
 
-    /** An Enqueue named a transfer the queue already holds. */
-    public data class DuplicateDescriptor(
-        public val fileId: String,
-        public val transferId: TransferId,
-    ) : Rejection() {
-        override val code: String = "duplicate_descriptor"
-        override val message: String = "file $fileId is already queued as ${transferId.value}"
-    }
-
-    /** The peer's protocol version is outside the supported window. */
-    public data class UnsupportedProtocol(
-        public val version: Int,
-        public val min: Int,
-        public val max: Int,
-    ) : Rejection() {
-        override val code: String = "unsupported_protocol"
-        override val message: String = "protocol version $version is outside $min..$max"
-        override val error: TransferError = protocolError()
-    }
+    /**
+     * Two refusals are deliberately absent from this vocabulary, because
+     * neither can reach the reducer:
+     *
+     * - **A duplicate delivery.** The reducer never sees the queue, so it
+     *   cannot know a file is already enqueued; that is
+     *   `TransferScheduler`'s `BlockReason.DUPLICATE_TRANSFER_ID` (a corrupt
+     *   queue) and `BroadcastAggregator`'s per-recipient distinctness.
+     * - **An unsupported protocol version.** `ProtocolVersion` refuses to
+     *   exist outside `PROTOCOL_VERSION_MIN..PROTOCOL_VERSION_MAX`, so a
+     *   `TransferFileDescriptor` cannot carry one; the refusal lives where an
+     *   untrusted `Int` first arrives, which is `FrameCodec` and
+     *   `TransferSnapshotCodec`, both of which emit
+     *   `TransferError.ProtocolVersionMismatch`.
+     *
+     * Keeping either here would mean carrying a variant no input can produce,
+     * which is worse than not having it: it reads as coverage that exists and
+     * does not.
+     */
 
     /** Resume negotiation produced a decision this snapshot cannot apply. */
     public data class InvalidResumeProposal(
@@ -259,7 +258,14 @@ public sealed class Rejection {
     }
 
     public companion object {
-        /** Every rejection code this build can produce, for tests and docs. */
+        /**
+         * Every rejection code the reducer can produce, for tests and docs.
+         *
+         * This list is closed and every member is reachable:
+         * `RejectionCoverageTest` asserts the exact code for each one through a
+         * real reducer call, and fails if the two lists ever disagree — so a new
+         * variant cannot be added without a test that proves it can happen.
+         */
         public val allCodes: List<String> = listOf(
             "illegal_state_transition",
             "wrong_session",
@@ -271,8 +277,6 @@ public sealed class Rejection {
             "unexpected_offset",
             "overlapping_chunk",
             "invalid_chunk_length",
-            "duplicate_descriptor",
-            "unsupported_protocol",
             "invalid_resume_proposal",
             "verification_too_early",
             "verification_conflict",

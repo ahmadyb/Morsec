@@ -166,6 +166,17 @@ public object TransferSnapshotCodec {
                 )
             }
 
+            // A row written by a build that spoke a newer protocol is not a
+            // corrupt row: it is a version this build cannot decode, and it gets
+            // the same typed refusal the wire gives it rather than being folded
+            // into "malformed" by the IllegalArgumentException catch below.
+            val protocolVersion = ProtocolVersion.orNull(requireInt(fields, KEY_PROTOCOL_VERSION))
+                ?: return SnapshotDecodeResult.Invalid(
+                    TransferError.ProtocolVersionMismatch(
+                        expected = ProtocolLimits.PROTOCOL_VERSION_MAX,
+                        actual = requireInt(fields, KEY_PROTOCOL_VERSION),
+                    ),
+                )
             val descriptor = TransferFileDescriptor(
                 fileId = FileId(require(fields, KEY_FILE_ID)),
                 displayName = require(fields, KEY_DISPLAY_NAME),
@@ -176,7 +187,7 @@ public object TransferSnapshotCodec {
                 isFolderArchive = (fields[KEY_KIND] ?: "file") == "folder",
                 expectedSha256 = requireDigestOrNull(fields, KEY_SHA256),
                 chunkSize = ChunkSize(requireInt(fields, KEY_CHUNK_SIZE)),
-                protocolVersion = ProtocolVersion(requireInt(fields, KEY_PROTOCOL_VERSION)),
+                protocolVersion = protocolVersion,
             )
             val state = TransferState.fromId(require(fields, KEY_STATE))
             if (state == TransferState.FAILED_RETRYABLE && fields[KEY_STATE] != state.id) {

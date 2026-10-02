@@ -8,7 +8,6 @@ import app.morsecode.core.transfer.command.TransferTarget
 import app.morsecode.core.transfer.effect.TransferEffect
 import app.morsecode.core.transfer.error.TransferError
 import app.morsecode.core.transfer.event.TransferEvent
-import app.morsecode.core.transfer.identity.ProtocolVersion
 import app.morsecode.core.transfer.identity.SequenceNumber
 import app.morsecode.core.transfer.model.TransferSnapshot
 import app.morsecode.core.transfer.model.VerificationInfo
@@ -55,16 +54,15 @@ public object TransferReducer {
                 Rejection.InvalidCommand("queueOrder must not be negative, was ${command.queueOrder}"),
             )
         }
-        if (!ProtocolVersion.isValid(command.descriptor.protocolVersion.value)) {
-            return TransitionResult.rejected(
-                null,
-                Rejection.UnsupportedProtocol(
-                    command.descriptor.protocolVersion.value,
-                    ProtocolLimits.PROTOCOL_VERSION_MIN,
-                    ProtocolLimits.PROTOCOL_VERSION_MAX,
-                ),
-            )
-        }
+        /*
+         * There is deliberately no protocol-version check here. `ProtocolVersion`
+         * cannot hold a value outside PROTOCOL_VERSION_MIN..PROTOCOL_VERSION_MAX,
+         * so a descriptor cannot carry one, and a check that cannot fire is not a
+         * check — it is dead code that reads like protection. The refusal lives
+         * where an untrusted `Int` first appears: FrameCodec and
+         * TransferSnapshotCodec both answer with
+         * `TransferError.ProtocolVersionMismatch`.
+         */
         val snapshot = TransferSnapshot(
             transferId = command.transferId,
             sessionId = command.sessionId,
