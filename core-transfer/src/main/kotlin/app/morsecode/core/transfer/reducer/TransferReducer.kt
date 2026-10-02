@@ -532,6 +532,17 @@ public object TransferReducer {
                     )
                 }
                 val expected = snapshot.descriptor.expectedSha256
+                // "The peer already has this file verified" is only meaningful
+                // against a digest we both know. Without one there is nothing to
+                // compare the claim to, so the honest answer is to send it.
+                if (expected == null) {
+                    return TransitionResult.rejected(
+                        snapshot,
+                        Rejection.InvalidResumeProposal(
+                            "a file with no expected digest cannot be treated as already verified",
+                        ),
+                    )
+                }
                 commit(
                     snapshot,
                     TransferState.COMPLETED,
@@ -722,7 +733,13 @@ public object TransferReducer {
                 Rejection.IllegalStateTransition(snapshot.state, null, event.eventName),
             )
         }
-        val range = checkChunkRange(snapshot, event.offset, event.length, event.sequence)
+        // A chunk may not start past the write frontier: bytes 4096..8192 cannot
+        // be written before bytes 0..4096 are, so a gap would make optimisticBytes
+        // describe bytes that were never sent.
+        val range = checkChunkRange(
+            snapshot, event.offset, event.length, event.sequence,
+            frontier = snapshot.optimisticBytes,
+        )
         if (range != null) return range
 
         val end = event.offset + event.length
@@ -748,7 +765,10 @@ public object TransferReducer {
                 Rejection.IllegalStateTransition(snapshot.state, null, event.eventName),
             )
         }
-        val range = checkChunkRange(snapshot, event.offset, event.length, event.sequence)
+        val range = checkChunkRange(
+            snapshot, event.offset, event.length, event.sequence,
+            frontier = snapshot.confirmedBytes,
+        )
         if (range != null) return range
 
         val end = event.offset + event.length
@@ -819,8 +839,18 @@ public object TransferReducer {
                 Rejection.IllegalStateTransition(snapshot.state, null, event.eventName),
             )
         }
-        val range = checkChunkRange(snapshot, event.offset, event.length, event.sequence)
+        val range = checkChunkRange(
+            snapshot, event.offset, event.length, event.sequence,
+            frontier = snapshot.optimisticBytes,
+        )
         if (range != null) return range
+        // The peer cannot have received bytes this side never put on the wire.
+        if (event.confirmedOffset > snapshot.optimisticBytes) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.AcknowledgementBeyondSent(snapshot.optimisticBytes, event.confirmedOffset),
+            )
+        }
         return applyConfirmedProgress(
             snapshot,
             event.eventName,
@@ -1145,11 +1175,22 @@ public object TransferReducer {
         if (snapshot.recipientId != target.recipientId) {
             return Rejection.WrongRecipient(snapshot.recipientId?.value, target.recipientId?.value)
         }
-        if (snapshot.state.isTerminal) {
+        if (snapshot.state.isTerminal && !isTerminalIdiom(target)) {
             return Rejection.TerminalTransfer(snapshot.state, name)
         }
         return null
     }
+
+    /**
+     * The two inputs a finished delivery still accepts, both as no-ops.
+     *
+     * A late `SessionEnded` or `RemoteCancelled` is exactly the kind of
+     * duplicate a reconnect produces; refusing it would be correct but noisy, so
+     * it falls through to `onCancelLocally`, which no-ops anything terminal.
+     * Everything else is refused outright: a finished delivery is finished.
+     */
+    private fun isTerminalIdiom(target: TransferTarget): Boolean =
+        target is TransferEvent.SessionEnded || target is TransferEvent.RemoteCancelled
 
     private fun handleGuard(
         snapshot: TransferSnapshot,
@@ -1167,11 +1208,21 @@ public object TransferReducer {
      * when the caller should go on to decide whether it is new, duplicate,
      * overlapping or out-of-order.
      */
+    /**
+     * Validates a chunk's range and sequence.
+     *
+     * [frontier] is the byte position this chunk is allowed to start at or before:
+     * the write frontier for the sending side (`optimisticBytes`) and the
+     * confirmed watermark for the receiving side. A chunk that starts past it
+     * describes bytes that were skipped, which would make the progress numbers
+     * claim work that never happened.
+     */
     private fun checkChunkRange(
         snapshot: TransferSnapshot,
         offset: Long,
         length: Int,
         sequence: Long,
+        frontier: Long,
     ): TransitionResult? {
         if (length <= 0 || length > snapshot.chunkSize.value) {
             return TransitionResult.rejected(
@@ -1193,6 +1244,12 @@ public object TransferReducer {
             return TransitionResult.rejected(
                 snapshot,
                 Rejection.UnexpectedSequence(expectedSequence, sequence),
+            )
+        }
+        if (offset > frontier) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.UnexpectedOffset(frontier, offset),
             )
         }
         return null

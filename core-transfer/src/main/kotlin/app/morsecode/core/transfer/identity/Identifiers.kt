@@ -28,6 +28,10 @@ private val IDENTIFIER_PATTERN = Regex("""[A-Za-z0-9._:@-]+""")
 internal fun requireValidIdentifier(field: String, raw: String) {
     val encoded = raw.toByteArray(Charsets.UTF_8)
     require(encoded.isNotEmpty()) { "$field must not be empty" }
+    // A dot-only identifier is refused even though the character set allows it:
+    // identifiers are never paths, so there is no reason to let one that looks
+    // exactly like a traversal marker into a filename or a database row.
+    require(raw.any { it != '.' }) { "$field must not consist of dots only" }
     require(encoded.size <= ProtocolLimits.MAX_ID_LENGTH_BYTES) {
         "$field must not exceed ${ProtocolLimits.MAX_ID_LENGTH_BYTES} UTF-8 bytes"
     }
@@ -39,6 +43,7 @@ internal fun requireValidIdentifier(field: String, raw: String) {
 internal fun isValidIdentifier(raw: String): Boolean {
     val encoded = raw.toByteArray(Charsets.UTF_8)
     return encoded.isNotEmpty() &&
+        raw.any { it != '.' } &&
         encoded.size <= ProtocolLimits.MAX_ID_LENGTH_BYTES &&
         IDENTIFIER_PATTERN.matches(raw)
 }

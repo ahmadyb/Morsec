@@ -1,6 +1,9 @@
 package app.morsecode.core.transfer.reducer
 
 import app.morsecode.core.model.TransferState
+import app.morsecode.core.transfer.error.ErrorCategory
+import app.morsecode.core.transfer.error.ErrorOrigin
+import app.morsecode.core.transfer.error.TransferError
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.model.VerificationOutcome
 
@@ -27,7 +30,36 @@ public sealed class Rejection {
     /** Human-readable explanation, safe to show in the UI. */
     public abstract val message: String
 
+    /**
+     * The classified form of this rejection.
+     *
+     * A rejection is an in-process value; [error] is the same refusal in the
+     * vocabulary that crosses a boundary — so an adapter can log it, persist it
+     * or explain it without inventing its own mapping from code to category. The
+     * detail is re-redacted on the way through, which is what makes invariant 28
+     * ("every rejection carries a typed, bounded, redacted error") true rather
+     * than merely intended.
+     */
+    public open val error: TransferError
+        get() = TransferError.restore(
+            code = code,
+            detail = message,
+            retryable = false,
+            origin = ErrorOrigin.LOCAL,
+            category = ErrorCategory.LOCAL_ACTION,
+        )
+
     final override fun toString(): String = "$code: $message"
+
+    /** Shorthand for the variants that describe a peer's malformed input. */
+    protected fun protocolError(retryable: Boolean = false): TransferError =
+        TransferError.restore(
+            code = code,
+            detail = message,
+            retryable = retryable,
+            origin = ErrorOrigin.REMOTE,
+            category = ErrorCategory.PROTOCOL,
+        )
 
     /** The current state cannot produce the requested state. */
     public data class IllegalStateTransition(
@@ -47,6 +79,7 @@ public sealed class Rejection {
     ) : Rejection() {
         override val code: String = "wrong_session"
         override val message: String = "targets session $actual but this transfer is in session $expected"
+        override val error: TransferError = protocolError()
     }
 
     /** The event or command belongs to a different transfer. */
@@ -56,6 +89,7 @@ public sealed class Rejection {
     ) : Rejection() {
         override val code: String = "wrong_transfer"
         override val message: String = "targets transfer $actual but this is transfer $expected"
+        override val error: TransferError = protocolError()
     }
 
     /** The event or command belongs to a different broadcast recipient. */
@@ -66,6 +100,7 @@ public sealed class Rejection {
         override val code: String = "wrong_recipient"
         override val message: String =
             "targets recipient ${actual ?: "none"} but this delivery belongs to ${expected ?: "none"}"
+        override val error: TransferError = protocolError()
     }
 
     /** A progress report would move the confirmed watermark backwards. */
@@ -76,6 +111,7 @@ public sealed class Rejection {
         override val code: String = "offset_regression"
         override val message: String =
             "confirmed offset $proposed is behind the recorded $current; progress never decreases"
+        override val error: TransferError = protocolError()
     }
 
     /** A progress report claims more bytes than the file contains. */
@@ -85,6 +121,7 @@ public sealed class Rejection {
     ) : Rejection() {
         override val code: String = "offset_beyond_total"
         override val message: String = "offset $offset is past the file size $total"
+        override val error: TransferError = protocolError()
     }
 
     /** A chunk carried a sequence number that does not match its offset. */
@@ -94,6 +131,7 @@ public sealed class Rejection {
     ) : Rejection() {
         override val code: String = "unexpected_sequence"
         override val message: String = "expected sequence $expected but received $actual"
+        override val error: TransferError = protocolError(retryable = true)
     }
 
     /** A chunk arrived at an offset the receiver cannot append. */
@@ -103,6 +141,7 @@ public sealed class Rejection {
     ) : Rejection() {
         override val code: String = "unexpected_offset"
         override val message: String = "expected a chunk at offset $expected but received one at $actual"
+        override val error: TransferError = protocolError(retryable = true)
     }
 
     /** A chunk straddled the confirmed watermark instead of starting at it. */
@@ -114,6 +153,7 @@ public sealed class Rejection {
         override val code: String = "overlapping_chunk"
         override val message: String =
             "chunk $offset..${offset + length} overlaps the confirmed $confirmedBytes bytes"
+        override val error: TransferError = protocolError(retryable = true)
     }
 
     /** A chunk declared a length outside the negotiated chunk size. */
@@ -123,6 +163,7 @@ public sealed class Rejection {
     ) : Rejection() {
         override val code: String = "invalid_chunk_length"
         override val message: String = "chunk length $length is outside 1..$max"
+        override val error: TransferError = protocolError()
     }
 
     /** An Enqueue named a transfer the queue already holds. */
@@ -142,6 +183,7 @@ public sealed class Rejection {
     ) : Rejection() {
         override val code: String = "unsupported_protocol"
         override val message: String = "protocol version $version is outside $min..$max"
+        override val error: TransferError = protocolError()
     }
 
     /** Resume negotiation produced a decision this snapshot cannot apply. */
@@ -169,6 +211,13 @@ public sealed class Rejection {
         override val code: String = "verification_conflict"
         override val message: String =
             "a success event cannot carry verification outcome ${outcome.id}"
+        override val error: TransferError = TransferError.restore(
+            code = code,
+            detail = message,
+            retryable = true,
+            origin = ErrorOrigin.LOCAL,
+            category = ErrorCategory.INTEGRITY,
+        )
     }
 
     /** The transfer is in a terminal state; it will not move again. */
@@ -178,6 +227,17 @@ public sealed class Rejection {
     ) : Rejection() {
         override val code: String = "terminal_transfer"
         override val message: String = "$attempted was refused: the transfer is already $state"
+    }
+
+    /** An acknowledgement confirmed more bytes than this side ever sent. */
+    public data class AcknowledgementBeyondSent(
+        public val sentBytes: Long,
+        public val confirmedOffset: Long,
+    ) : Rejection() {
+        override val code: String = "acknowledgement_beyond_sent"
+        override val message: String =
+            "an acknowledgement confirmed $confirmedOffset bytes but only $sentBytes were sent"
+        override val error: TransferError = protocolError()
     }
 
     /** The retry ceiling has been reached. */
@@ -217,6 +277,7 @@ public sealed class Rejection {
             "verification_too_early",
             "verification_conflict",
             "terminal_transfer",
+            "acknowledgement_beyond_sent",
             "retry_not_allowed",
             "invalid_command",
         )

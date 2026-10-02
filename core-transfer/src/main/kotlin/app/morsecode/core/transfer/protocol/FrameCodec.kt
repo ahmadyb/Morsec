@@ -113,6 +113,11 @@ private class Cursor(private val src: ByteArray, private val start: Int, private
 
     fun atEnd(): Boolean = pos == end
 
+    /** Consumes whatever is left; used when the payload *is* the raw content. */
+    fun skipRemaining() {
+        pos = end
+    }
+
     private fun need(count: Int) {
         if (remaining() < count) {
             throw FrameFormat(
@@ -713,7 +718,7 @@ public object FrameCodec {
             when (val decision = response.decision) {
                 is ResumeDecision.ResumeAt -> {
                     u8(FramePayload.DECISION_RESUME_AT)
-                    i64(decision.offset)
+                    i64(response.offset)
                     text("", ProtocolLimits.MAX_ERROR_DETAIL_BYTES, "reason")
                     text("", ProtocolLimits.MAX_TEXT_LENGTH_BYTES, "code")
                     u8(0)
@@ -994,7 +999,7 @@ public object FramePayloads {
                 FrameType.DATA_CHUNK -> FramePayload.DataChunk(
                     offset = frame.offset,
                     sequence = frame.sequence,
-                    bytes = frame.payload.copyOf(),
+                    bytes = frame.payload.copyOf().also { cursor.skipRemaining() },
                     crc32 = frame.payloadCrc32,
                 )
 
@@ -1141,7 +1146,7 @@ public object FramePayloads {
                 TransferError.MalformedFrame("unknown resume decision $decisionCode"),
             )
         }
-        return FramePayload.ResumeResponse(fileId, decision, offset)
+        return FramePayload.ResumeResponse(fileId, decision)
     }
 
     private fun parseChunkAck(cursor: Cursor): FramePayload.ChunkAck {

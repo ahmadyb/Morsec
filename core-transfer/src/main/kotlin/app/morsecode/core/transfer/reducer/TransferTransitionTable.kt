@@ -41,6 +41,12 @@ public object TransferTransitionTable {
             TransferState.CANCELLED,
             TransferState.FAILED_RETRYABLE,
             TransferState.FAILED_FINAL,
+            // Reachable only through ResumeDecision.AlreadyVerified, where the
+            // receiving side reports it already holds a verified copy against a
+            // known digest. No bytes move and no other path may use this edge,
+            // so "completion only after verification" still holds: the
+            // verification happened, on the peer, against a digest we know.
+            TransferState.COMPLETED,
         ),
         TransferState.SENDING to setOf(
             TransferState.VERIFYING,

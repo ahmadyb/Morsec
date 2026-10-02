@@ -135,25 +135,19 @@ public object ResumeNegotiator {
         proposal: ResumeProposal,
         receiver: ReceiverResumeState,
     ): ResumeDecision {
-        // 1. A version we cannot decode cannot be negotiated at all.
-        if (!ProtocolVersion.isValid(proposal.protocolVersion.value)) {
-            return ResumeDecision.Reject(
-                TransferError.ProtocolVersionMismatch(
-                    expected = ProtocolLimits.PROTOCOL_VERSION_MAX,
-                    actual = proposal.protocolVersion.value,
-                ),
-            )
-        }
+        // A version we cannot decode cannot reach this function: ProtocolVersion
+        // refuses to be constructed outside the supported range, so what follows
+        // can assume both ends already speak a version we understand.
 
-        // 2. Nothing stored: this is a fresh transfer, start at zero.
+        // 1. Nothing stored: this is a fresh transfer, start at zero.
         if (!receiver.knownTransfer) return ResumeDecision.ResumeAt(0L)
 
-        // 3. A different file occupies this transfer id.
+        // 2. A different file occupies this transfer id.
         if (receiver.fileId != null && receiver.fileId != proposal.fileId) {
             return ResumeDecision.RestartAtZero("a different file occupies this transfer")
         }
 
-        // 4. A receiver cannot hold more bytes than the file contains.
+        // 3. A receiver cannot hold more bytes than the file contains.
         if (receiver.confirmedBytes > proposal.totalBytes) {
             return ResumeDecision.Reject(
                 TransferError.UnexpectedOffset(
@@ -163,14 +157,14 @@ public object ResumeNegotiator {
             )
         }
 
-        // 5. Size disagreement: the stored partial belongs to a different file.
+        // 4. Size disagreement: the stored partial belongs to a different file.
         if (receiver.totalBytes != null && receiver.totalBytes != proposal.totalBytes) {
             return ResumeDecision.RestartAtZero(
                 "stored size ${receiver.totalBytes} differs from the proposed ${proposal.totalBytes}",
             )
         }
 
-        // 6. Descriptor disagreement, which covers the path, the name, the MIME
+        // 5. Descriptor disagreement, which covers the path, the name, the MIME
         //    type, the modification time, the chunk size and the expected digest
         //    in a single comparison.
         if (receiver.descriptorFingerprint != null &&
@@ -179,7 +173,7 @@ public object ResumeNegotiator {
             return ResumeDecision.RestartAtZero("stored descriptor does not match the proposal")
         }
 
-        // 7. Chunk-size disagreement: partial chunks would be written at
+        // 6. Chunk-size disagreement: partial chunks would be written at
         //    different boundaries, so the partial file is unusable.
         if (receiver.chunkSize != null && receiver.chunkSize != proposal.chunkSize) {
             return ResumeDecision.RestartAtZero(
@@ -188,7 +182,7 @@ public object ResumeNegotiator {
             )
         }
 
-        // 8. Both sides know the expected digest and they disagree.
+        // 7. Both sides know the expected digest and they disagree.
         if (receiver.expectedSha256 != null &&
             proposal.expectedSha256 != null &&
             receiver.expectedSha256 != proposal.expectedSha256
@@ -196,14 +190,14 @@ public object ResumeNegotiator {
             return ResumeDecision.RestartAtZero("stored expected digest differs from the proposal")
         }
 
-        // 9. The stored partial already failed its own verification.
+        // 8. The stored partial already failed its own verification.
         if (receiver.verification == ReceiverVerificationState.FAILED) {
             return ResumeDecision.RestartAtZero("the stored partial failed verification")
         }
 
         val offset = receiver.confirmedBytes
 
-        // 10. A complete partial file is not a completed file: it still has to be
+        // 9. A complete partial file is not a completed file: it still has to be
         //     verified, and only a verified one may be skipped.
         if (offset == proposal.totalBytes) {
             return if (receiver.verification == ReceiverVerificationState.VERIFIED) {
@@ -215,7 +209,7 @@ public object ResumeNegotiator {
             }
         }
 
-        // 11. Alignment: a stored offset that is not on a chunk boundary cannot
+        // 10. Alignment: a stored offset that is not on a chunk boundary cannot
         //     be produced by this protocol, so the partial file is suspect.
         if (offset % proposal.chunkSize.value.toLong() != 0L) {
             return ResumeDecision.RestartAtZero(

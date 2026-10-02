@@ -59,12 +59,20 @@ public sealed interface FramePayload {
         public val senderAdvertisedBytes: Long,
     ) : FramePayload
 
-    /** Where the receiver wants the sender to start. */
+    /**
+     * Where the receiver wants the sender to start.
+     *
+     * The wire carries one offset field; [offset] mirrors the one inside a
+     * [ResumeDecision.ResumeAt] and is zero for every other decision, so the two
+     * can never disagree.
+     */
     public data class ResumeResponse(
         public val fileId: FileId,
         public val decision: ResumeDecision,
-        public val offset: Long,
-    ) : FramePayload
+    ) : FramePayload {
+        public val offset: Long
+            get() = (decision as? ResumeDecision.ResumeAt)?.offset ?: 0L
+    }
 
     /** One chunk of file bytes. */
     public data class DataChunk(

@@ -66,7 +66,7 @@ public object ErrorDetailRedactor {
 
     private val ABSOLUTE_PATH = Regex("""(^|[\s=(])(/|\\)[^\s,;)]*""")
     private val WINDOWS_DRIVE = Regex("""\b[A-Za-z]:[\\/][^\s,;)]*""")
-    private val LONG_OPAQUE = Regex("""[A-Za-z0-9+/=_-]{40,}""")
+    private val LONG_OPAQUE = Regex("""[A-Za-z0-9+/=._-]{40,}""")
     private val DIGEST = Regex("""^[0-9a-f]{64}$""")
     private val CONTROL = Regex("""\p{Cntrl}""")
 
@@ -80,7 +80,11 @@ public object ErrorDetailRedactor {
      * half.
      */
     public fun redact(raw: String, maxBytes: Int = MAX_LENGTH_BYTES): String {
-        var text = CONTROL.replace(raw, " ")
+        // Only the first line survives: an exception's stack frames would be a
+        // stack-trace leak, and a multi-line detail is useless in a UI row or a
+        // log line anyway.
+        var text = raw.lineSequence().firstOrNull()?.trim().orEmpty()
+        text = CONTROL.replace(text, " ")
         text = WINDOWS_DRIVE.replace(text, REDACTED)
         text = ABSOLUTE_PATH.replace(text) { match ->
             val prefix = match.groupValues[1]
