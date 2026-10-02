@@ -43,6 +43,134 @@ history, or overwrite newer work.
 
 ---
 
+## Session state — 2026-10-02: the Milestone 3 corrective pass is COMPLETE
+
+A correction to the transfer core, not a new implementation group. Milestone 3
+shipped green at `0404eb7` (run 36970741133) and was then held to eight findings
+raised against it. Every finding is resolved; nothing outside the eight was
+touched, and no Android, LAN, Nearby, service, Media3 or WebShare work was begun.
+
+**Head:** `f4b8cfd` (this section's commit lands on top of it). **Green run:**
+<https://github.com/ahmadyb/Morsec/actions/runs/36999633087>
+
+| Check | Baseline (`0404eb7`, run 36970741133) | This pass (`f4b8cfd`, run 36999633087) |
+| --- | --- | --- |
+| Unit tests | 1163, 0 failed, 0 skipped, 70 reports | **1235, 0 failed, 0 skipped, 73 reports** |
+| Android lint | 0 errors, 45 warnings, 7 reports | **0 errors, 45 warnings, 7 reports** |
+| Debug APK | 18.64 MiB | **18.64 MiB** |
+| androidTest APK | 1.10 MiB | **1.10 MiB** |
+| `checkMilestoneHygiene` | clean | **clean** |
+| Node verifiers | refs 31/31, tokens 195/195, icons 61/61 | **plus `transfer-limits.mjs` 21/21** |
+
+The five Gradle invocations were run by CI in that order:
+`checkMilestoneHygiene` → `test` → `:app:lintDebug :core-design:lintDebug
+:core-data:lintDebug :core-storage:lintDebug :transport-lan:lintDebug
+:transport-nearby:lintDebug :media:lintDebug` → `:app:assembleDebug` →
+`:app:assembleDebugAndroidTest`.
+
+### 1. Files above four gibibytes
+
+`MAX_FILE_SIZE_BYTES` was `4,294,967,295` — a 32-bit length field leaking into a
+`Long`-sized domain — so every delivery was silently capped at 4 GiB − 1. It is
+now `8,796,093,022,207` (8 TiB − 1). `LargeFileTest` (32 tests) drives a 5 GiB
+file end to end: descriptor construction, offsets at and past the 4 GiB mark, the
+short tail chunk, DATA_CHUNK and CHUNK_ACK frames carrying offsets above 2³¹,
+resume, snapshot persistence, broadcast totals and the scheduler.
+
+Two helpers make the wider domain safe rather than merely larger:
+`ProtocolLimits.isValidRange(offset, length)` compares `offset <= MAX − length`
+so no sum can wrap into a small positive number, and `checkedEnd` only adds after
+the range has been accepted. `TransferReducer`'s chunk-range check now routes
+through both instead of adding inline.
+
+### 2. The limits table now checks itself
+
+`doc/transfer-protocol.md`'s limits table had drifted from `ProtocolLimits.kt`
+in five places: it claimed a 4 KiB minimum chunk (the code enforces 1 KiB), a
+255-byte path segment (127), a 240-byte error budget (256), a file ceiling of
+8 TiB (the code enforced 4 GiB − 1) and gave the frame ceiling as a formula
+instead of a number. The table is now the complete set of **22** numeric
+constants, each written as a plain number.
+
+`tools/verify/transfer-limits.mjs` parses both sides and fails on any
+disagreement in either direction — a value that differs, a constant the table
+omits, a row naming a constant that no longer exists, or a row whose value cell
+carries no comparable number. The four magic bytes are the only exclusions, and
+each must still exist in the source so the exclusion list cannot rot. CI runs it
+(step 9) alongside `refs.mjs` and `token-parity.mjs`.
+
+### 3. Unused dependencies removed
+
+`core-transfer` declared `kotlinx-coroutines-core`, `kotlinx-serialization-json`
+and `javax.inject` on `api`/`implementation`, plus `kotlinx-coroutines-test` and
+`turbine` for tests, and imported none of them. The complete set of non-Kotlin
+types its main sources reference is `java.nio.ByteBuffer`, two
+`java.nio.charset` types and `java.security.MessageDigest`. All five are gone;
+the module declares `:core-model` and JUnit only. The same verifier enforces an
+import allow-list and re-checks the build file, so they cannot creep back.
+
+### 4. Rejection coverage
+
+Three of nineteen variants had no test asserting their exact code, and the
+reasons differed:
+
+- **`AcknowledgementBeyondSent`** was reachable but untested beyond invariant 22.
+  It now has its own test.
+- **`DuplicateDescriptor`** and **`UnsupportedProtocol`** were never produced at
+  all. The reducer never sees the queue, so it cannot know a file is already
+  enqueued — that is `TransferScheduler`'s `BlockReason.DUPLICATE_TRANSFER_ID`
+  and `BroadcastAggregator`'s per-recipient distinctness. And `ProtocolVersion`
+  refuses to exist outside the supported window, so no descriptor can carry an
+  out-of-window version; the refusal belongs where an untrusted `Int` first
+  arrives, which is `FrameCodec` and `TransferSnapshotCodec`, both of which emit
+  `TransferError.ProtocolVersionMismatch`. **The validated domain type was not
+  weakened to make either reachable.** Both variants and the dead branch in
+  `TransferReducer.enqueue` were removed, with the reason recorded in
+  `Rejection.kt`.
+
+The vocabulary is now **17** and closed: `RejectionCoverageTest` asserts the
+exact code for every one through a real reducer call, and fails if the set of
+covered codes and `Rejection.allCodes` ever disagree.
+
+Tracing this found a genuine defect: `TransferSnapshotCodec` built its
+descriptor's `ProtocolVersion` with the throwing constructor, so a row written by
+a build speaking a newer protocol surfaced as "malformed frame" from the
+`IllegalArgumentException` catch rather than as a version refusal. It now returns
+`SnapshotDecodeResult.Invalid` carrying `protocol_version_mismatch`.
+
+### 5. The frame ceiling, verified
+
+`MAX_FRAME_SIZE_BYTES` is derived in source —
+`HEADER_SIZE_BYTES + (3 * MAX_ID_LENGTH_BYTES) + MAX_PAYLOAD_BYTES` = **262,380**
+— and `ProtocolLimitsDocumentationTest` (15 tests) now proves it against the
+encoder rather than only the arithmetic: a maximal frame with three 64-byte
+identifiers and a 262,144-byte payload encodes to exactly 262,380 bytes and
+decodes back whole, and the 44-byte header is proved field by field.
+
+### 6. Counts, for the record
+
+12 states · 38 legal transition edges · 12 commands · 19 events · 18 effects ·
+17 rejections · 15 frame types · 28 invariants · 22 documented limits · 435
+core-transfer tests · 1235 project tests.
+
+### 7. Still gated
+
+`FeatureReadiness.TRANSFER_ENGINE` is `deliveredInMilestone = 5` and
+`CURRENT_MILESTONE` is 2, so `isAvailable(TRANSFER_ENGINE)` is `false`. Unchanged.
+
+### 8. Known limitations
+
+- **Nothing proves integration.** 435 tests prove the core's rules; the engine is
+  still wired to no transport, no stream adapter and no Room implementation.
+- `:core-transfer` is a JVM module, so it gets no Android lint; its discipline is
+  enforced by the import allow-list instead.
+- The standalone Kotlin harness is an additional local check only. CI is the
+  verification of record.
+- Git metadata was reset four times this session. The remote branch is the only
+  durable copy; local commits are not.
+
+---
+
 ## Session state — 2026-10-01: MILESTONE 2 FINAL AUDIT is COMPLETE
 
 Written by the agent that ran the twelve-part final audit you specified. Every
@@ -162,6 +290,12 @@ prohibition on fake transfer/discovery/playback behavior remain in force.
 ---
 
 ## Session state — 2026-10-01: the Milestone 3 pure transfer core is implemented
+
+> **Superseded in part by the 2026-10-02 correction pass below.** Nothing here was
+> reverted, but three numbers in this section are no longer current: the engine is
+> covered by **435** tests, not 363; the largest file is **8 TiB − 1**, not 4 GiB − 1;
+> and the rejection vocabulary is **17** variants, not 19. Read the next section for
+> why each changed.
 
 This section was written by the agent that implemented the focused group. It
 records what exists, what was verified, and — importantly — what was **not**
