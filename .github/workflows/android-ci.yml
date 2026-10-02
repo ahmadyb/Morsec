@@ -15,10 +15,11 @@ on:
   push:
     branches:
       - arena/01a0e98a-morsec
-      # The Milestone 3 transfer-core session branch. Added alongside the entry
-      # above (nothing was removed or renamed) so the identical job runs on push
-      # to this branch too; without it a push here triggers no run at all, and
-      # workflow_dispatch is refused for the integration token.
+      # The Milestone 3 transfer-core session branches. Added alongside the
+      # entry above (nothing was removed or renamed) so the identical job runs on
+      # push to these branches too; without it a push here triggers no run at
+      # all, and workflow_dispatch is refused for the integration token.
+      - arena/01a0f8ba-morsec
       - arena/01a0f97d-morsec
 
 permissions:

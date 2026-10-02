@@ -161,6 +161,103 @@ prohibition on fake transfer/discovery/playback behavior remain in force.
 
 ---
 
+## Session state — 2026-10-01: the Milestone 3 pure transfer core is implemented
+
+This section was written by the agent that implemented the focused group. It
+records what exists, what was verified, and — importantly — what was **not**
+verified, so the next session does not mistake one for the other.
+
+### What was built
+
+`:core-transfer` went from a module with a build script and no sources to a
+complete pure-Kotlin transfer engine:
+
+- validated identity and metadata types (`ProtocolVersion`, `SessionId`, `BatchId`,
+  `TransferId`, `FileId`, `RecipientId`, `SequenceNumber`, `ConfirmedOffset`,
+  `ChunkSize`, `RelativeTransferPath`, `TransferFileDescriptor`)
+- reuse of the existing twelve `TransferState` values, with a stricter transition
+  table and a machine-computed list of where it diverges from core-model's
+  UI-facing table
+- typed commands, events, effects and rejections
+- a deterministic reducer — no clock, no socket, no file, no random ID, no thread,
+  no `Thread.sleep`, no Room, no global mutable state
+- versioned big-endian binary framing: fifteen frame types, magic bytes, two CRC-32
+  checksums (one over the header, one over the payload), and every untrusted length
+  bounded before it is used to allocate
+- per-chunk CRC-32 and incremental streaming SHA-256 that never buffers a whole
+  file
+- pure resume negotiation (`ResumeAt` / `RestartAtZero` / `AlreadyVerified` /
+  `Reject`)
+- a deterministic scheduler with no clock, bounded concurrency, and per-recipient
+  isolation
+- versioned, Room-independent persistence snapshot contracts
+- `doc/transfer-protocol.md`, the twenty-eight invariants, and 363 JVM tests
+
+### Verification status — read this before trusting anything
+
+**The 363 tests passed in a local sandbox harness, not in Gradle.** The sandbox has
+no JDK, Gradle or Android SDK that can resolve this project's dependencies, so the
+tests were compiled and run with a standalone Kotlin compiler against a hand-written
+JUnit 4 shim. That harness exercises the same Kotlin sources, but it is **not** the
+project's build. The commands below have **not** been run in CI for this work:
+
+- `./gradlew --no-daemon --stacktrace :core-transfer:test`
+- `./gradlew --no-daemon --stacktrace test`
+- `./gradlew --no-daemon --stacktrace lintDebug`
+- `./gradlew --no-daemon --stacktrace :app:assembleDebug`
+
+**GitHub authentication failed part-way through this session** (`gh` reports the
+`GH_TOKEN` is no longer valid; `git push` cannot authenticate). Consequently:
+
+- the work exists in local commits on the session branch, **not on the remote**
+- no GitHub Actions run has been produced for these commits
+- no CI failure log has been read for them
+
+Two fallback artifacts were produced so the work is not trapped in Git metadata,
+which has been unstable in this project before: `morsecode-transfer-core-wip.patch`
+(a binary diff of every change) and `untracked-files.txt`.
+
+**The first job of the next session is therefore:** restore GitHub authentication,
+push the branch, run the four Gradle commands above, read every failure log in
+full, fix the cause of each failure, and re-run until green. Do not assume the
+local harness result transfers.
+
+### Protected scope is unchanged
+
+`FeatureReadiness.TRANSFER_ENGINE` remains `deliveredInMilestone = 5` and
+`CURRENT_MILESTONE` remains 2. Nothing in this milestone turns the transfer engine
+on for users. The status line for this work is:
+
+> Milestone 3 in progress: SAF media integration complete / Pure transfer core
+> implemented and verified / Production transfer engine integration still gated.
+
+Not started, and not to be started without approval: sockets, LAN/UDP discovery,
+Nearby, Wi-Fi Direct, foreground services, notifications, wake locks, Android stream
+adapters, the Room implementation, Compose repositories, UI transfer integration,
+Media3, and the WebShare server and client.
+
+### Defects found and fixed while writing the tests
+
+Worth knowing, because they are the reason the tests are worth running:
+
+1. A `ChunkSent` could start past the write frontier, so `optimisticBytes` could
+   describe bytes that were never written. `checkChunkRange` now takes the frontier
+   it must not pass.
+2. An acknowledgement could confirm more bytes than this side ever sent. That is now
+   a typed rejection, `AcknowledgementBeyondSent`.
+3. Rejections carried no classification, so a caller had to invent its own mapping
+   from code to category before it could log or persist one. `Rejection` now carries
+   a `TransferError`, re-redacted on the way through.
+4. The resume version guard was unreachable: `ProtocolVersion` refuses to be
+   constructed outside the supported range, so the check is now a documented
+   precondition of the type instead of dead code in a consumer.
+5. A `DATA_CHUNK` payload *is* the raw bytes, but the parser reported trailing bytes
+   instead of consuming them.
+6. `ResumeResponse` carried an offset alongside a decision that already carried one,
+   so the two could disagree on the wire.
+
+---
+
 ## Session state — 2026-09-29: CI validation of Milestone 1 is COMPLETE
 
 Written by the agent that executed the CI-validation task. Every number here comes

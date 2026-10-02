@@ -27,16 +27,22 @@ Companion documents:
 | `:core-design` | Android library | Mockup design tokens (colours, metrics, type) and the reusable Compose component set | **M1** |
 | `:core-data` | Android library | Room database (entities, DAOs, mappers), DataStore settings, repositories, logging + redaction, crash recorder | **M1** |
 | `:core-storage` | Android library | MediaStore / SAF / legacy-storage adapters, the runtime permission matrix, installed-apps reader | **M1** |
-| `:core-transfer` | Kotlin/JVM | Protocol framing, checksums, resume, the queue engine | M5 |
+| `:core-transfer` | Kotlin/JVM | Protocol framing, checksums, resume, the queue scheduler, snapshot persistence contracts — the pure engine; wiring it to a transport is M5 | **M3 core**, M5 wiring |
 | `:transport-lan` | Android library | UDP discovery beacons, TCP control and data channels | M6 |
 | `:transport-nearby` | Android library | Google Play services Nearby Connections transport | M7 |
 | `:webshare-server` | Kotlin/JVM | Embedded HTTP/1.1 server + local JSON API (ADR-0002) | M11 |
 | `:media` | Android library | Media3 playback, MediaSession, metadata helpers | M10 |
 | `webshare-ui` | npm (not Gradle) | TypeScript/CSS browser client; its production bundle is embedded into `:app` assets | M12 |
 
-`:core-transfer`, `:transport-lan`, `:transport-nearby`, `:webshare-server` and `:media`
-exist as configured modules with a build script and no sources yet, which is why CI reports
-`NO-SOURCE` for their compile and KSP tasks.
+`core-transfer` now holds the pure transfer engine — framing, checksums, resume, the
+queue scheduler and the persistence contracts — delivered by Milestone 3 and covered by
+363 JVM tests. See [`transfer-protocol.md`](transfer-protocol.md). The engine is **not yet
+wired to a transport**: `FeatureReadiness.TRANSFER_ENGINE` stays pinned to milestone 5, and
+turning it on for users is milestone 5 work, not this milestone's.
+
+`:transport-lan`, `:transport-nearby`, `:webshare-server` and `:media` still exist as
+configured modules with a build script and no sources, which is why CI reports `NO-SOURCE`
+for their compile and KSP tasks.
 
 ### Dependency rules
 
@@ -51,6 +57,8 @@ exist as configured modules with a build script and no sources yet, which is why
 4. **Transports are interchangeable.** `:transport-lan` and `:transport-nearby` will both
    implement the transport contract declared in `:core-transfer`; neither may reference the
    other, and `:app` picks one at runtime. The user-facing copy always says "LAN or Nearby".
+   `:core-transfer` itself is a JVM module and must stay free of `android.*`, Room, Hilt and
+   any socket type: the transports depend on it, never the reverse.
 5. **JVM modules may not touch `android.*`.** That rule is what makes ADR-0002's API 23
    allowlist enforceable by construction.
 
@@ -158,9 +166,37 @@ action; nothing is requested at launch.
 
 `:transport-lan` (M6) will own the UDP beacon on 33457 and the TCP control/data channels on
 33456; `:transport-nearby` (M7) the Play services path, with `DOCTOR_NEARBY` checks landing
-in the same milestone. `:core-transfer` (M5) holds the framing, checksums and resume engine
-both plug into. `:media` (M10) wraps Media3 for received audio/video. `:webshare-server`
-(M11) and `webshare-ui` (M12) implement ADR-0002.
+in the same milestone. Both will implement the transport contract declared in
+`:core-transfer`, whose pure engine already exists (M3) and whose wiring to a real socket is
+M5. `:media` (M10) wraps Media3 for received audio/video. `:webshare-server` (M11) and
+`webshare-ui` (M12) implement ADR-0002.
+
+### `:core-transfer` — the pure engine (M3)
+
+`:core-transfer` is Kotlin/JVM with no Android, Room, Hilt, coroutine, socket or clock
+dependency, and that constraint is what makes it testable at all: the whole engine runs on
+the JVM in milliseconds, so the rules it encodes are enforced by tests rather than by
+convention.
+
+| Package | Responsibility |
+| --- | --- |
+| `identity` | validated identifiers, protocol version, offsets, chunk size, relative paths |
+| `error` | the typed error model and the detail redactor |
+| `integrity` | CRC-32 per chunk and incremental streaming SHA-256 |
+| `model` | the file descriptor and the snapshot every transition reads and writes |
+| `command`, `event`, `effect` | the inputs and the outputs of a transition |
+| `protocol` | the fifteen frame types, the big-endian codec, resume decisions |
+| `reducer` | the deterministic transition function and the transition table |
+| `resume` | pure resume negotiation |
+| `scheduler` | the deterministic queue planner |
+| `broadcast` | 1→N aggregation and per-recipient isolation |
+| `persistence` | versioned snapshot serialisation and the store seam |
+
+The reducer is a function, `(snapshot, input) -> TransitionResult`. It reads nothing and
+performs nothing: every side effect comes back as a `TransferEffect` value the caller decides
+how to perform. The twenty-eight invariants it enforces are listed in
+[`transfer-protocol.md`](transfer-protocol.md#4-the-twenty-eight-invariants) and asserted
+one by one in `TransferReducerInvariantTest`.
 
 ## Dependency injection
 
