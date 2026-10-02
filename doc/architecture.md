@@ -36,9 +36,16 @@ Companion documents:
 
 `core-transfer` now holds the pure transfer engine — framing, checksums, resume, the
 queue scheduler and the persistence contracts — delivered by Milestone 3 and covered by
-363 JVM tests. See [`transfer-protocol.md`](transfer-protocol.md). The engine is **not yet
+395 JVM tests. See [`transfer-protocol.md`](transfer-protocol.md). The engine is **not yet
 wired to a transport**: `FeatureReadiness.TRANSFER_ENGINE` stays pinned to milestone 5, and
 turning it on for users is milestone 5 work, not this milestone's.
+
+Its only declared dependencies are `:core-model` and JUnit. It declares no coroutines, no
+serialization and no injection, because it needs none of them: the reducer is a synchronous
+function, the wire format is a hand-rolled byte layout, and there is nothing to inject into
+a value. `tools/verify/transfer-limits.mjs` fails the build if a source outside the JDK
+allow-list is imported, or if a documented protocol limit stops matching the
+`ProtocolLimits` constant it names.
 
 `:transport-lan`, `:transport-nearby`, `:webshare-server` and `:media` still exist as
 configured modules with a build script and no sources, which is why CI reports `NO-SOURCE`

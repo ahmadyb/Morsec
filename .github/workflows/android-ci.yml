@@ -129,6 +129,25 @@ jobs:
           mkdir -p ci-logs
           ./gradlew --no-daemon --stacktrace checkMilestoneHygiene 2>&1 | tee ci-logs/10-hygiene.log
 
+      # These three need only Node, so they run before the Gradle work and fail
+      # the run before a 20-minute build if a documented limit has drifted from
+      # the constant it names. transfer-limits.mjs is the one that matters here:
+      # it parses doc/transfer-protocol.md's limits table and ProtocolLimits.kt
+      # and fails on any numeric disagreement in either direction.
+      - name: Reference, design-token and protocol-limit verifiers
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          {
+            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs; do
+              echo "== $script =="
+              node "$script" || echo "VERIFIER FAILED: $script"
+            done
+          } 2>&1 | tee ci-logs/15-verifiers.log
+          grep -q "VERIFIER FAILED" ci-logs/15-verifiers.log && exit 1
+          exit 0
+
       - name: JVM unit tests
         if: ${{ !cancelled() }}
         run: |

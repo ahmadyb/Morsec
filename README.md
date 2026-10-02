@@ -26,7 +26,7 @@ the latest stable (36) and the toolchain is pinned in [`gradle/libs.versions.tom
 | `core-design` | Android lib | Design tokens transcribed from the reference, theme, icons, shared components |
 | `core-data` | Android lib | Room database, DataStore settings, redacted log store, crash records, repositories |
 | `core-storage` | Android lib | MediaStore/SAF/installed-app readers, permission matrix, thumbnails |
-| `core-transfer` | JVM | Session, chunking, hashing, resume, verification (milestone 5) |
+| `core-transfer` | JVM | Protocol framing, checksums, resume, queue scheduler, snapshot contracts — the pure engine delivered by milestone 3; wiring it to a transport is milestone 5 |
 | `transport-lan` | Android lib | Wi‑Fi multicast discovery + socket transport (milestone 6) |
 | `transport-nearby` | Android lib | Nearby Connections transport (milestone 7) |
 | `webshare-server` | JVM | Embedded HTTP server + browser API (milestone 11) |
@@ -40,13 +40,16 @@ The Android toolchain cannot run everywhere this repo is checked out, so the inv
 not need a compiler are enforced by Node scripts (no dependencies, Node 18+):
 
 ```bash
-node tools/gen/icons.mjs --check      # 61 generated vectors still match the reference artwork
-node tools/verify/token-parity.mjs    # colours, color-mix formulas, metrics vs the reference CSS
-node tools/verify/refs.mjs            # every token/resource/route reference resolves; hygiene gate
+node tools/gen/icons.mjs --check        # 61 generated vectors still match the reference artwork
+node tools/verify/token-parity.mjs      # colours, color-mix formulas, metrics vs the reference CSS
+node tools/verify/refs.mjs              # every token/resource/route reference resolves; hygiene gate
+node tools/verify/transfer-limits.mjs   # documented protocol limits vs ProtocolLimits.kt; core-transfer imports
 ```
 
-All three exit non-zero on drift. See [`doc/fidelity-notes.md`](doc/fidelity-notes.md) for what
-each one compares and for the fidelity decisions behind the design system.
+All four exit non-zero on drift. See [`doc/fidelity-notes.md`](doc/fidelity-notes.md) for what
+each one compares and for the fidelity decisions behind the design system, and
+[`doc/transfer-protocol.md`](doc/transfer-protocol.md) §2 for the limits the fourth one
+polices.
 
 ## Building
 
@@ -56,7 +59,7 @@ and is not committed; regenerate it once, then use `./gradlew` as normal:
 ```bash
 gradle wrapper --gradle-version 8.13     # creates gradlew, gradlew.bat and gradle-wrapper.jar
 ./gradlew checkMilestoneHygiene          # rejects TODO/stub markers in delivered sources
-./gradlew test                           # unit tests (core-model, core-design, core-data)
+./gradlew test                           # unit tests (core-model, core-design, core-data, core-transfer)
 ./gradlew :app:assembleDebug             # debug APK -> app/build/outputs/apk/debug/
 ./gradlew :app:connectedDebugAndroidTest # instrumentation tests on a device or emulator
 ```

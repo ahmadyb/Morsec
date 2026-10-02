@@ -6,9 +6,10 @@ Milestone 3.
 Everything described here lives in `:core-transfer`, which is a **Kotlin/JVM**
 module: no Android class, no Room, no Hilt, no coroutine, no socket, no clock and
 no `Thread.sleep` appears anywhere in its sources. That is not an aesthetic
-choice — it is what lets the 335 tests that cover this document run on the JVM in
+choice — it is what lets the 395 tests that cover this document run on the JVM in
 milliseconds, and what lets the same engine be driven by a LAN socket, by Nearby
-Connections or by a test harness without changing a line of it.
+Connections or by a test harness without changing a line of it. Its only declared
+dependencies are `:core-model` and JUnit.
 
 Companion documents:
 
@@ -89,19 +90,51 @@ desynchronising.
 
 ### Limits
 
+Every bound the core enforces is a `const val` on
+`app.morsecode.core.transfer.ProtocolLimits`. The table below is the complete
+set, and it is checked rather than maintained: `tools/verify/transfer-limits.mjs`
+parses this table and `ProtocolLimits.kt` and fails the build if any number here
+differs from the constant it names, if a constant is missing from the table, or
+if the table names a constant that no longer exists. The numeric values are
+therefore always what the code enforces, and the parenthesised notes are only
+there to say what the number means.
+
 | Limit | Value | Why |
 | --- | --- | --- |
-| `MIN_CHUNK_SIZE_BYTES` | 4 KiB | below this the per-chunk overhead dominates |
-| `MAX_CHUNK_SIZE_BYTES` | 256 KiB | one chunk must fit one frame |
-| `MAX_PAYLOAD_BYTES` | 256 KiB | equals the maximum chunk |
-| `MAX_FRAME_SIZE_BYTES` | header + 3 × 64 + 256 KiB | absolute ceiling on a frame |
-| `MAX_FILE_SIZE_BYTES` | 8 TiB − 1 | `Long`-sized, API 23-safe |
+| `PROTOCOL_VERSION_MIN` | 1 | oldest version this build will decode |
+| `PROTOCOL_VERSION_MAX` | 1 | newest version this build will produce |
+| `PROTOCOL_VERSION_CURRENT` | 1 | the version every frame this build emits carries |
+| `HEADER_SIZE_BYTES` | 44 | fixed header; see the table above |
 | `MAX_ID_LENGTH_BYTES` | 64 | identifiers are ASCII and short |
-| `MAX_TEXT_LENGTH_BYTES` | 255 | display name, MIME type |
-| `MAX_PATH_SEGMENT_BYTES` | 255 | one path component |
-| `MAX_PATH_SEGMENTS` | 32 | depth of a relative transfer path |
-| `MAX_ERROR_DETAIL_BYTES` | 240 | a detail that fits a log line and a UI row |
+| `MAX_TEXT_LENGTH_BYTES` | 255 | display name, MIME type, error code |
+| `MAX_RELATIVE_PATH_BYTES` | 512 | a whole relative transfer path, UTF-8 |
+| `MAX_PATH_SEGMENT_BYTES` | 127 | one path component; most filesystems stop at 255 bytes, so this stays inside that with room for the extension |
+| `MAX_PATH_SEGMENTS` | 32 | depth of a relative transfer path; the receiver recreates one directory per segment, and depth is a way to hide a file |
+| `MAX_ERROR_DETAIL_BYTES` | 256 | a redacted detail that fits a log line and a UI row |
+| `MAX_HANDSHAKE_CAPABILITIES_BYTES` | 256 | the capabilities string a peer advertises |
+| `MIN_CHUNK_SIZE_BYTES` | 1,024 (1 KiB) | below this the per-chunk framing overhead dominates |
+| `DEFAULT_CHUNK_SIZE_BYTES` | 65,536 (64 KiB) | used when the peers do not negotiate one |
+| `MAX_CHUNK_SIZE_BYTES` | 262,144 (256 KiB) | one chunk must fit one frame |
+| `MAX_PAYLOAD_BYTES` | 262,144 (256 KiB) | equals the maximum chunk, by definition |
+| `MAX_FRAME_SIZE_BYTES` | 262,380 (44 + 3 × 64 + 262,144) | absolute ceiling on a frame: header + the three bounded identifiers + the bounded payload |
+| `MAX_FILE_SIZE_BYTES` | 8,796,093,022,207 (8 TiB − 1) | `Long`-sized, API 23-safe |
+| `SHA256_DIGEST_BYTES` | 32 | a digest in binary |
+| `SHA256_HEX_LENGTH` | 64 | a digest as lowercase hexadecimal |
 | `SNAPSHOT_VERSION` | 1 | persistence format stamp |
+| `SNAPSHOT_VERSION_MIN` | 1 | oldest snapshot version this build will restore |
+| `DEFAULT_MAX_RETRY_COUNT` | 5 | retries before a retryable failure becomes final |
+
+`MAX_FRAME_SIZE_BYTES` is derived, not written down: it is
+`HEADER_SIZE_BYTES + (3 * MAX_ID_LENGTH_BYTES) + MAX_PAYLOAD_BYTES` in the
+source, so moving any of the three moves it. `ProtocolLimitsDocumentationTest`
+re-derives the arithmetic from the constants and encodes a maximal frame to
+confirm the encoder really emits exactly that many bytes.
+
+`MAX_FILE_SIZE_BYTES` bounds a *file*, never an allocation. The largest single
+allocation the core will make for a peer-supplied length is
+`MAX_FRAME_SIZE_BYTES`, and it is made only after the declared lengths have been
+validated against this table. A 5 GiB file is 20,480 maximum-size chunks plus a
+short tail; nothing in the core ever holds more than one of them.
 
 ### The fifteen frame types
 

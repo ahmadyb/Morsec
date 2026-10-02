@@ -462,12 +462,53 @@ const parsedFiles = kotlinFiles.map((f) => {
   for (const m of code.matchAll(functionPattern)) {
     record(m[1], declaredPackages);
     const params = callableParams.get(m[1]) ?? new Set();
-    for (const name of parameterNames(balancedFrom(code, m.index + m[0].length - 1))) params.add(name);
+    for (const name of parameterNames(balancedFrom(code, m.index + m[0].length - 1))) {
+      params.add(name);
+      // A parameter shadows a repo-wide declaration for the whole file, so
+      // `fun handleGuard(rejection: Rejection)` must not be reported as an
+      // unimported use of the top-level `rejection` helper.
+      local.add(name);
+    }
     callableParams.set(m[1], params);
   }
   for (const m of code.matchAll(/^(?:public |internal |private )*(?:val|var)\s+(\w+)/gm)) {
     record(m[1], declaredPackages);
   }
+
+  /*
+   * Every function parameter in the file, including indented ones the
+   * declaration pattern above skips, is a local for this check.
+   */
+  const anyFunctionPattern = /^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*(?:public |internal |private |protected |open |override |inline |suspend |operator |infix |tailrec |external |actual |expect )*fun\s+(?:<[^>]*>\s*)?(?:[\w.<>]+[.])?(\w+)\s*\(/gm;
+  for (const m of code.matchAll(anyFunctionPattern)) {
+    for (const name of parameterNames(balancedFrom(code, m.index + m[0].length - 1))) local.add(name);
+  }
+
+  /*
+   * Lambda parameters, likewise: `mutate { current -> … }` is not a use of the
+   * top-level `current` extension. Only an identifier directly introduced by
+   * `{`, `(` or `,` counts, so a `when` branch (`is Foo ->`, `else ->`) cannot
+   * register a type name as a local and mask a genuine missing import.
+   */
+  for (const m of code.matchAll(/[{(,]\s*([A-Za-z_]\w*)(?:\s*:\s*[^->{;]*)?\s*->/g)) local.add(m[1]);
+  for (const m of code.matchAll(/\{\s*((?:[A-Za-z_]\w*\s*,\s*)+[A-Za-z_]\w*)\s*->/g)) {
+    for (const name of m[1].split(',')) local.add(name.trim());
+  }
+  // Named arguments, loop variables and catch parameters are declarations in
+  // their own right: `ProgressBarRangeInfo(current = …)` and
+  // `for (rejection in rejections)` are not unimported uses of the top-level
+  // `current` / `rejection` helpers.
+  for (const m of code.matchAll(/[({,]\s*([A-Za-z_]\w*)\s*=(?!=)/g)) local.add(m[1]);
+  // `for (x in xs)` — the loop variable sits inside the parentheses, so the
+  // pattern cannot simply look for the first `)` followed by `in`.
+  for (const m of code.matchAll(/\bfor\s*\(([^()]*?)\s+in\s+[^()]*\)/g)) {
+    for (const part of m[1].split(',')) {
+      const name = part.trim();
+      if (/^[A-Za-z_]\w*$/.test(name)) local.add(name);
+    }
+  }
+  for (const m of code.matchAll(/\bcatch\s*\(\s*([A-Za-z_]\w*)/g)) local.add(m[1]);
+
   return { rel: short(f), raw, code, pkg, imports, local };
 });
 
