@@ -1233,10 +1233,20 @@ public object TransferReducer {
         if (offset < 0L) {
             return TransitionResult.rejected(snapshot, Rejection.UnexpectedOffset(0L, offset))
         }
-        if (offset + length > snapshot.totalBytes) {
+        // A range that cannot be addressed at all is refused before it is
+        // compared with the file size, so an untrusted offset plus an untrusted
+        // length can never wrap into a small positive number.
+        if (!ProtocolLimits.isValidRange(offset, length.toLong())) {
             return TransitionResult.rejected(
                 snapshot,
-                Rejection.OffsetBeyondTotal(offset + length, snapshot.totalBytes),
+                Rejection.OffsetBeyondTotal(offset, snapshot.totalBytes),
+            )
+        }
+        val endExclusive = ProtocolLimits.checkedEnd(offset, length.toLong())
+        if (endExclusive > snapshot.totalBytes) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.OffsetBeyondTotal(endExclusive, snapshot.totalBytes),
             )
         }
         val expectedSequence = SequenceNumber.forOffset(offset, snapshot.chunkSize).value

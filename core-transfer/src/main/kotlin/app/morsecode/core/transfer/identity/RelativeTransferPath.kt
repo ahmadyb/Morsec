@@ -59,6 +59,10 @@ internal fun requireValidRelativePath(raw: String) {
     require(!raw.endsWith("/") && !raw.endsWith("\\")) { "relativePath must not end with a separator" }
 
     val segments = raw.replace('\\', '/').split('/')
+    require(segments.size <= ProtocolLimits.MAX_PATH_SEGMENTS) {
+        "relativePath must not be deeper than ${ProtocolLimits.MAX_PATH_SEGMENTS} segments, " +
+            "was ${segments.size}"
+    }
     for (segment in segments) {
         require(segment.isNotEmpty()) { "relativePath must not contain an empty segment" }
         require(segment != "." && segment != "..") { "relativePath must not contain a traversal segment" }

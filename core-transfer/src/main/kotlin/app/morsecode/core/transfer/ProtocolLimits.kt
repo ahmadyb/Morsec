@@ -43,6 +43,16 @@ public object ProtocolLimits {
     /** One path segment (file or directory name) may not be longer than this. */
     public const val MAX_PATH_SEGMENT_BYTES: Int = 127
 
+    /**
+     * A relative transfer path may not be deeper than this many segments.
+     *
+     * This bound is about the *shape* of a path rather than its length: a path is
+     * rebuilt one directory at a time on the receiving side, so an unbounded
+     * depth is an unbounded number of directory creations, and a deeply nested
+     * path is a way to hide a file where a user will not look for it.
+     */
+    public const val MAX_PATH_SEGMENTS: Int = 32
+
     /** Maximum encoded length of an error-detail string. */
     public const val MAX_ERROR_DETAIL_BYTES: Int = 256
 
@@ -83,8 +93,63 @@ public object ProtocolLimits {
     /** Default ceiling on automatic retries before a failure becomes final. */
     public const val DEFAULT_MAX_RETRY_COUNT: Int = 5
 
-    /** Largest file size the core will accept, 4 GiB - 1, as a safety rail. */
-    public const val MAX_FILE_SIZE_BYTES: Long = 4_294_967_295L
+    /**
+     * Largest file size the core will accept: 8 TiB - 1, as a safety rail.
+     *
+     * The value is deliberately *not* tied to the frame payload. Morsecode moves
+     * phone videos, archives, backups and disk images, all of which routinely
+     * exceed 4 GiB; an earlier 4 GiB - 1 ceiling was simply a 32-bit length
+     * field leaking into a `Long`-sized domain. Every size and offset in the
+     * core is a `Long`, and 8 TiB - 1 leaves more than three orders of magnitude
+     * of headroom over anything a phone holds today while staying far enough
+     * below `Long.MAX_VALUE` that no sum can overflow:
+     *
+     * ```
+     *   MAX_FILE_SIZE_BYTES + MAX_CHUNK_SIZE_BYTES
+     *     = 8_796_093_022_207 + 262_144
+     *     = 8_796_093_284_351        // Long.MAX_VALUE is 9_223_372_036_854_775_807
+     * ```
+     *
+     * Even so, no code path forms that sum speculatively: [checkedEnd] compares
+     * against `MAX_FILE_SIZE_BYTES - length` instead of adding, so an untrusted
+     * offset plus an untrusted length can never wrap into a small positive
+     * number.
+     */
+    public const val MAX_FILE_SIZE_BYTES: Long = 8_796_093_022_207L // 8 TiB - 1
+
+    /**
+     * Adds an offset and a chunk length without ever forming an overflowing sum.
+     *
+     * The comparison is rearranged to `offset <= MAX_FILE_SIZE_BYTES - length`,
+     * which cannot overflow because `length` is bounded and non-negative, and
+     * neither can the addition that follows it. Returns the exclusive end of the
+     * range, which is the only end any caller should compute.
+     *
+     * @throws IllegalArgumentException if either argument is negative, if
+     *   [length] exceeds the chunk ceiling, or if the range would run past the
+     *   largest file the core accepts.
+     */
+    public fun checkedEnd(offset: Long, length: Long): Long {
+        require(isValidRange(offset, length)) { "range $offset..$length is not addressable" }
+        return offset + length
+    }
+
+    /**
+     * True when `offset` and `length` describe a range inside the largest file
+     * the core accepts.
+     *
+     * The test is `offset <= MAX_FILE_SIZE_BYTES - length` rather than
+     * `offset + length <= MAX_FILE_SIZE_BYTES`: the subtraction cannot overflow
+     * because `length` is bounded and non-negative, so this answer is correct
+     * even for a length and an offset that were both read off the wire. Callers
+     * that must not throw use this first; [checkedEnd] is the throwing form for
+     * callers where an unaddressable range is a programming error.
+     */
+    public fun isValidRange(offset: Long, length: Long): Boolean =
+        offset >= 0L &&
+            length >= 0L &&
+            length <= MAX_CHUNK_SIZE_BYTES.toLong() &&
+            offset <= MAX_FILE_SIZE_BYTES - length
 
     /**
      * Converts a length read off the wire into an [Int] allocation size.
