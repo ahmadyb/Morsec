@@ -20,6 +20,7 @@ import java.io.FileNotFoundException
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -29,17 +30,19 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * The pending MediaStore destination, against a provider that really stores rows.
+ * The pending MediaStore destination under the two corrections.
  *
- * The behaviour under test is the ordering around `IS_PENDING`, because that flag
- * is the commit: while it is set the file is invisible, and clearing it is the
- * moment the user's gallery can see it. Publishing before verifying would put a
- * corrupt file under its final name where every app the user has granted can read
- * it, so the tests check that a blocked verification leaves the flag set.
+ * The first group is about descriptor ownership. Every phase must own one
+ * descriptor through one object and close it once, and the write descriptor must
+ * be gone before verification opens its own. The provider records, at each open,
+ * whether every descriptor it handed out earlier is already closed — which is
+ * what makes "closed before the next one opens" observable rather than asserted.
  *
- * The other thing pinned here is durability. `force(true)` succeeds on most
- * devices and it would be easy — and wrong — to report that as fsync-grade. These
- * tests assert the opposite directly.
+ * The second group is about the pending state. UNKNOWN is the state that must
+ * exist and must not be collapsed: failing to read IS_PENDING does not prove
+ * publication, and a query that throws does not prove the row is gone. Every
+ * UNKNOWN path is asserted to produce a reconciliation result and never a
+ * committed one, and never a deletion.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -47,11 +50,32 @@ class MediaStorePendingDestinationTest {
 
     internal class FakeMediaStoreProvider : ContentProvider() {
 
+        /** One open, and whether everything opened before it was already closed. */
+        internal data class OpenRecord(
+            val mode: String,
+            val descriptor: ParcelFileDescriptor,
+            val allPriorClosed: Boolean,
+        )
+
         val rows = LinkedHashMap<Long, ContentValues>()
         val files = LinkedHashMap<Long, File>()
-        val handedOut = mutableListOf<ParcelFileDescriptor>()
+        val handedOut = mutableListOf<OpenRecord>()
         var nextId = 1L
+
+        // --- how the provider misbehaves, one flag per race -------------------
         var throwSecurityOnOpen = false
+        var readOnlyOnWriteOpen = false
+        var throwOnQuery = false
+        var throwSecurityOnQuery = false
+        var queryReturnsNull = false
+        var omitPendingColumn = false
+        var updateReturnsZero = false
+        var throwOnUpdate = false
+        var deleteRowBeforeUpdate = false
+        var pendingAfterUpdate: Int? = null
+        /** Query ordinal after which queries start failing. Null never fails. */
+        var throwOnQueryAfter: Int? = null
+        var queryCount = 0
 
         override fun onCreate(): Boolean = true
 
@@ -73,8 +97,22 @@ class MediaStorePendingDestinationTest {
             selectionArgs: Array<out String>?,
             sortOrder: String?,
         ): Cursor? {
-            val row = rows[ContentUris.parseId(uri)] ?: return null
-            val columns = projection ?: COLUMNS
+            queryCount++
+            if (throwOnQueryAfter != null && queryCount > throwOnQueryAfter!!) {
+                throw IllegalStateException("provider failed on query $queryCount")
+            }
+            if (throwSecurityOnQuery) throw SecurityException("permission revoked")
+            if (throwOnQuery) throw IllegalStateException("provider failed")
+            if (queryReturnsNull) return null
+
+            val row = rows[ContentUris.parseId(uri)]
+                // An empty cursor is a conclusive answer: the row is not there.
+                ?: return MatrixCursor(projection ?: COLUMNS)
+
+            val requested = projection ?: COLUMNS
+            val columns = requested
+                .filterNot { omitPendingColumn && it == MediaStore.MediaColumns.IS_PENDING }
+                .toTypedArray()
             return MatrixCursor(columns).apply {
                 addRow(columns.map { column -> row.get(column) }.toTypedArray())
             }
@@ -86,15 +124,23 @@ class MediaStorePendingDestinationTest {
             selection: String?,
             selectionArgs: Array<out String>?,
         ): Int {
-            val row = rows[ContentUris.parseId(uri)] ?: return 0
+            if (deleteRowBeforeUpdate) {
+                val id = ContentUris.parseId(uri)
+                rows.remove(id)
+                files.remove(id)
+            }
+            if (throwOnUpdate) throw IllegalStateException("provider failed")
+            val id = ContentUris.parseId(uri)
+            val row = rows[id] ?: return 0
+            if (updateReturnsZero) return 0
             if (values != null) row.putAll(values)
+            pendingAfterUpdate?.let { row.put(MediaStore.MediaColumns.IS_PENDING, it) }
             return 1
         }
 
         override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
             val id = ContentUris.parseId(uri)
-            // The bytes go with the row, as they do in MediaStore: deleting a
-            // pending item that kept its file would leave an orphan nobody owns.
+            // The bytes go with the row, as they do in MediaStore.
             files.remove(id)
             return if (rows.remove(id) != null) 1 else 0
         }
@@ -112,8 +158,17 @@ class MediaStorePendingDestinationTest {
         ): ParcelFileDescriptor? {
             if (throwSecurityOnOpen) throw SecurityException("grant revoked")
             val file = files[ContentUris.parseId(uri)] ?: throw FileNotFoundException("gone")
-            val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE)
-            handedOut += descriptor
+            val flags = when {
+                mode == "r" -> ParcelFileDescriptor.MODE_READ_ONLY
+                mode == "rw" && readOnlyOnWriteOpen -> ParcelFileDescriptor.MODE_READ_ONLY
+                else -> ParcelFileDescriptor.MODE_READ_WRITE
+            }
+            val descriptor = ParcelFileDescriptor.open(file, flags)
+            handedOut += OpenRecord(
+                mode = mode,
+                descriptor = descriptor,
+                allPriorClosed = handedOut.all { !it.descriptor.fileDescriptor.valid() },
+            )
             return descriptor
         }
 
@@ -137,6 +192,8 @@ class MediaStorePendingDestinationTest {
     )
 
     private val collection: Uri get() = Uri.parse("content://$AUTHORITY/videos")
+
+    private val payload = ByteArray(2_048) { (it % 251).toByte() }
 
     @Before
     fun setUp() {
@@ -163,8 +220,8 @@ class MediaStorePendingDestinationTest {
     }
 
     private fun opened(uri: Uri): MediaStorePendingPartial {
-        val opened = MediaStorePendingDestination.open(resolver, uri, identity)
-        assertTrue("the pending row must reopen: $opened", opened is PendingOpen.Opened)
+        val opened = MediaStorePendingDestination.openForWrite(resolver, uri, identity)
+        assertTrue("the pending row must open for writing: $opened", opened is PendingOpen.Opened)
         return (opened as PendingOpen.Opened).partial
     }
 
@@ -174,154 +231,324 @@ class MediaStorePendingDestinationTest {
         return digester.digest()
     }
 
-    // --- creation -------------------------------------------------------------------------
-
-    @Test
-    fun `a created row is pending from the moment it exists`() {
-        val uri = createPending()
-        // Not "created and then flagged": there is no window in which a
-        // zero-byte file is visible under its final name.
-        assertTrue(MediaStorePendingDestination.isPending(resolver, uri))
+    private fun written(uri: Uri, bytes: ByteArray = payload) {
+        val partial = opened(uri)
+        assertTrue(partial.writeAt(0L, bytes, 0, bytes.size) is WriteOutcome.Written)
+        partial.close()
     }
 
+    // =========================================================================
+    // 1. Descriptor ownership — one owner per descriptor, one close
+    // =========================================================================
+
     @Test
-    fun `the pending flag survives writing`() {
+    fun `the write phase opens exactly one descriptor`() {
         val uri = createPending()
         val partial = opened(uri)
-        partial.writeAt(0L, ByteArray(1_024) { 0x11.toByte() }, 0, 1_024)
+
+        assertEquals(1, provider.handedOut.size)
+        assertEquals("rw", provider.handedOut.single().mode)
         partial.close()
-
-        assertTrue(MediaStorePendingDestination.isPending(resolver, uri))
-    }
-
-    // --- reopening --------------------------------------------------------------------------
-
-    @Test
-    fun `the recorded uri reopens the same bytes after the holder is gone`() {
-        // The recovery path after a process death: the only thing carried across
-        // is the Uri, so it has to be enough to find the bytes again.
-        val uri = createPending()
-        val payload = ByteArray(4_096) { (it % 251).toByte() }
-
-        val first = opened(uri)
-        first.writeAt(0L, payload, 0, payload.size)
-        first.close()
-
-        val second = opened(uri)
-        assertEquals(payload.size.toLong(), second.length())
-        val buffer = ByteArray(16)
-        val source = second.verificationSource()
-        assertEquals(16, source.read(2_000L, buffer, 0, 16))
-        assertTrue(payload.sliceArray(2_000 until 2_016).contentEquals(buffer))
-        second.close()
     }
 
     @Test
-    fun `a deleted row reopens as not found rather than as empty`() {
+    fun `verification reopens the uri rather than reusing the write descriptor`() {
         val uri = createPending()
-        provider.rows.clear()
-        provider.files.clear()
+        written(uri)
+        assertEquals("only the write descriptor should exist so far", 1, provider.handedOut.size)
 
-        val reopened = MediaStorePendingDestination.open(resolver, uri, identity)
-        assertTrue(reopened is PendingOpen.Refused)
-        assertEquals(
-            TransferStorageErrorCategory.NOT_FOUND,
-            (reopened as PendingOpen.Refused).error.category,
+        MediaStorePendingDestination.verify(
+            resolver = resolver,
+            uri = uri,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        assertEquals(2, provider.handedOut.size)
+        assertEquals("rw", provider.handedOut[0].mode)
+        assertEquals("r", provider.handedOut[1].mode)
+    }
+
+    @Test
+    fun `the write descriptor is closed before verification opens one`() {
+        val uri = createPending()
+        written(uri)
+
+        MediaStorePendingDestination.verify(
+            resolver = resolver,
+            uri = uri,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        val verificationOpen = provider.handedOut[1]
+        assertTrue(
+            "the write descriptor must be fully closed before verification opens, " +
+                "otherwise the two phases own the same file at the same time",
+            verificationOpen.allPriorClosed,
         )
     }
 
     @Test
-    fun `a revoked grant reopens as a permission failure rather than as missing`() {
+    fun `the two phases do not share a file position`() {
         val uri = createPending()
-        provider.throwSecurityOnOpen = true
+        val partial = opened(uri)
+        // Written out of order and finishing well past zero, so a reader that
+        // inherited the writer's position would read from the wrong place.
+        partial.writeAt(1_024L, payload, 1_024, 1_024)
+        partial.writeAt(0L, payload, 0, 1_024)
+        partial.close()
 
-        val reopened = MediaStorePendingDestination.open(resolver, uri, identity)
-        assertTrue(reopened is PendingOpen.Refused)
-        assertEquals(
-            TransferStorageErrorCategory.PERMISSION_REVOKED,
-            (reopened as PendingOpen.Refused).error.category,
+        val result = MediaStorePendingDestination.verify(
+            resolver = resolver,
+            uri = uri,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        assertTrue(
+            "verification must read from offset zero, not from wherever writing left off",
+            result is VerificationPhase.Completed && result.result is VerifyResult.Matched,
         )
     }
 
-    // --- writing ---------------------------------------------------------------------------------
-
     @Test
-    fun `a write after a resume lands at the offset it names`() {
+    fun `closing the write owner does not invalidate verification`() {
         val uri = createPending()
         val partial = opened(uri)
-        val payload = ByteArray(8_192) { (it % 251).toByte() }
-
-        // Two writes out of order, which is what a resumed transfer does.
-        partial.writeAt(4_096L, payload, 4_096, 4_096)
-        partial.writeAt(0L, payload, 0, 4_096)
-
-        assertEquals(8_192L, partial.length())
-        val buffer = ByteArray(16)
-        assertEquals(16, partial.verificationSource().read(4_100L, buffer, 0, 16))
-        assertTrue(payload.sliceArray(4_100 until 4_116).contentEquals(buffer))
+        partial.writeAt(0L, payload, 0, payload.size)
         partial.close()
+        assertEquals(1, partial.closeCount)
+
+        val result = MediaStorePendingDestination.verify(
+            resolver = resolver,
+            uri = uri,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+        assertTrue(result is VerificationPhase.Completed && result.result is VerifyResult.Matched)
     }
 
     @Test
-    fun `truncate discards everything past the frontier`() {
+    fun `a successful publication closes every descriptor it opened exactly once`() {
         val uri = createPending()
-        val partial = opened(uri)
-        partial.writeAt(0L, ByteArray(4_096), 0, 4_096)
-
-        val truncated = partial.truncateTo(1_024L)
-
-        assertTrue(truncated is TruncateOutcome.Truncated)
-        assertEquals(1_024L, (truncated as TruncateOutcome.Truncated).length)
-        partial.close()
-    }
-
-    // --- durability ----------------------------------------------------------------------------
-
-    @Test
-    fun `a successful flush through a provider is never reported durable`() {
-        val uri = createPending()
-        val partial = opened(uri)
-        partial.writeAt(0L, ByteArray(1_024), 0, 1_024)
-
-        val outcome = partial.flush()
-
-        // The single most important assertion in this file. The call succeeded,
-        // and that proves only that the provider accepted the bytes.
-        assertEquals(FlushDurability.FlushAttemptedGuaranteeUnknown, outcome)
-        assertTrue(FlushDurability.allowsCheckpoint(outcome))
-        assertEquals("unknown", FlushDurability.rowValue(outcome))
-        partial.close()
-    }
-
-    @Test
-    fun `a failed flush withholds both the checkpoint and the acknowledgement`() {
-        val uri = createPending()
-        val partial = opened(uri)
-        partial.writeAt(0L, ByteArray(1_024), 0, 1_024)
-        partial.close()
-
-        // The channel is closed, so the flush cannot succeed and must say so
-        // rather than returning the optimistic outcome.
-        val outcome = partial.flush()
-
-        assertTrue("a flush that failed must not be reported as durable: $outcome",
-            outcome is FlushDurability.FlushFailed)
-        assertFalse(FlushDurability.allowsCheckpoint(outcome))
-        assertFalse(FlushDurability.allowsAcknowledgement(outcome))
-        assertEquals("failed", FlushDurability.rowValue(outcome))
-    }
-
-    // --- publication ---------------------------------------------------------------------------
-
-    @Test
-    fun `publication verifies first and only then clears the pending flag`() {
-        val uri = createPending()
-        val payload = ByteArray(2_048) { (it % 251).toByte() }
         val partial = opened(uri)
         partial.writeAt(0L, payload, 0, payload.size)
         partial.close()
 
-        val published = MediaStorePendingDestination.publish(
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+        assertTrue(outcome is Publication.Published)
+
+        // One write descriptor from the test, one read descriptor from verify().
+        assertEquals(2, provider.handedOut.size)
+        provider.handedOut.forEach { record ->
+            assertFalse(
+                "a descriptor left open after publication is a leak",
+                record.descriptor.fileDescriptor.valid(),
+            )
+        }
+        assertEquals(1, partial.closeCount)
+    }
+
+    @Test
+    fun `a read owner closes its descriptor exactly once`() {
+        val uri = createPending()
+        written(uri)
+
+        val reader = MediaStorePendingDestination.openForRead(resolver, uri)
+        assertTrue(reader is PendingReadOpen.Opened)
+        val owned = (reader as PendingReadOpen.Opened).reader
+        owned.close()
+        owned.close()
+
+        assertEquals("closing twice must not close the descriptor twice", 1, owned.closeCount)
+    }
+
+    @Test
+    fun `an open failure leaves no descriptor open`() {
+        val uri = createPending()
+        provider.throwSecurityOnOpen = true
+
+        val opened = MediaStorePendingDestination.openForWrite(resolver, uri, identity)
+        assertTrue(opened is PendingOpen.Refused)
+        assertEquals(
+            TransferStorageErrorCategory.PERMISSION_REVOKED,
+            (opened as PendingOpen.Refused).error.category,
+        )
+        assertTrue("nothing may be opened on a refused path", provider.handedOut.isEmpty())
+    }
+
+    @Test
+    fun `a write failure leaves the write descriptor owned and closable once`() {
+        val uri = createPending()
+        provider.readOnlyOnWriteOpen = true
+        val partial = opened(uri)
+
+        val written = partial.writeAt(0L, payload, 0, payload.size)
+        assertTrue(
+            "a write that cannot be performed must be reported, not swallowed: $written",
+            written is WriteOutcome.Failed,
+        )
+
+        // The failure does not leak the descriptor; releasing the owner closes it,
+        // and a second release is a no-op rather than a double close.
+        partial.close()
+        partial.close()
+        assertEquals(1, partial.closeCount)
+        provider.handedOut.forEach { record ->
+            assertFalse(record.descriptor.fileDescriptor.valid())
+        }
+    }
+
+    @Test
+    fun `a flush failure closes the write descriptor when released`() {
+        val uri = createPending()
+        val partial = opened(uri)
+        partial.writeAt(0L, payload, 0, payload.size)
+        partial.close()
+
+        val outcome = partial.flush()
+        assertTrue(outcome is FlushDurability.FlushFailed)
+        assertFalse(FlushDurability.allowsCheckpoint(outcome))
+        assertFalse(FlushDurability.allowsAcknowledgement(outcome))
+
+        provider.handedOut.forEach { record ->
+            assertFalse(record.descriptor.fileDescriptor.valid())
+        }
+    }
+
+    @Test
+    fun `a verification failure closes the read descriptor`() {
+        val uri = createPending()
+        written(uri)
+
+        // Declared longer than the file, so verification fails part way through.
+        val result = MediaStorePendingDestination.verify(
+            resolver = resolver,
+            uri = uri,
+            expectedBytes = payload.size.toLong() * 2,
+            expected = null,
+        )
+        assertTrue(result is VerificationPhase.Completed && result.result is VerifyResult.Failed)
+
+        val readDescriptor = provider.handedOut.last()
+        assertEquals("r", readDescriptor.mode)
+        assertFalse(
+            "a verification failure must not leave the read descriptor open",
+            readDescriptor.descriptor.fileDescriptor.valid(),
+        )
+    }
+
+    @Test
+    fun `cancellation closes the active owner`() {
+        val uri = createPending()
+        val partial = opened(uri)
+        partial.writeAt(0L, payload, 0, 512)
+
+        // Cancelling is closing the owner mid-phase, and nothing else may be open.
+        partial.close()
+
+        assertEquals(1, partial.closeCount)
+        provider.handedOut.forEach { record ->
+            assertFalse(record.descriptor.fileDescriptor.valid())
+        }
+    }
+
+    @Test
+    fun `no descriptor remains open after abandonment`() {
+        val uri = createPending()
+        written(uri)
+
+        assertTrue(MediaStorePendingDestination.abandon(resolver, uri) is AbandonOutcome.Deleted)
+
+        provider.handedOut.forEach { record ->
+            assertFalse(record.descriptor.fileDescriptor.valid())
+        }
+    }
+
+    // =========================================================================
+    // 2. The pending state — UNKNOWN is not an answer
+    // =========================================================================
+
+    @Test
+    fun `a created row is pending`() {
+        val uri = createPending()
+        assertEquals(PendingState.PENDING, MediaStorePendingDestination.stateOf(resolver, uri))
+        assertTrue(MediaStorePendingDestination.isPending(resolver, uri))
+    }
+
+    @Test
+    fun `a cleared flag reads as published`() {
+        val uri = createPending()
+        provider.rows[1L]?.put(MediaStore.MediaColumns.IS_PENDING, 0)
+        assertEquals(PendingState.PUBLISHED, MediaStorePendingDestination.stateOf(resolver, uri))
+    }
+
+    @Test
+    fun `a row a completed query cannot find is missing`() {
+        val uri = createPending()
+        provider.rows.clear()
+        provider.files.clear()
+        assertEquals(PendingState.MISSING, MediaStorePendingDestination.stateOf(resolver, uri))
+    }
+
+    @Test
+    fun `a provider that omits IS_PENDING is unknown, not published`() {
+        val uri = createPending()
+        provider.omitPendingColumn = true
+
+        assertEquals(
+            "an unreadable pending value is not evidence of publication",
+            PendingState.UNKNOWN,
+            MediaStorePendingDestination.stateOf(resolver, uri),
+        )
+        assertFalse(MediaStorePendingDestination.isPending(resolver, uri))
+    }
+
+    @Test
+    fun `a query that throws is unknown, not missing`() {
+        val uri = createPending()
+        provider.throwOnQuery = true
+
+        assertEquals(
+            "an exception proves nothing was determined, so it must not become 'gone'",
+            PendingState.UNKNOWN,
+            MediaStorePendingDestination.stateOf(resolver, uri),
+        )
+    }
+
+    @Test
+    fun `a query that returns no cursor is unknown, not missing`() {
+        val uri = createPending()
+        provider.queryReturnsNull = true
+
+        assertEquals(PendingState.UNKNOWN, MediaStorePendingDestination.stateOf(resolver, uri))
+    }
+
+    @Test
+    fun `a revoked read permission during reconciliation is unknown, not missing`() {
+        val uri = createPending()
+        provider.throwSecurityOnQuery = true
+
+        assertEquals(PendingState.UNKNOWN, MediaStorePendingDestination.stateOf(resolver, uri))
+    }
+
+    // =========================================================================
+    // 3. Publication races
+    // =========================================================================
+
+    @Test
+    fun `verification passes and publication is confirmed`() {
+        val uri = createPending()
+        written(uri)
+
+        val outcome = MediaStorePendingDestination.publish(
             resolver = resolver,
             uri = uri,
             identity = identity,
@@ -329,43 +556,185 @@ class MediaStorePendingDestinationTest {
             expected = digestOf(payload),
         )
 
-        assertEquals(Publication.Published, published)
-        assertFalse("publishing must clear the flag", MediaStorePendingDestination.isPending(resolver, uri))
+        assertEquals(Publication.Published, outcome)
+        assertTrue(Publication.isCommitted(outcome))
+        assertEquals(PendingState.PUBLISHED, MediaStorePendingDestination.stateOf(resolver, uri))
     }
 
     @Test
-    fun `publication is blocked when the bytes do not match and the item stays hidden`() {
+    fun `a row deleted before publication is refused and never committed`() {
         val uri = createPending()
-        val payload = ByteArray(1_024) { 0x22.toByte() }
-        val partial = opened(uri)
-        partial.writeAt(0L, payload, 0, payload.size)
-        partial.close()
+        written(uri)
+        provider.rows.clear()
+        provider.files.clear()
 
-        // Declared longer than what is there: verification reads past the end.
-        val published = MediaStorePendingDestination.publish(
+        val outcome = MediaStorePendingDestination.publish(
             resolver = resolver,
             uri = uri,
             identity = identity,
-            expectedBytes = 2_048L,
-            expected = null,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
         )
 
-        assertTrue("a mismatched file must not be published: $published",
-            published is Publication.Blocked)
-        assertTrue(
-            "a blocked publication must leave the file hidden",
-            MediaStorePendingDestination.isPending(resolver, uri),
+        assertTrue(outcome is Publication.Refused)
+        assertEquals(
+            TransferStorageErrorCategory.NOT_FOUND,
+            (outcome as Publication.Refused).error.category,
         )
+        assertFalse("a missing row must never become COMMITTED", Publication.isCommitted(outcome))
     }
 
     @Test
-    fun `publication is idempotent when a restart interrupts it`() {
+    fun `a row deleted between the state query and the update is refused`() {
         val uri = createPending()
-        val payload = ByteArray(512) { 0x33.toByte() }
-        val partial = opened(uri)
-        partial.writeAt(0L, payload, 0, payload.size)
-        partial.close()
+        written(uri)
+        provider.deleteRowBeforeUpdate = true
 
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        assertTrue(
+            "deletion during publication must be detected by re-reading the state: $outcome",
+            outcome is Publication.Refused,
+        )
+        assertFalse(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `an update that reports zero rows is reconciled rather than assumed`() {
+        val uri = createPending()
+        written(uri)
+        provider.updateReturnsZero = true
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        // The flag is still set, so the update did not take effect and the row
+        // stays hidden rather than being reported as published.
+        assertTrue(
+            "a zero-row update must not be treated as success: $outcome",
+            outcome is Publication.Refused,
+        )
+        assertFalse(Publication.isCommitted(outcome))
+        assertEquals(PendingState.PENDING, MediaStorePendingDestination.stateOf(resolver, uri))
+    }
+
+    @Test
+    fun `an update that succeeds but leaves the flag set is refused`() {
+        val uri = createPending()
+        written(uri)
+        provider.pendingAfterUpdate = 1
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        assertTrue(outcome is Publication.Refused)
+        assertEquals(
+            "publication_not_effective",
+            ((outcome as Publication.Refused).error as TransferStorageError.StateConflict).reason,
+        )
+        assertFalse(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `a state that becomes unreadable after the update requires reconciliation`() {
+        val uri = createPending()
+        written(uri)
+        // The first state query succeeds and the update works; only the
+        // confirmation read is unavailable. That is the exact window in which
+        // taking the update's word would report success for an unverifiable row.
+        provider.throwOnQueryAfter = 1
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        assertTrue(
+            "a successful update without a confirmed state must not be reported as committed",
+            outcome is Publication.ReconciliationRequired,
+        )
+        assertEquals(PendingState.UNKNOWN, (outcome as Publication.ReconciliationRequired).state)
+        assertFalse(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `a provider that throws during the query requires reconciliation, never commitment`() {
+        val uri = createPending()
+        written(uri)
+        provider.throwOnQuery = true
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        assertTrue(outcome is Publication.ReconciliationRequired)
+        assertEquals(PendingState.UNKNOWN, (outcome as Publication.ReconciliationRequired).state)
+        assertFalse("UNKNOWN must never become COMMITTED", Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `a provider that omits IS_PENDING never produces a committed outcome`() {
+        val uri = createPending()
+        written(uri)
+        provider.omitPendingColumn = true
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        assertTrue(outcome is Publication.ReconciliationRequired)
+        assertFalse(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `a permission revoked during reconciliation is refused, not committed`() {
+        val uri = createPending()
+        written(uri)
+        provider.throwSecurityOnQuery = true
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+        )
+
+        assertTrue(outcome is Publication.ReconciliationRequired)
+        assertFalse(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `an already published row with a committed record is idempotent`() {
+        val uri = createPending()
+        written(uri)
         assertEquals(
             Publication.Published,
             MediaStorePendingDestination.publish(
@@ -373,42 +742,157 @@ class MediaStorePendingDestinationTest {
                 uri = uri,
                 identity = identity,
                 expectedBytes = payload.size.toLong(),
-                expected = null,
+                expected = digestOf(payload),
             ),
         )
 
         // The second call is what a process that died between clearing the flag
-        // and recording COMMITTED looks like. It must not republish, and it must
-        // not be mistaken for a failure to retry.
-        assertEquals(
-            Publication.AlreadyPublished,
-            MediaStorePendingDestination.publish(
-                resolver = resolver,
-                uri = uri,
-                identity = identity,
-                expectedBytes = payload.size.toLong(),
-                expected = null,
-            ),
-        )
-    }
-
-    @Test
-    fun `publication of a deleted row is refused rather than silently succeeding`() {
-        val uri = createPending()
-        provider.rows.clear()
-        provider.files.clear()
-
-        val published = MediaStorePendingDestination.publish(
+        // and recording COMMITTED looks like.
+        val again = MediaStorePendingDestination.publish(
             resolver = resolver,
             uri = uri,
             identity = identity,
-            expectedBytes = 0L,
-            expected = null,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+            recorded = CommitState.COMMITTED,
         )
-        assertTrue(published is Publication.Refused)
+        assertEquals(Publication.AlreadyPublished, again)
+        assertTrue(Publication.isCommitted(again))
     }
 
-    // --- the API boundary -------------------------------------------------------------------------
+    @Test
+    fun `a published row with no committed record is accepted only after an identity check`() {
+        val uri = createPending()
+        written(uri)
+        provider.rows[1L]?.put(MediaStore.MediaColumns.IS_PENDING, 0)
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+            recorded = CommitState.READY_TO_COMMIT,
+        )
+
+        // A digest match is an identity check; a byte count alone would not be.
+        assertEquals(Publication.ExternallyCompleted, outcome)
+        assertTrue(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `a published row whose bytes do not match is inconsistent, not committed`() {
+        val uri = createPending()
+        written(uri)
+        provider.rows[1L]?.put(MediaStore.MediaColumns.IS_PENDING, 0)
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(ByteArray(payload.size) { 0x00 }),
+            recorded = CommitState.READY_TO_COMMIT,
+        )
+
+        assertTrue(outcome is Publication.Inconsistent)
+        assertFalse(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `a published row with no digest available is inconsistent rather than assumed`() {
+        val uri = createPending()
+        written(uri)
+        provider.rows[1L]?.put(MediaStore.MediaColumns.IS_PENDING, 0)
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = null,
+            recorded = CommitState.READY_TO_COMMIT,
+        )
+
+        assertTrue(
+            "a byte count is not an identity, so this must not be accepted: $outcome",
+            outcome is Publication.Inconsistent,
+        )
+        assertFalse(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `a committed record while the provider still says pending is inconsistent`() {
+        val uri = createPending()
+        written(uri)
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong(),
+            expected = digestOf(payload),
+            recorded = CommitState.COMMITTED,
+        )
+
+        assertTrue(outcome is Publication.Inconsistent)
+        assertEquals(PendingState.PENDING, (outcome as Publication.Inconsistent).observed)
+        assertFalse(Publication.isCommitted(outcome))
+    }
+
+    @Test
+    fun `verification failure blocks publication and leaves the file hidden`() {
+        val uri = createPending()
+        written(uri)
+
+        val outcome = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = uri,
+            identity = identity,
+            expectedBytes = payload.size.toLong() * 2,
+            expected = null,
+        )
+
+        assertTrue(outcome is Publication.Blocked)
+        assertFalse(Publication.isCommitted(outcome))
+        assertEquals(
+            "a blocked publication must leave the file hidden",
+            PendingState.PENDING,
+            MediaStorePendingDestination.stateOf(resolver, uri),
+        )
+    }
+
+    // =========================================================================
+    // 4. Abandonment and the API boundary
+    // =========================================================================
+
+    @Test
+    fun `an unknown row is never automatically deleted`() {
+        val uri = createPending()
+        provider.queryReturnsNull = true
+
+        val outcome = MediaStorePendingDestination.abandon(resolver, uri)
+
+        assertTrue(outcome is AbandonOutcome.ReconciliationRequired)
+        assertEquals(PendingState.UNKNOWN, (outcome as AbandonOutcome.ReconciliationRequired).state)
+        // Still there: an unreadable row must not be reaped.
+        assertNotNull(provider.rows[1L])
+    }
+
+    @Test
+    fun `a missing row is already gone rather than deleted`() {
+        val uri = createPending()
+        provider.rows.clear()
+        provider.files.clear()
+        assertEquals(AbandonOutcome.AlreadyGone, MediaStorePendingDestination.abandon(resolver, uri))
+    }
+
+    @Test
+    fun `abandon deletes a row that is known to be there`() {
+        val uri = createPending()
+        assertEquals(AbandonOutcome.Deleted, MediaStorePendingDestination.abandon(resolver, uri))
+        assertEquals(AbandonOutcome.AlreadyGone, MediaStorePendingDestination.abandon(resolver, uri))
+    }
 
     @Test
     fun `below API 29 the pending destination refuses rather than falling back`() {
@@ -426,52 +910,59 @@ class MediaStorePendingDestinationTest {
             TransferStorageErrorCategory.UNSUPPORTED,
             (created as PendingCreation.Refused).error.category,
         )
+
+        val published = MediaStorePendingDestination.publish(
+            resolver = resolver,
+            uri = createPending(),
+            identity = identity,
+            expectedBytes = 0L,
+            expected = null,
+            sdk = 28,
+        )
+        assertTrue(published is Publication.Refused)
+        assertFalse(Publication.isCommitted(published))
     }
 
-    // --- abandonment -------------------------------------------------------------------------------
+    // =========================================================================
+    // 5. Durability retained
+    // =========================================================================
 
     @Test
-    fun `abandon deletes the row and nothing else does`() {
+    fun `a successful flush through a provider is never reported durable`() {
         val uri = createPending()
-        assertTrue(MediaStorePendingDestination.abandon(resolver, uri))
-
-        assertEquals(PendingState.MISSING, MediaStorePendingDestination.stateOf(resolver, uri))
-        assertFalse(MediaStorePendingDestination.isPending(resolver, uri))
-        assertTrue(MediaStorePendingDestination.open(resolver, uri, identity) is PendingOpen.Refused)
-    }
-
-    @Test
-    fun `abandon is idempotent`() {
-        val uri = createPending()
-        assertTrue(MediaStorePendingDestination.abandon(resolver, uri))
-        assertFalse(MediaStorePendingDestination.abandon(resolver, uri))
-    }
-
-    // --- closure -----------------------------------------------------------------------------------
-
-    @Test
-    fun `every descriptor handed out is closed`() {
-        val uri = createPending()
-
         val partial = opened(uri)
-        partial.writeAt(0L, ByteArray(64), 0, 64)
+        partial.writeAt(0L, payload, 0, payload.size)
+
+        val outcome = partial.flush()
+
+        // The call succeeded, and that proves only that the provider accepted
+        // the bytes. Never fsync-grade.
+        assertEquals(FlushDurability.FlushAttemptedGuaranteeUnknown, outcome)
+        assertTrue(FlushDurability.allowsCheckpoint(outcome))
+        assertEquals("unknown", FlushDurability.rowValue(outcome))
+        partial.close()
+    }
+
+    @Test
+    fun `a resumed write lands at the offset it names`() {
+        val uri = createPending()
+        val partial = opened(uri)
+        val bytes = ByteArray(8_192) { (it % 251).toByte() }
+
+        // Out of order, which is what resuming does.
+        partial.writeAt(4_096L, bytes, 4_096, 4_096)
+        partial.writeAt(0L, bytes, 0, 4_096)
+        assertEquals(8_192L, partial.length())
         partial.close()
 
-        val republished = MediaStorePendingDestination.publish(
+        // The digest over the whole file is what proves both halves landed.
+        val verified = MediaStorePendingDestination.verify(
             resolver = resolver,
             uri = uri,
-            identity = identity,
-            expectedBytes = 64L,
-            expected = null,
+            expectedBytes = bytes.size.toLong(),
+            expected = digestOf(bytes),
         )
-        assertTrue(republished is Publication.Published)
-
-        provider.handedOut.forEach { descriptor ->
-            assertFalse(
-                "a descriptor left open after publication is a leak",
-                descriptor.fileDescriptor.valid(),
-            )
-        }
+        assertTrue(verified is VerificationPhase.Completed && verified.result is VerifyResult.Matched)
     }
 
     private companion object {
