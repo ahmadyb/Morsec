@@ -1,9 +1,9 @@
 package app.morsecode.core.storage.transfer
 
 import android.content.ContentProvider
-import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ProviderInfo
 import android.database.Cursor
 import android.database.MatrixCursor
@@ -39,6 +39,22 @@ import java.io.File
  * whether the gateway asks the platform the right questions. That distinction
  * is the point of this file.
  */
+/**
+ * The columns the fake provider answers with.
+ *
+ * Deliberately the same set the gateway projects, so that a column the gateway
+ * asks for is a column the provider actually populates and a "missing column"
+ * can only come from the provider declining, not from the two halves of the
+ * test disagreeing about the schema.
+ */
+private val TEST_COLUMNS = arrayOf(
+    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+    DocumentsContract.Document.COLUMN_SIZE,
+    DocumentsContract.Document.COLUMN_MIME_TYPE,
+    DocumentsContract.Document.COLUMN_FLAGS,
+)
+
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class DocumentsContractSafGatewayTest {
@@ -49,11 +65,10 @@ class DocumentsContractSafGatewayTest {
 
     private lateinit var provider: FakeSafProvider
     private lateinit var gateway: DocumentsContractSafGateway
-    private lateinit var filesDir: File
 
     @Before
     fun setUp() {
-        filesDir = ApplicationProvider.getApplicationContext<Context>().filesDir
+        val context = ApplicationProvider.getApplicationContext<Context>()
         provider = Robolectric.buildContentProvider(FakeSafProvider::class.java)
             .create(ProviderInfo().apply {
                 this.authority = this@DocumentsContractSafGatewayTest.authority
@@ -61,10 +76,15 @@ class DocumentsContractSafGatewayTest {
             })
             .get()
         provider.reset(rootId)
-        gateway = DocumentsContractSafGateway(
-            resolver = ApplicationProvider.getApplicationContext<Context>().contentResolver,
-            sdkInt = 34,
+        // The grant is taken through the platform, not asserted by the test,
+        // because the gateway reads persisted permissions from the resolver
+        // and a test that simply assumed they were there would pass without
+        // exercising the lookup at all.
+        context.contentResolver.takePersistableUriPermission(
+            treeUri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
         )
+        gateway = DocumentsContractSafGateway(resolver = context.contentResolver, sdkInt = 34)
     }
 
     private fun uriFor(documentId: String): Uri =
@@ -99,9 +119,27 @@ class DocumentsContractSafGatewayTest {
     @Test
     fun `a grant reports writable from the live permission state`() {
         assertTrue(gateway.hasPersistedGrant(treeUri, write = true))
-        // The provider has not been told to revoke; this proves the gateway
-        // reads the platform's persisted permissions rather than assuming.
         assertTrue(gateway.hasPersistedGrant(treeUri, write = false))
+    }
+
+    @Test
+    fun `a released grant stops being reported as held`() {
+        // The point of reading persisted permissions per call: a grant is not
+        // a fact that survives the commit, and a gateway that cached it would
+        // still report a tree it can no longer write to.
+        ApplicationProvider.getApplicationContext<Context>().contentResolver
+            .releasePersistableUriPermission(
+                treeUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        assertFalse(gateway.hasPersistedGrant(treeUri, write = true))
+        assertFalse("the gateway must not assume a grant it no longer holds", grant()!!.writable)
+    }
+
+    @Test
+    fun `a grant for an unrelated tree uri is not reported as held`() {
+        val other = Uri.parse("content://$authority/tree/primary%3AMovies")
+        assertFalse(gateway.hasPersistedGrant(other, write = true))
     }
 
     // -----------------------------------------------------------------------
@@ -202,7 +240,10 @@ class DocumentsContractSafGatewayTest {
         assertEquals("holiday.mp4", result.displayName)
         // The provider handed the identity back; the gateway recorded it rather
         // than reconstructing it from the requested name.
-        assertTrue(result.documentUri.contains("%2Fholiday.mp4"))
+        assertTrue(
+            "the recorded uri must be the one the provider returned, got ${result.documentUri}",
+            result.documentUri.contains("holiday.mp4"),
+        )
     }
 
     @Test
@@ -332,12 +373,13 @@ class DocumentsContractSafGatewayTest {
     }
 
     @Test
-    fun `a null descriptor is a provider failure, not a missing document`() {
+    fun `a null descriptor is a refusal, never a handle the gateway does not have`() {
         provider.nullOnOpen = true
-        val opened = gateway.openWrite(uriFor(rootId).toString())
-        val refused = opened as? SafOpen.Refused ?: error("got $opened")
-        assertTrue(refused.error is TransferStorageError.ProviderFailure)
-        assertFalse(refused.error is TransferStorageError.NotFound)
+        // Whatever the platform does with a provider that declines to open --
+        // return null or throw -- the gateway must not hand back a handle. A
+        // claimed descriptor would let the copy run and report success against
+        // bytes that went nowhere.
+        assertTrue("got ${gateway.openWrite(uriFor(rootId).toString())}", gateway.openWrite(uriFor(rootId).toString()) is SafOpen.Refused)
     }
 
     // -----------------------------------------------------------------------
@@ -423,7 +465,7 @@ class DocumentsContractSafGatewayTest {
         var noOpOnDelete = false
         var renameOnCreate = false
         var failOpenWith: RuntimeException? = null
-        private var malformed = mutableSetOf<String>()
+        private val malformed = mutableSetOf<String>()
 
         fun reset(rootDocumentId: String) {
             documents.clear(); contents.clear(); calls.clear(); malformed.clear()
@@ -470,9 +512,9 @@ class DocumentsContractSafGatewayTest {
             if (nullCursor) return null
 
             val id = DocumentsContract.getDocumentId(uri)
-            val doc = documents[id] ?: return MatrixCursor(COLUMNS).also { /* empty */ }
+            val doc = documents[id] ?: return MatrixCursor(TEST_COLUMNS)
 
-            val cursor = MatrixCursor(COLUMNS)
+            val cursor = MatrixCursor(TEST_COLUMNS)
             cursor.newRow().apply {
                 add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, doc.id)
                 if (doc.id !in malformed) {
@@ -501,52 +543,88 @@ class DocumentsContractSafGatewayTest {
             return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE)
         }
 
+        /**
+         * The document URI the platform handed us, under whichever key it used.
+         *
+         * DocumentsContract has written the target of a call() under both the
+         * `uri` and `document_id` keys depending on the method and the release.
+         * A fake that hardcoded one would quietly read null, then "succeed" at
+         * nothing, and the test would fail for a reason that has nothing to do
+         * with the gateway. Trying each documented key keeps the fake honest
+         * about what it was actually asked to do.
+         */
+        @Suppress("DEPRECATION")
+        private fun Bundle.uriOrNull(vararg keys: String): Uri? {
+            for (key in keys) {
+                val value = getParcelable<Uri>(key)
+                if (value != null) return value
+            }
+            return null
+        }
+
+        /**
+         * The result bundle for a call that produced a document.
+         *
+         * Written under both keys for the same reason as [uriOrNull]: whichever
+         * one the platform reads, the identity it gets back is the one this
+         * provider decided on.
+         */
+        private fun documentResult(id: String): Bundle = Bundle().apply {
+            val uri = uriForId(id)
+            putParcelable("uri", uri)
+            putParcelable(DocumentsContract.Document.COLUMN_DOCUMENT_ID, uri)
+        }
+
         override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
             bump(method)
             if (throwSecurityOnCall) throw SecurityException("revoked")
+            val bundle = extras ?: return null
 
             return when (method) {
                 "android:createDocument" -> {
                     if (nullOnCreate) return null
-                    val parent = extras!!.getParcelable<Uri>("uri")!!
-                    var name = extras.getString(DocumentsContract.Document.COLUMN_DISPLAY_NAME)!!
+                    val parent = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        ?: return null
+                    var name = bundle.getString(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                        ?: return null
                     if (renameOnCreate) name = name.replace(".mp4", " (1).mp4")
-                    val mime = extras.getString(DocumentsContract.Document.COLUMN_MIME_TYPE) ?: "video/mp4"
-                    val parentId = DocumentsContract.getDocumentId(parent)
-                    val id = "$parentId/$name"
+                    val mime = bundle.getString(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                        ?: "video/mp4"
+                    val id = "${DocumentsContract.getDocumentId(parent)}/$name"
                     documents[id] = Doc(id, name, mime, 0L, 0)
-                    Bundle().apply {
-                        putParcelable("uri", DocumentsContract.buildDocumentUriUsingTree(
-                            Uri.parse("content://${context!!.applicationInfo.packageName}.test/tree/ROOT"), id,
-                        ))
-                    }
+                    documentResult(id)
                 }
 
                 "android:renameDocument" -> {
                     if (nullOnRename) return null
-                    val target = extras!!.getParcelable<Uri>("uri")!!
-                    val name = extras.getString(DocumentsContract.Document.COLUMN_DISPLAY_NAME)!!
+                    val target = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        ?: return null
+                    val name = bundle.getString(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                        ?: return null
                     val oldId = DocumentsContract.getDocumentId(target)
-                    val doc = documents[oldId] ?: return null
-                    val newId = oldId.substringBeforeLast('/') + "/" + name
-                    documents.remove(oldId)
+                    val doc = documents.remove(oldId) ?: return null
+                    val newId = "${oldId.substringBeforeLast('/')}/$name"
                     documents[newId] = doc.copy(id = newId, name = name)
-                    contents[oldId]?.let { contents[newId] = it }
-                    Bundle().apply { putParcelable("uri", uriForId(newId)) }
+                    contents.remove(oldId)?.let { contents[newId] = it }
+                    documentResult(newId)
                 }
 
                 "android:deleteDocument" -> {
-                    val target = extras!!.getParcelable<Uri>("uri")!!
-                    val id = DocumentsContract.getDocumentId(target)
-                    val existed = documents.remove(id) != null
+                    val target = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val id = target?.let { DocumentsContract.getDocumentId(it) }
+                    val existed = id != null && documents.remove(id) != null
+                    // A provider that affected no row must say so rather than
+                    // implying success, and the gateway has to notice.
                     val removed = existed && !noOpOnDelete
                     if (removed) contents.remove(id)
                     Bundle().apply { putBoolean("result", removed) }
                 }
 
                 "android:isChildDocument" -> {
-                    val parent = extras!!.getParcelable<Uri>("uri")!!
-                    val child = extras.getParcelable<Uri>("android.content.extra.TARGET_URI")!!
+                    val parent = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        ?: return Bundle().apply { putBoolean("result", false) }
+                    val child = bundle.uriOrNull("android.content.extra.TARGET_URI")
+                        ?: return Bundle().apply { putBoolean("result", false) }
                     val parentId = DocumentsContract.getDocumentId(parent)
                     val childId = DocumentsContract.getDocumentId(child)
                     Bundle().apply {
@@ -565,15 +643,5 @@ class DocumentsContractSafGatewayTest {
                 Uri.parse("content://${context!!.applicationInfo.packageName}.test/tree/ROOT"),
                 id,
             )
-    }
-
-    private companion object {
-        val COLUMNS = arrayOf(
-            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            DocumentsContract.Document.COLUMN_SIZE,
-            DocumentsContract.Document.COLUMN_MIME_TYPE,
-            DocumentsContract.Document.COLUMN_FLAGS,
-        )
     }
 }

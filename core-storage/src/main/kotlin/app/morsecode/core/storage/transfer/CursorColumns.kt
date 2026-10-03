@@ -24,3 +24,16 @@ internal fun Cursor.longOrNull(column: String): Long? {
     val index = getColumnIndex(column)
     return if (index < 0 || isNull(index)) null else getLong(index)
 }
+
+/**
+ * The column's value as an Int, or null when the column is absent or NULL.
+ *
+ * Flags are the reason this must stay nullable: a document that omits
+ * COLUMN_FLAGS has not declared itself free of FLAG_SUPPORTS_RENAME, so
+ * treating a missing flags column as zero would report a capability the
+ * provider never denied.
+ */
+internal fun Cursor.intOrNull(column: String): Int? {
+    val index = getColumnIndex(column)
+    return if (index < 0 || isNull(index)) null else getInt(index)
+}
