@@ -583,7 +583,7 @@ class SafContainmentTest {
         val evidence = SafDestinationResolver.validateExistingUri(
             grant,
             documentUri("target-opaque-b913"),
-            pathProver("root-id", listOf("root-id", "child-opaque-74a2", "target-opaque-b913")),
+            pathProver(rootId, listOf(rootId, "child-opaque-74a2", "target-opaque-b913")),
             27,
         )
         val result = evidence as? SafContainmentEvidence.ProviderConfirmedPath
@@ -597,21 +597,36 @@ class SafContainmentTest {
         val evidence = SafDestinationResolver.validateExistingUri(
             grant,
             documentUri("target-opaque-b913"),
-            pathProver("root-id", listOf("root-id", "child-opaque-74a2", "some-other-opaque")),
+            pathProver(rootId, listOf(rootId, "child-opaque-74a2", "some-other-opaque")),
             27,
         )
         assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
     }
 
     @Test
-    fun `a path whose root is not the approved root is unknown`() {
+    fun `a provider root id that disagrees with the grant root id is unknown`() {
+        // Only comparable when the grant knows its own root id; both namespaces
+        // must be root ids for the comparison to mean anything.
+        val grantWithRoot = grant.copy(rootId = "primary")
         val evidence = SafDestinationResolver.validateExistingUri(
-            grant,
+            grantWithRoot,
             documentUri("target-opaque-b913"),
-            pathProver("other-root-id", listOf("root-id", "target-opaque-b913")),
+            pathProver("secondary", listOf(rootId, "target-opaque-b913")),
             27,
         )
         assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a matching provider root id does not by itself reject a path`() {
+        val grantWithRoot = grant.copy(rootId = "primary")
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grantWithRoot,
+            documentUri("target-opaque-b913"),
+            pathProver("primary", listOf(rootId, "target-opaque-b913")),
+            27,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.ProviderConfirmedPath)
     }
 
     @Test
@@ -638,7 +653,7 @@ class SafContainmentTest {
         val evidence = SafDestinationResolver.validateExistingUri(
             grant,
             documentUri("child-opaque-74a2"),
-            pathProver("root-id", listOf("root-id", "child-opaque-74a2", "child-opaque-74a2")),
+            pathProver(rootId, listOf(rootId, "child-opaque-74a2", "child-opaque-74a2")),
             27,
         )
         assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
@@ -650,7 +665,7 @@ class SafContainmentTest {
             val evidence = SafDestinationResolver.validateExistingUri(
                 grant,
                 documentUri("target-opaque-b913"),
-                pathProver("root-id", listOf("root-id", bad, "target-opaque-b913")),
+                pathProver(rootId, listOf(rootId, bad, "target-opaque-b913")),
                 27,
             )
             assertTrue("entry '$bad' must be unknown, got $evidence",

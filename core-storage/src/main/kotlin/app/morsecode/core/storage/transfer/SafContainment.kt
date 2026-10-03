@@ -450,6 +450,15 @@ public data class SafTreeGrant(
     public val rootDocumentId: String,
     public val authority: String,
     public val writable: Boolean,
+    /**
+     * The provider's own root identifier, when known.
+     *
+     * A different namespace from [rootDocumentId]: DocumentsContract.Path
+     * reports a *root* id alongside a list of *document* ids, and comparing a
+     * root id against a document id is meaningless. Recorded separately so the
+     * comparison can be made correctly, or skipped when we do not know it.
+     */
+    public val rootId: String? = null,
 )
 
 // ---------------------------------------------------------------------------
@@ -706,7 +715,7 @@ public object SafDestinationResolver {
                 SafContainmentTier.DOCUMENT_PATH -> when (
                     val answer = prover.documentPath(targetUri.toUri())
                 ) {
-                    is SafPathAnswer.Resolved -> evaluatePath(rootId, targetId, targetUri, answer)
+                    is SafPathAnswer.Resolved -> evaluatePath(rootId, targetId, targetUri, answer, grant.rootId)
                     SafPathAnswer.Revoked -> SafContainmentEvidence.PermissionRevoked(
                         rootId, targetId, targetUri,
                         TransferStorageError.PermissionRevoked("write"),
@@ -755,6 +764,7 @@ public object SafDestinationResolver {
         targetId: String,
         targetUri: String,
         answer: SafPathAnswer.Resolved,
+        grantRootId: String?,
     ): SafContainmentEvidence {
         val segments = answer.segments
 
@@ -762,14 +772,17 @@ public object SafDestinationResolver {
             return unknownPath(rootId, targetId, targetUri)
         }
 
-        // A provider that names a different root is describing somewhere else.
-        // That is an inconsistency to be distrusted, not a proven contradiction.
-        if (answer.rootId != null && answer.rootId != rootId) {
+        // A provider root id is only comparable with a grant root id, never
+        // with a document id. Compared only when both are known; skipped
+        // otherwise rather than guessed at.
+        if (grantRootId != null && answer.rootId != null && grantRootId != answer.rootId) {
             return unknownPath(rootId, targetId, targetUri)
         }
 
-        // The path not starting at the approved root is conclusive: the
-        // provider has described an ancestry that does not include our grant.
+        // The path not starting at the approved root document is conclusive:
+        // the provider has described an ancestry that does not include our
+        // grant. This is the root check that actually works for opaque ids,
+        // because it compares document ids with document ids.
         if (segments.first() != rootId) {
             return SafContainmentEvidence.Outside(rootId, targetId, targetUri)
         }

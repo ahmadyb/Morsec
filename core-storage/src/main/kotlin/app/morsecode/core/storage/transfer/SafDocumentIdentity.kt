@@ -102,6 +102,14 @@ public object SafDocumentIdentityPolicy {
             if (presentedDocumentUri.toUri().authority != identity.authority) {
                 return SafContainmentDecision.REJECTED
             }
+            // The id inside the presented uri must be the recorded one. A uri
+            // that looks right but names a different document is a different
+            // document: this is what stops a stale record matching a
+            // replacement that happens to sit at a similar-looking uri.
+            val presentedId = SafContainment.documentIdOf(presentedDocumentUri.toUri())
+            if (presentedId == null || presentedId != identity.documentId) {
+                return SafContainmentDecision.REJECTED
+            }
         }
 
         // Deletion demands the exact stored identity, named explicitly. There
