@@ -385,6 +385,35 @@ class MediaStorePendingDestinationTest {
     }
 
     @Test
+    fun `a deleted row reopens as not found rather than as a provider failure`() {
+        val uri = createPending()
+        provider.rows.clear()
+        provider.files.clear()
+
+        val reopened = MediaStorePendingDestination.openForWrite(resolver, uri, identity)
+        assertTrue(reopened is PendingOpen.Refused)
+        assertEquals(
+            "a deleted row is a restart, not a retry",
+            TransferStorageErrorCategory.NOT_FOUND,
+            (reopened as PendingOpen.Refused).error.category,
+        )
+    }
+
+    @Test
+    fun `a read reopen of a deleted row is not found rather than empty`() {
+        val uri = createPending()
+        provider.rows.clear()
+        provider.files.clear()
+
+        val reopened = MediaStorePendingDestination.openForRead(resolver, uri)
+        assertTrue(reopened is PendingReadOpen.Refused)
+        assertEquals(
+            TransferStorageErrorCategory.NOT_FOUND,
+            (reopened as PendingReadOpen.Refused).error.category,
+        )
+    }
+
+    @Test
     fun `a write failure leaves the write descriptor owned and closable once`() {
         val uri = createPending()
         provider.readOnlyOnWriteOpen = true

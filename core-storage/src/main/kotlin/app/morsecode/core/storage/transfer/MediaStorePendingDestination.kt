@@ -304,6 +304,12 @@ public class PendingReader internal constructor(
     }
 }
 
+/** What opening a phase descriptor produced, keeping the reason for a failure. */
+private sealed interface DescriptorOpen {
+    public data class Opened(public val descriptor: ParcelFileDescriptor) : DescriptorOpen
+    public data class Refused(public val error: TransferStorageError) : DescriptorOpen
+}
+
 /**
  * Creates, writes, verifies, publishes and abandons pending MediaStore rows.
  *
@@ -316,6 +322,9 @@ public object MediaStorePendingDestination {
 
     /** The first SDK with a pending mechanism. */
     public const val MIN_SDK: Int = 29
+
+    private const val WRITE_MODE = "rw"
+    private const val READ_MODE = "r"
 
     public fun isAvailable(sdk: Int = Build.VERSION.SDK_INT): Boolean = sdk >= MIN_SDK
 
@@ -381,13 +390,10 @@ public object MediaStorePendingDestination {
                 TransferStorageError.Unsupported("media_store_pending"),
             )
         }
-        val descriptor = openDescriptor(resolver, uri, "rw")
-            ?: return PendingOpen.Refused(
-                TransferStorageError.ProviderFailure(
-                    "media_store",
-                    "openFileDescriptor returned null",
-                ),
-            )
+        val descriptor = when (val opened = openDescriptor(resolver, uri, WRITE_MODE)) {
+            is DescriptorOpen.Opened -> opened.descriptor
+            is DescriptorOpen.Refused -> return PendingOpen.Refused(opened.error)
+        }
         return try {
             // One owner. AutoCloseOutputStream closes the descriptor when the
             // stream is closed, and OwnedResource closes the stream exactly once.
@@ -424,13 +430,10 @@ public object MediaStorePendingDestination {
                 TransferStorageError.Unsupported("media_store_pending"),
             )
         }
-        val descriptor = openDescriptor(resolver, uri, "r")
-            ?: return PendingReadOpen.Refused(
-                TransferStorageError.ProviderFailure(
-                    "media_store",
-                    "openFileDescriptor returned null",
-                ),
-            )
+        val descriptor = when (val opened = openDescriptor(resolver, uri, READ_MODE)) {
+            is DescriptorOpen.Opened -> opened.descriptor
+            is DescriptorOpen.Refused -> return PendingReadOpen.Refused(opened.error)
+        }
         return try {
             val stream = ParcelFileDescriptor.AutoCloseInputStream(descriptor)
             val resource = OwnedResource(stream)
@@ -656,20 +659,38 @@ public object MediaStorePendingDestination {
         }
     }
 
+    /**
+     * Opens a descriptor, keeping the reason it failed.
+     *
+     * Returning null for every failure would collapse a revoked grant, a deleted
+     * row and a provider crash into one "the provider failed" answer — and those
+     * three have three different recoveries: ask the user, restart, and retry.
+     */
     private fun openDescriptor(
         resolver: ContentResolver,
         uri: Uri,
         mode: String,
-    ): ParcelFileDescriptor? = try {
-        resolver.openFileDescriptor(uri, mode)
+    ): DescriptorOpen = try {
+        val descriptor = resolver.openFileDescriptor(uri, mode)
+            ?: return DescriptorOpen.Refused(
+                TransferStorageError.ProviderFailure(
+                    "media_store",
+                    "openFileDescriptor returned null",
+                ),
+            )
+        DescriptorOpen.Opened(descriptor)
     } catch (e: SecurityException) {
-        null
+        DescriptorOpen.Refused(
+            TransferStorageError.PermissionRevoked(if (mode == READ_MODE) "read" else "write"),
+        )
     } catch (e: FileNotFoundException) {
-        null
+        DescriptorOpen.Refused(TransferStorageError.NotFound("partial"))
     } catch (e: IOException) {
-        null
+        DescriptorOpen.Refused(TransferStorageError.Io("open", e.message))
     } catch (e: IllegalArgumentException) {
-        null
+        DescriptorOpen.Refused(
+            TransferStorageError.ProviderFailure("media_store", e.message),
+        )
     }
 
     /**
