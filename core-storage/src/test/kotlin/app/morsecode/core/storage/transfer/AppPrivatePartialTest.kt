@@ -295,17 +295,25 @@ class AppPrivatePartialTest {
         val store = store()
         val partial = store.open(identity)
         val file = store.fileFor(identity)
+        val filesystem = file.parentFile!!
+        val freeBefore = filesystem.usableSpace
+
         partial.writeAt(5_368_709_120L, payload(1_024, seed = 3), 0, 1_024)
         partial.flush()
 
-        val attributes: Map<String, Any> =
-            Files.readAttributes(file.toPath(), "unix:size,blocks")
-        val size = attributes["size"] as Long
-        val allocated = (attributes["blocks"] as Long) * 512L
+        // Measured rather than assumed: the JDK's unix: attribute view does not
+        // expose allocated blocks, so physical consumption is measured the direct
+        // way, as free space before minus free space after. A sparse file costs
+        // kilobytes; a dense one would cost five gigabytes and would fill a
+        // runner's disk before anyone noticed.
+        val consumed = freeBefore - filesystem.usableSpace
+        val apparent = file.length()
 
+        assertEquals(5_368_710_144L, apparent)
         assertTrue(
-            "apparent size is $size bytes but $allocated bytes are allocated; expected a sparse file",
-            allocated < size / 8L,
+            "apparent size is $apparent bytes but $consumed bytes of real space were " +
+                "consumed; a sparse file should cost kilobytes, not gigabytes",
+            consumed < 1_073_741_824L,
         )
         partial.close()
     }
