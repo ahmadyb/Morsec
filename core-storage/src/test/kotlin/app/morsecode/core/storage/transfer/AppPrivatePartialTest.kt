@@ -3,6 +3,7 @@ package app.morsecode.core.storage.transfer
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Digest
 import java.nio.file.Files
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -29,8 +30,24 @@ class AppPrivatePartialTest {
     private val transfer = TransferId("transfer-0001")
     private val identity = PartialIdentity.of(transfer, DestinationStrategy.SAF_STAGED)
 
-    private fun store(): AppPrivatePartialStore =
-        AppPrivatePartialStore(Files.createTempDirectory("partials-").toFile())
+    private val tempDirectories = mutableListOf<File>()
+
+    private fun store(): AppPrivatePartialStore {
+        val directory = Files.createTempDirectory("partials-").toFile()
+        tempDirectories += directory
+        return AppPrivatePartialStore(directory)
+    }
+
+    /**
+     * Removes every staged file, including the sparse one holding a 5 GiB
+     * apparent size. A test that leaves a multi-gigabyte file behind on a CI
+     * runner is a test that will eventually break someone else's build.
+     */
+    @After
+    fun removeStagedFiles() {
+        tempDirectories.forEach { it.deleteRecursively() }
+        tempDirectories.clear()
+    }
 
     private fun payload(size: Int, seed: Int = 7) = ByteArray(size) { ((it * 31 + seed) % 251).toByte() }
 
@@ -264,6 +281,70 @@ class AppPrivatePartialTest {
         assertEquals(1_024, partial.verificationSource().read(offset, readBack, 0, 1_024))
         readBack.fillEqual(0, data)
         partial.close()
+    }
+
+    @Test
+    fun `the over-4 GiB test does not physically write five gigabytes`() {
+        // Writing 5 GiB in CI would be slow enough to matter and would fill a
+        // runner's disk. A positional write at a 5 GiB offset produces a sparse
+        // file on any Linux filesystem, so the test proves Long offset handling
+        // for free. This asserts that the file really is sparse rather than
+        // trusting it: if a filesystem ever stops cooperating, this fails loudly
+        // instead of quietly writing five gigabytes.
+        val store = store()
+        val partial = store.open(identity)
+        val file = store.fileFor(identity)
+        partial.writeAt(5_368_709_120L, payload(1_024, seed = 3), 0, 1_024)
+        partial.flush()
+
+        val attributes = Files.readAttributes(file.toPath(), "unix:size,blocks")
+        val size = attributes["size"] as Long
+        val allocated = (attributes["blocks"] as Long) * 512L
+
+        assertTrue(
+            "apparent size is $size bytes but $allocated bytes are allocated; expected a sparse file",
+            allocated < size / 8L,
+        )
+        partial.close()
+    }
+
+    @Test
+    fun `a verification failure still closes the partial`() {
+        val store = store()
+        val partial = store.open(identity)
+        partial.writeAt(0L, payload(4_096), 0, 4_096)
+
+        // Verifying more bytes than the file holds must fail, and the failure
+        // must not leave the descriptor open behind it.
+        val result = partial.use { open ->
+            DestinationVerifier.verify(
+                source = open.verificationSource(),
+                totalBytes = 8_192L,
+                expected = null,
+            )
+        }
+
+        assertTrue(result is VerifyResult.Failed)
+        assertEquals(1, partial.closeCount)
+    }
+
+    @Test
+    fun `a cancellation closes the partial exactly once`() {
+        val store = store()
+        val partial = store.open(identity)
+
+        val outcome = runCatching {
+            partial.use { open ->
+                open.writeAt(0L, payload(1_024), 0, 1_024)
+                throw java.io.IOException(TransferStorageError.Cancelled.safeMessage())
+            }
+        }
+
+        assertTrue(outcome.isFailure)
+        assertEquals(1, partial.closeCount)
+        // A cancelled transfer discards the staged file rather than leaving it.
+        assertTrue(store.delete(identity))
+        assertFalse(store.exists(identity))
     }
 
     @Test
