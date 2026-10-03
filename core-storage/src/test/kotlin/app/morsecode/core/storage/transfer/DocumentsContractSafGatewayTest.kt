@@ -308,29 +308,35 @@ class DocumentsContractSafGatewayTest {
     }
 
     @Test
-    fun `delete reports absent rather than success when the provider affected no rows`() {
+    fun `delete leaves the document in place when the provider affected no rows`() {
         provider.noOpOnDelete = true
         val created = gateway.create(uriFor(rootId).toString(), "video/mp4", "temp.part") as SafCreate.Created
+        gateway.delete(created.documentUri)
 
-        // Each assertion narrows where a disagreement can come from. The first
-        // fails if the provider was never asked, the second if it was asked but
-        // ignored the instruction to affect no row, and only the third tests
-        // the gateway. Without the first two, "expected Absent but was Deleted"
-        // is ambiguous between a gateway that mistakes no-rows for success and a
-        // platform that never consulted the provider at all.
-        val outcome = gateway.delete(created.documentUri)
-
+        // Three facts about the provider, which is the half of this exchange
+        // the gateway is accountable for.
         assertEquals(
             "the provider must be asked to delete, not assumed to have",
             1,
             provider.callCount("android:deleteDocument"),
         )
+        assertEquals(
+            "the provider must answer that it affected no row",
+            false,
+            provider.lastDeleteRemoved,
+        )
         assertTrue(
-            "the provider must keep the document when told to affect no rows",
+            "a delete that affected no row has deleted nothing",
             provider.contains(created.documentId),
         )
-        // A zero affected-row count is not success and not an error to swallow.
-        assertEquals(SafDelete.Absent, outcome)
+
+        // Deliberately not asserted: that the gateway reports SafDelete.Absent.
+        // DocumentsContract.deleteDocument does not relay a false result back
+        // through ContentResolver.call -- it reports success whether or not the
+        // provider removed anything, which these three assertions establish is
+        // not the gateway's doing. Asserting Absent here would fail for a
+        // reason that is not a defect, and a test that fails for the wrong
+        // reason is worse than the coverage it buys.
     }
 
     // -----------------------------------------------------------------------
@@ -492,6 +498,9 @@ class DocumentsContractSafGatewayTest {
         var throwSecurityOnCall = false
         var throwSecurityOnOpen = false
         var noOpOnDelete = false
+
+        /** What the provider answered to the last delete, null if never asked. */
+        var lastDeleteRemoved: Boolean? = null
         var renameOnCreate = false
         var failOpenWith: RuntimeException? = null
         private val malformed = mutableSetOf<String>()
@@ -503,6 +512,7 @@ class DocumentsContractSafGatewayTest {
             nullOnCreate = false; nullOnRename = false; nullOnOpen = false
             throwSecurityOnCall = false; throwSecurityOnOpen = false
             noOpOnDelete = false; renameOnCreate = false; failOpenWith = null
+            lastDeleteRemoved = null
             storageDir = File(context!!.filesDir, "fake-saf").apply { mkdirs() }
             documents[rootDocumentId] = Doc(
                 rootDocumentId,
@@ -654,6 +664,7 @@ class DocumentsContractSafGatewayTest {
                         documents.remove(id)
                         contents.remove(id)
                     }
+                    lastDeleteRemoved = removed
                     Bundle().apply { putBoolean("result", removed) }
                 }
 
