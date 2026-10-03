@@ -1,5 +1,6 @@
 package app.morsecode.core.storage.transfer
 
+import android.annotation.SuppressLint
 import android.content.ContentResolver
 import android.database.Cursor
 import android.net.Uri
@@ -110,6 +111,14 @@ public class DocumentsContractSafGateway(
     // Containment — the platform's own descendant questions
     // -----------------------------------------------------------------------
 
+    /**
+     * Suppressed because the guard is on [sdkInt], not on
+     * `Build.VERSION.SDK_INT`, and lint can only analyse the latter. The guard
+     * is real and is what makes [sdkInt] injectable: the API-level behaviour
+     * is exercised directly by the tests below rather than by configuring a
+     * Robolectric SDK per case.
+     */
+    @SuppressLint("NewApi")
     override fun isChildDocument(
         parentDocumentUri: Uri,
         childDocumentUri: Uri,
@@ -127,6 +136,8 @@ public class DocumentsContractSafGateway(
         }
     }
 
+    /** Guarded on [sdkInt]; see [isChildDocument] for why this is suppressed. */
+    @SuppressLint("NewApi")
     override fun documentPath(documentUri: Uri): SafPathAnswer {
         // findDocumentPath is API 26.
         if (sdkInt < 26) return SafPathAnswer.Indeterminate

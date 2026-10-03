@@ -75,7 +75,7 @@ class DocumentsContractSafGatewayTest {
                 grantUriPermissions = true
             })
             .get()
-        provider.reset(rootId)
+        provider.reset(rootId, treeUri)
         // The grant is taken through the platform, not asserted by the test,
         // because the gateway reads persisted permissions from the resolver
         // and a test that simply assumed they were there would pass without
@@ -454,6 +454,17 @@ class DocumentsContractSafGatewayTest {
         private val calls = LinkedHashMap<String, Int>()
         private lateinit var storageDir: File
 
+        /**
+         * The tree every document URI this provider hands out is built from.
+         *
+         * It has to be the authority the provider is *registered* under. A
+         * provider that invents its own authority in the Uri it returns has
+         * described a document no ContentResolver can find, and every later
+         * operation on that Uri -- open, query, rename, delete -- resolves to
+         * nothing. That failure looks like a gateway bug and is not one.
+         */
+        private lateinit var treeBaseUri: Uri
+
         var nullCursor = false
         var throwOnQuery = false
         var throwSecurityOnQuery = false
@@ -467,7 +478,8 @@ class DocumentsContractSafGatewayTest {
         var failOpenWith: RuntimeException? = null
         private val malformed = mutableSetOf<String>()
 
-        fun reset(rootDocumentId: String) {
+        fun reset(rootDocumentId: String, treeUri: Uri) {
+            treeBaseUri = treeUri
             documents.clear(); contents.clear(); calls.clear(); malformed.clear()
             nullCursor = false; throwOnQuery = false; throwSecurityOnQuery = false
             nullOnCreate = false; nullOnRename = false; nullOnOpen = false
@@ -639,9 +651,6 @@ class DocumentsContractSafGatewayTest {
         }
 
         private fun uriForId(id: String): Uri =
-            DocumentsContract.buildDocumentUriUsingTree(
-                Uri.parse("content://${context!!.applicationInfo.packageName}.test/tree/ROOT"),
-                id,
-            )
+            DocumentsContract.buildDocumentUriUsingTree(treeBaseUri, id)
     }
 }
