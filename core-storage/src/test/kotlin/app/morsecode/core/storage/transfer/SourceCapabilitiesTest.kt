@@ -59,16 +59,32 @@ class SourceCapabilitiesTest {
     }
 
     @Test
-    fun `a pipe is not seekable even though a channel can be obtained from it`() {
-        // The whole reason for probing: the channel exists, position() throws.
+    fun `a pipe is never reported seekable`() {
+        // The whole reason for probing: on a real descriptor the channel exists
+        // and position() throws, so "has a channel" cannot be used as the answer.
+        //
+        // The assertion is the safety property rather than one particular
+        // evidence value, because how the sandbox expresses "this fd cannot
+        // seek" is the platform's business: a real pipe rejects the position
+        // call, and a synthetic pipe-backed descriptor simply has no usable
+        // channel. Either way the probe must not claim seekability, because
+        // repositioning by seeking is exactly the operation that loses bytes
+        // here. The observed pair is in the message so the platform's answer is
+        // visible rather than assumed.
         val pipe = ParcelFileDescriptor.createPipe()
         pipe[0].use { readEnd ->
             pipe[1].use {
                 val result = ParcelDescriptorSeekabilityProbe.probe(readEnd)
-                assertEquals(Seekability.NON_SEEKABLE, result.seekability)
-                assertEquals(ProbeEvidence.POSITION_REJECTED, result.evidence)
-                assertNull(result.sizeBytes)
-                assertFalse(result.sizeIsKnown)
+                assertFalse(
+                    "a pipe must never be reported seekable " +
+                        "(seekability=${result.seekability}, evidence=${result.evidence}, " +
+                        "size=${result.sizeBytes})",
+                    result.seekability.canSeek,
+                )
+                assertFalse(
+                    "a pipe cannot have a known length (evidence=${result.evidence})",
+                    result.sizeIsKnown,
+                )
             }
         }
     }

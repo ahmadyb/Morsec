@@ -123,7 +123,7 @@ public object ParcelDescriptorSeekabilityProbe : SeekabilityProbe {
             return ProbeResult(Seekability.UNKNOWN, null, ProbeEvidence.NO_CHANNEL)
         }
 
-        return try {
+        try {
             channel.position(PROBE_OFFSET)
         } catch (e: IOException) {
             return ProbeResult(Seekability.NON_SEEKABLE, null, ProbeEvidence.POSITION_REJECTED)

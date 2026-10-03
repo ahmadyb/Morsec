@@ -75,7 +75,7 @@ public sealed interface SourceHandle : Closeable {
 }
 
 internal class ChannelSourceHandle(
-    private val resource: OwnedSourceResource,
+    private val resource: Closeable,
     private val channel: FileChannel,
     override val openedAtOffset: Long,
 ) : SourceHandle {
@@ -98,7 +98,7 @@ internal class ChannelSourceHandle(
 }
 
 internal class StreamSourceHandle(
-    private val resource: OwnedSourceResource,
+    private val resource: Closeable,
     private val stream: InputStream,
     override val openedAtOffset: Long,
 ) : SourceHandle {

@@ -121,6 +121,9 @@ public class FileBackedTransferSource internal constructor(
             return SourceOpenResult.Failed(TransferStorageError.NotFound("source"))
         }
 
+        // The file is opened directly rather than through a ParcelFileDescriptor:
+        // this is a file the app owns, so a descriptor round trip would add a
+        // resource to own and a platform behaviour to depend on for nothing.
         val random: RandomAccessFile = try {
             RandomAccessFile(file, "r")
         } catch (e: FileNotFoundException) {
@@ -152,7 +155,7 @@ public class FileBackedTransferSource internal constructor(
         val adopted = resource.adopt(channel)
         return try {
             adopted.position(offset)
-            val length = adopted.size()
+            val length = channel.size()
             if (offset > length) {
                 resource.close()
                 return SourceOpenResult.Failed(
@@ -176,7 +179,7 @@ public class FileBackedTransferSource internal constructor(
     ): SourceOpenResult {
         val stream = resource.adopt(FileInputStream(random.fd))
         return when (val repositioned = NonSeekableRepositioner.reposition(
-            stream = { buffer, dataOffset, length -> stream.read(buffer, dataOffset, length) },
+            stream = SourceStream { buffer, dataOffset, length -> stream.read(buffer, dataOffset, length) },
             targetOffset = offset,
         )) {
             is RepositionResult.Positioned ->
