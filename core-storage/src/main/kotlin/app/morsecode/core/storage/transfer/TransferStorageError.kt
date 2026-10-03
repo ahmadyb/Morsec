@@ -131,6 +131,24 @@ public sealed class TransferStorageError(
             "Not enough space: $requiredBytes bytes needed, $availableBytes available"
     }
 
+    /**
+     * The medium filled up during [operation].
+     *
+     * Separate from [InsufficientSpace] because that one reports two measured
+     * sizes and this one cannot: the platform reports a full medium as an
+     * IOException carrying an errno, with no required or available figure to
+     * quote. Inventing 0 and 0 would report a number that means the opposite
+     * of what happened.
+     */
+    public data class StorageFull(
+        /** `copy`, `flush`, `create`, `rename`, `open`. */
+        public val operation: String,
+        override val diagnostic: String? = null,
+    ) : TransferStorageError(TransferStorageErrorCategory.INSUFFICIENT_SPACE) {
+        override fun safeMessage(): String =
+            "The destination ran out of space during $operation"
+    }
+
     /** Storage is in a state the operation cannot proceed from. */
     public data class StateConflict(
         /** Short machine-readable reason, e.g. `partial_longer_than_checkpoint`. */
