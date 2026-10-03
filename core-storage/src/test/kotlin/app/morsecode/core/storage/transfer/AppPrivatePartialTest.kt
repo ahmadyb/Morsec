@@ -2,6 +2,7 @@ package app.morsecode.core.storage.transfer
 
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Digest
+import java.io.File
 import java.nio.file.Files
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -297,7 +298,8 @@ class AppPrivatePartialTest {
         partial.writeAt(5_368_709_120L, payload(1_024, seed = 3), 0, 1_024)
         partial.flush()
 
-        val attributes = Files.readAttributes(file.toPath(), "unix:size,blocks")
+        val attributes: Map<String, Any> =
+            Files.readAttributes(file.toPath(), "unix:size,blocks")
         val size = attributes["size"] as Long
         val allocated = (attributes["blocks"] as Long) * 512L
 
