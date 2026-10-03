@@ -10,341 +10,549 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /*
- * Layers A and C of containment: parse with the platform, then ask the provider.
+ * Containment evidence: how the answer was reached is part of the answer.
  *
- * Robolectric rather than pure JVM, because layer A is defined as "use the
- * Android APIs" -- DocumentsContract.getTreeDocumentId and friends are the
- * subject of the test, not an implementation detail to be stubbed away.
+ * The three positive levels are never collapsed, so every test here asserts
+ * which one it got, not merely that something was "inside".
+ *
+ * The write path is resolveDestination(grant, segments) -- the destination is
+ * constructed under the grant. validateExistingUri exists for reconciliation
+ * and is deliberately weaker, refusing to accept an arbitrary URI on a string
+ * prefix where the platform cannot ask the provider.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class SafContainmentTest {
 
-    private val treeUri: Uri =
-        Uri.parse("content://com.android.externalstorage.documents/tree/primary%3ADownload")
-
+    private val authority = "com.android.externalstorage.documents"
+    private val treeUri: Uri = Uri.parse("content://$authority/tree/primary%3ADownload")
     private val rootId = "primary:Download"
 
+    private val grant = SafTreeGrant(
+        treeUri = treeUri,
+        rootDocumentId = rootId,
+        authority = authority,
+        writable = true,
+    )
+    private val readOnlyGrant = grant.copy(writable = false)
+
     private class FakeProver(
-        private val answer: SafChildProof =
-            SafChildProof.Answered(true, SafContainmentMethod.PROVIDER_CHILD_DOCUMENT),
-        private val throwSecurity: Boolean = false,
-    ) : SafChildProver {
-        val calls = mutableListOf<Pair<Uri, Uri>>()
-        override fun prove(parentDocumentUri: Uri, childDocumentUri: Uri): SafChildProof {
-            calls += parentDocumentUri to childDocumentUri
-            if (throwSecurity) throw SecurityException("grant revoked")
-            return answer
+        var child: SafChildAnswer = SafChildAnswer.Answered(true),
+        var path: SafPathAnswer = SafPathAnswer.Indeterminate,
+    ) : SafContainmentProver {
+        val childCalls = mutableListOf<Pair<Uri, Uri>>()
+        val pathCalls = mutableListOf<Uri>()
+        override fun isChildDocument(parentDocumentUri: Uri, childDocumentUri: Uri): SafChildAnswer {
+            childCalls += parentDocumentUri to childDocumentUri
+            return child
+        }
+        override fun documentPath(documentUri: Uri): SafPathAnswer {
+            pathCalls += documentUri
+            return path
         }
     }
 
-    private val answeringProver = FakeProver()
-    private val refusingProver = FakeProver(
-        SafChildProof.Answered(false, SafContainmentMethod.PROVIDER_CHILD_DOCUMENT),
-    )
-    private val silentProver = FakeProver(SafChildProof.Indeterminate)
-    private val revokedProver = FakeProver(throwSecurity = true)
+    private class ThrowingProver(private val security: Boolean) : SafContainmentProver {
+        override fun isChildDocument(parentDocumentUri: Uri, childDocumentUri: Uri): SafChildAnswer {
+            if (security) throw SecurityException("grant revoked")
+            throw IllegalStateException("provider crashed")
+        }
+        override fun documentPath(documentUri: Uri): SafPathAnswer {
+            if (security) throw SecurityException("grant revoked")
+            throw IllegalStateException("provider crashed")
+        }
+    }
 
-    private fun inside(proof: SafContainmentProof): SafContainmentProof.Inside =
-        proof as? SafContainmentProof.Inside ?: error("expected Inside, got $proof")
+    private fun documentUri(id: String): Uri =
+        SafContainment.documentUriUsingTree(treeUri, id)!!
 
-    private fun malformed(proof: SafContainmentProof): SafContainmentProof.Malformed =
-        proof as? SafContainmentProof.Malformed ?: error("expected Malformed, got $proof")
+    private fun confined(evidence: SafContainmentEvidence): SafContainmentEvidence {
+        assertTrue("expected a confined result, got $evidence", evidence.isConfined)
+        return evidence
+    }
 
     // -----------------------------------------------------------------------
-    // Layer A — the platform parses, not a regex
+    // Boundary collisions — segment comparison, not unbounded prefixes
     // -----------------------------------------------------------------------
 
     @Test
-    fun `the platform parses the tree document id out of a standard tree uri`() {
-        // The %3A is a standard encoded colon, not an escape attempt.
-        assertEquals(rootId, SafContainment.treeDocumentIdOf(treeUri))
+    fun `a sibling that extends the root name is not inside it`() {
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "${rootId}s"))
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "primary:Downloads"))
     }
 
     @Test
-    fun `the platform parses a document id out of a document uri`() {
-        val documentUri = Uri.parse(
-            "content://com.android.externalstorage.documents/tree/" +
-                "primary%3ADownload/document/primary%3ADownload%2F2026",
+    fun `a sibling with a suffix on the root name is not inside it`() {
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "${rootId}Backup"))
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "primary:DownloadBackup"))
+    }
+
+    @Test
+    fun `a child name is not the same as a longer child name sharing its prefix`() {
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary("$rootId/a", "$rootId/ab"))
+        assertTrue(SafDocumentIdRules.isWithinOnSegmentBoundary("$rootId/a", "$rootId/a"))
+        assertTrue(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "$rootId/ab"))
+    }
+
+    @Test
+    fun `a target shorter than the root is not inside it`() {
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary("$rootId/2026", rootId))
+    }
+
+    @Test
+    fun `the same document id under a different authority is outside`() {
+        val foreign = Uri.parse("content://other.authority/tree/primary%3ADownload/document/primary%3ADownload%2F2026")
+        val evidence = SafDestinationResolver.validateExistingUri(grant, foreign, FakeProver(), 34)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Outside)
+    }
+
+    @Test
+    fun `a document under a different tree grant from the same authority is outside`() {
+        val moviesTree = Uri.parse("content://$authority/tree/primary%3AMovies")
+        val moviesDoc = SafContainment.documentUriUsingTree(moviesTree, "primary:Movies/2026")!!
+        val evidence = SafDestinationResolver.validateExistingUri(grant, moviesDoc, FakeProver(), 34)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Outside)
+    }
+
+    @Test
+    fun `a prefix-collision sibling is refused when constructed as segments too`() {
+        // Construction cannot leave the root, so this asserts the boundary rule
+        // the construction relies on.
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("2026"), FakeProver(), 29,
         )
-        assertEquals("$rootId/2026", SafContainment.documentIdOf(documentUri))
-    }
-
-    @Test
-    fun `a document uri built for a nested id round-trips through the platform`() {
-        val built = SafContainment.documentUriUsingTree(treeUri, "$rootId/2026/oct")
-        assertEquals("$rootId/2026/oct", SafContainment.documentIdOf(built!!))
-    }
-
-    @Test
-    fun `a tree uri with no root segment yields no root document id`() {
-        val broken = Uri.parse("content://com.android.externalstorage.documents/tree")
-        assertEquals(null, SafContainment.treeDocumentIdOf(broken))
+        assertEquals("$rootId/2026", (evidence as SafContainmentEvidence.ProviderConfirmedChild).targetDocumentId)
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "${rootId}s/2026"))
     }
 
     // -----------------------------------------------------------------------
-    // Ordinary valid destinations, each of which must keep working
+    // API 23-25 — canonical evidence, and only for constructed paths
     // -----------------------------------------------------------------------
 
     @Test
-    fun `the granted root itself is inside by identity, with no provider call`() {
-        val proof = SafContainment.prove(treeUri, null, answeringProver)
-        val result = inside(proof)
-        assertEquals(rootId, result.targetDocumentId)
-        assertEquals(SafContainmentMethod.IDENTITY, result.method)
-        assertTrue(answeringProver.calls.isEmpty())
-    }
-
-    @Test
-    fun `a direct child is inside`() {
-        assertEquals(
-            "$rootId/2026",
-            inside(SafContainment.prove(treeUri, "$rootId/2026", answeringProver)).targetDocumentId,
+    fun `an internally constructed direct child is grant-scoped canonical on API 23`() {
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("2026"), FakeProver(), 23,
         )
+        val result = evidence as? SafContainmentEvidence.GrantScopedCanonical
+            ?: error("got $evidence")
+        assertEquals("$rootId/2026", result.targetDocumentId)
+        assertTrue(result.isConfined)
+        assertFalse(result.isProviderBacked)
     }
 
     @Test
-    fun `a nested descendant is inside`() {
+    fun `an internally constructed nested child is grant-scoped canonical on API 25`() {
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("2026", "oct", "incoming"), FakeProver(), 25,
+        )
         assertEquals(
             "$rootId/2026/oct/incoming",
-            inside(
-                SafContainment.prove(treeUri, "$rootId/2026/oct/incoming", answeringProver),
-            ).targetDocumentId,
+            (evidence as SafContainmentEvidence.GrantScopedCanonical).targetDocumentId,
         )
     }
 
     @Test
-    fun `a standard encoded slash in the id is an ordinary nested path`() {
-        // primary:Download%2F2026 is how a nested id arrives inside one URI
-        // segment. It names the same place as primary:Download/2026.
-        val proof = SafContainment.prove(treeUri, "primary:Download%2F2026", answeringProver)
-        assertEquals("$rootId/2026", inside(proof).targetDocumentId)
+    fun `the granted root itself is grant-scoped canonical when no segments are given`() {
+        val evidence = SafDestinationResolver.resolveDestination(grant, emptyList(), FakeProver(), 23)
+        assertEquals(rootId, (evidence as SafContainmentEvidence.GrantScopedCanonical).targetDocumentId)
     }
 
     @Test
-    fun `a literal percent character in a document name is accepted`() {
-        val proof = SafContainment.prove(treeUri, "$rootId/100%.txt", answeringProver)
-        assertEquals("$rootId/100%.txt", inside(proof).targetDocumentId)
+    fun `an arbitrary complete uri is unknown on API 23, never accepted on a prefix`() {
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant, documentUri("$rootId/2026"), FakeProver(), 23,
+        )
+        val unknown = evidence as? SafContainmentEvidence.Unknown ?: error("got $evidence")
+        assertFalse("unknown must never be confined", unknown.isConfined)
+    }
+
+    @Test
+    fun `an arbitrary complete uri is unknown on API 25 too`() {
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant, documentUri("$rootId/2026"), FakeProver(), 25,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a grant that is not writable is refused as revoked`() {
+        val evidence = SafDestinationResolver.resolveDestination(
+            readOnlyGrant, listOf("2026"), FakeProver(), 23,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.PermissionRevoked)
+    }
+
+    @Test
+    fun `a malformed root document id is refused on any level`() {
+        val broken = grant.copy(rootDocumentId = "primary:Download/../x")
+        val evidence = SafDestinationResolver.resolveDestination(
+            broken, listOf("2026"), FakeProver(), 23,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Malformed)
+    }
+
+    @Test
+    fun `a relative segment that is not one segment is refused`() {
+        for (segment in listOf("..", ".", "a/b", "a%2Fb", "", "a\\b")) {
+            val evidence = SafDestinationResolver.resolveDestination(
+                grant, listOf(segment), FakeProver(), 23,
+            )
+            assertTrue("segment '$segment' must be malformed, got $evidence",
+                evidence is SafContainmentEvidence.Malformed)
+        }
+    }
+
+    @Test
+    fun `a double-encoded segment is refused`() {
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("%252E%252E"), FakeProver(), 23,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Malformed)
+    }
+
+    @Test
+    fun `a sibling id is not accepted by the boundary rule on API 23 paths`() {
+        // The boundary rule is what construction depends on; prove the
+        // collision cases against the real root rather than a toy string.
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "${rootId}s"))
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "${rootId}Backup"))
+        assertFalse(SafDocumentIdRules.isWithinOnSegmentBoundary(rootId, "primary:Movies"))
+    }
+
+    // -----------------------------------------------------------------------
+    // API 26-28 — provider path evidence
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `a coherent provider path is provider-confirmed path on API 26`() {
+        val prover = FakeProver(
+            path = SafPathAnswer.Resolved(
+                rootId = rootId,
+                segments = listOf(rootId, "$rootId/2026"),
+            ),
+        )
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 26)
+        val result = evidence as? SafContainmentEvidence.ProviderConfirmedPath
+            ?: error("got $evidence")
+        assertEquals("$rootId/2026", result.targetDocumentId)
+        assertTrue(result.isProviderBacked)
+    }
+
+    @Test
+    fun `a provider path under the wrong root is outside`() {
+        val prover = FakeProver(
+            path = SafPathAnswer.Resolved(
+                rootId = "primary:Movies",
+                segments = listOf("primary:Movies", "primary:Movies/2026"),
+            ),
+        )
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant, documentUri("primary:Movies/2026"), prover, 27,
+        )
+        // The id fails the boundary check against the approved root first.
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Outside)
+    }
+
+    @Test
+    fun `a provider path that starts somewhere else is outside`() {
+        val prover = FakeProver(
+            path = SafPathAnswer.Resolved(
+                rootId = rootId,
+                segments = listOf("primary:Movies", "$rootId/2026"),
+            ),
+        )
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 28)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Outside)
+    }
+
+    @Test
+    fun `an empty provider path is unknown`() {
+        val prover = FakeProver(path = SafPathAnswer.Resolved(rootId = rootId, segments = emptyList()))
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 27)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a provider path whose root disagrees with the approved root is unknown`() {
+        val prover = FakeProver(
+            path = SafPathAnswer.Resolved(
+                rootId = "some.other.root",
+                segments = listOf(rootId, "$rootId/2026"),
+            ),
+        )
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 27)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a provider path that does not end at the target is unknown`() {
+        val prover = FakeProver(
+            path = SafPathAnswer.Resolved(
+                rootId = rootId,
+                segments = listOf(rootId, "$rootId/something-else"),
+            ),
+        )
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 27)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a provider that cannot produce a path gives unknown`() {
+        val prover = FakeProver(path = SafPathAnswer.Indeterminate)
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 27)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a SecurityException during a path query is a revocation on API 27`() {
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("2026"), ThrowingProver(security = true), 27,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.PermissionRevoked)
+    }
+
+    @Test
+    fun `a provider crash during a path query is unknown, not acceptance`() {
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("2026"), ThrowingProver(security = false), 27,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    // -----------------------------------------------------------------------
+    // API 29+ — child-document evidence
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `a provider that confirms the child yields provider-confirmed child`() {
+        val prover = FakeProver(child = SafChildAnswer.Answered(true))
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 29)
+        val result = evidence as? SafContainmentEvidence.ProviderConfirmedChild
+            ?: error("got $evidence")
+        assertTrue(result.isProviderBacked)
+        assertEquals("$rootId/2026", result.targetDocumentId)
+    }
+
+    @Test
+    fun `a provider that denies the child yields outside`() {
+        val prover = FakeProver(child = SafChildAnswer.Answered(false))
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 34)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Outside)
+    }
+
+    @Test
+    fun `an explicit provider denial is not overridden by a string prefix at any level`() {
+        // The id was constructed under the root, so a string comparison would
+        // accept it. The provider said no, so nothing may proceed.
+        for (sdk in listOf(29, 30, 34)) {
+            val evidence = SafDestinationResolver.resolveDestination(
+                grant, listOf("2026"), FakeProver(child = SafChildAnswer.Answered(false)), sdk,
+            )
+            assertTrue("sdk $sdk: got $evidence", evidence is SafContainmentEvidence.Outside)
+        }
+    }
+
+    @Test
+    fun `a provider exception does not fall back to string acceptance`() {
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("2026"), ThrowingProver(security = false), 29,
+        )
+        val unknown = evidence as? SafContainmentEvidence.Unknown ?: error("got $evidence")
+        assertFalse("a crash must never become acceptance", unknown.isConfined)
+    }
+
+    @Test
+    fun `a revoked permission stays typed and never becomes outside or unknown`() {
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("2026"), ThrowingProver(security = true), 29,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.PermissionRevoked)
+    }
+
+    @Test
+    fun `a provider that declines to answer stays unknown`() {
+        val prover = FakeProver(child = SafChildAnswer.Indeterminate)
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 29)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `the tier the platform offers depends on the level`() {
+        assertEquals(SafContainmentTier.CANONICAL_ONLY, SafContainmentTier.forSdk(23))
+        assertEquals(SafContainmentTier.CANONICAL_ONLY, SafContainmentTier.forSdk(25))
+        assertEquals(SafContainmentTier.DOCUMENT_PATH, SafContainmentTier.forSdk(26))
+        assertEquals(SafContainmentTier.DOCUMENT_PATH, SafContainmentTier.forSdk(28))
+        // isChildDocument is API 29, not 21 -- the reason this tiering exists.
+        assertEquals(SafContainmentTier.CHILD_DOCUMENT, SafContainmentTier.forSdk(29))
+    }
+
+    // -----------------------------------------------------------------------
+    // Ordinary valid destinations must not be rejected for valid encoding
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `ordinary Downloads DCIM and Documents trees parse`() {
+        val roots = mapOf(
+            "content://$authority/tree/primary%3ADownload" to "primary:Download",
+            "content://$authority/tree/primary%3ADCIM" to "primary:DCIM",
+            "content://$authority/tree/primary%3ADocuments" to "primary:Documents",
+        )
+        roots.forEach { (uri, expected) ->
+            assertEquals(expected, SafContainment.treeDocumentIdOf(Uri.parse(uri)))
+        }
     }
 
     @Test
     fun `a unicode document name is accepted`() {
-        val proof = SafContainment.prove(treeUri, "$rootId/日本語.mp4", answeringProver)
-        assertEquals("$rootId/日本語.mp4", inside(proof).targetDocumentId)
+        val prover = FakeProver(child = SafChildAnswer.Answered(true))
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("日本語.mp4"), prover, 29)
+        assertEquals("$rootId/日本語.mp4", confined(evidence).targetDocumentId)
     }
 
     @Test
-    fun `a missing document id means the granted root`() {
-        val proof = SafContainment.prove(treeUri, "", answeringProver)
-        assertEquals(SafContainmentMethod.IDENTITY, inside(proof).method)
+    fun `a literal percent character in a name is accepted`() {
+        val prover = FakeProver(child = SafChildAnswer.Answered(true))
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("100%.txt"), prover, 29)
+        assertEquals("$rootId/100%.txt", confined(evidence).targetDocumentId)
+    }
+
+    @Test
+    fun `an encoded separator in the uri representation is accepted and canonicalised`() {
+        // A document id is one percent-encoded URI segment, so a nested id
+        // arrives with its separators encoded. The URI keeps the %2F; the
+        // document id this layer hands back is the canonical form.
+        val prover = FakeProver(child = SafChildAnswer.Answered(true))
+        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 29)
+        val result = confined(evidence)
+        assertEquals("$rootId/2026", result.targetDocumentId)
+        assertTrue(
+            "the uri representation should still be encoded: ${result.targetUri}",
+            result.targetUri!!.contains("%2F"),
+        )
+        assertEquals(
+            "$rootId/2026",
+            SafContainment.documentIdOf(Uri.parse(result.targetUri!!)),
+        )
+    }
+
+    @Test
+    fun `a name with spaces and parentheses is accepted`() {
+        val prover = FakeProver(child = SafChildAnswer.Answered(true))
+        val evidence = SafDestinationResolver.resolveDestination(
+            grant, listOf("holiday (2).mp4"), prover, 29,
+        )
+        assertEquals("$rootId/holiday (2).mp4", confined(evidence).targetDocumentId)
     }
 
     // -----------------------------------------------------------------------
-    // Attacks — every one must be refused before any provider call
+    // Commit policy
     // -----------------------------------------------------------------------
 
-    @Test
-    fun `a literal dot-dot is malformed`() {
-        assertEquals(
-            SafDocumentIdViolation.DOT_SEGMENT,
-            malformed(SafContainment.prove(treeUri, "$rootId/../x", answeringProver)).violation,
-        )
-    }
+    private fun childEvidence() = SafContainmentEvidence.ProviderConfirmedChild(rootId, "$rootId/x", "u")
+    private fun pathEvidence() = SafContainmentEvidence.ProviderConfirmedPath(rootId, "$rootId/x", "u", listOf(rootId))
+    private fun canonicalEvidence() = SafContainmentEvidence.GrantScopedCanonical(rootId, "$rootId/x", "u")
+    private fun unknownEvidence() = SafContainmentEvidence.Unknown(rootId, "$rootId/x", "u", TransferStorageError.Unsupported("x"))
+    private fun revokedEvidence() = SafContainmentEvidence.PermissionRevoked(rootId, "$rootId/x", "u", TransferStorageError.PermissionRevoked("write"))
+    private fun outsideEvidence() = SafContainmentEvidence.Outside(rootId, "$rootId/x", "u")
+    private fun malformedEvidence() = SafContainmentEvidence.Malformed(rootId, null, null, SafDocumentIdViolation.DOT_SEGMENT)
 
     @Test
-    fun `a lower-case encoded dot-dot is malformed`() {
-        assertEquals(
-            SafDocumentIdViolation.ENCODED_TRAVERSAL,
-            malformed(SafContainment.prove(treeUri, "$rootId/%2e%2e", answeringProver)).violation,
-        )
-    }
-
-    @Test
-    fun `a mixed-case encoded dot-dot is malformed`() {
-        assertEquals(
-            SafDocumentIdViolation.ENCODED_TRAVERSAL,
-            malformed(SafContainment.prove(treeUri, "$rootId/%2E%2e", answeringProver)).violation,
-        )
-    }
-
-    @Test
-    fun `an encoded slash wrapping a dot-dot is malformed`() {
-        assertEquals(
-            SafDocumentIdViolation.ENCODED_TRAVERSAL,
-            malformed(
-                SafContainment.prove(treeUri, "primary:Download%2F..%2F..%2Fetc", answeringProver),
-            ).violation,
-        )
-    }
-
-    @Test
-    fun `an encoded backslash is malformed`() {
-        assertEquals(
-            SafDocumentIdViolation.ENCODED_TRAVERSAL,
-            malformed(SafContainment.prove(treeUri, "$rootId/..%5C..", answeringProver)).violation,
-        )
-    }
-
-    @Test
-    fun `a double-encoded traversal is malformed`() {
-        assertEquals(
-            SafDocumentIdViolation.DOUBLE_ENCODED_TRAVERSAL,
-            malformed(SafContainment.prove(treeUri, "$rootId/%252E%252E", answeringProver)).violation,
-        )
-    }
-
-    @Test
-    fun `a target from a different tree is outside`() {
-        val proof = SafContainment.prove(treeUri, "primary:Movies/2026", answeringProver)
-        assertTrue(proof is SafContainmentProof.Outside)
-    }
-
-    @Test
-    fun `a sibling sharing the root prefix is outside`() {
-        // Prefix agreement is not containment.
-        val proof = SafContainment.prove(treeUri, "${rootId}X/2026", answeringProver)
-        assertTrue(proof is SafContainmentProof.Outside)
-    }
-
-    @Test
-    fun `a malformed document uri is refused`() {
-        val proof = SafContainment.prove(treeUri, "content://evil.example/tree/primary:Movies", answeringProver)
-        assertTrue(proof is SafContainmentProof.Malformed)
-    }
-
-    @Test
-    fun `a missing tree id is refused`() {
-        val broken = Uri.parse("content://com.android.externalstorage.documents/tree")
-        val proof = SafContainment.prove(broken, "$rootId/2026", answeringProver)
-        assertTrue(proof is SafContainmentProof.Malformed)
-    }
-
-    @Test
-    fun `no attack ever reaches the provider`() {
-        val attacks = listOf(
-            "$rootId/../x",
-            "$rootId/%2e%2e",
-            "$rootId/%2E%2e",
-            "primary:Download%2F..%2F..%2Fetc",
-            "$rootId/..%5C..",
-            "$rootId/%252E%252E",
-            "primary:Movies/2026",
-            "${rootId}X/2026",
-        )
-        attacks.forEach { attack ->
-            SafContainment.prove(treeUri, attack, answeringProver)
+    fun `provider-confirmed child authorises every operation`() {
+        SafContainmentOperation.entries.forEach { operation ->
+            assertEquals(
+                "$operation",
+                SafContainmentDecision.ALLOWED,
+                SafContainmentPolicy.decide(childEvidence(), operation, storedIdentityMatches = true),
+            )
         }
-        assertTrue(
-            "a refused target must not be queried",
-            answeringProver.calls.isEmpty(),
-        )
-    }
-
-    // -----------------------------------------------------------------------
-    // Layer C — the provider has the last word
-    // -----------------------------------------------------------------------
-
-    @Test
-    fun `a provider that proves the relationship yields provider-backed containment`() {
-        val proof = inside(SafContainment.prove(treeUri, "$rootId/2026", answeringProver))
-        assertEquals(SafContainmentMethod.PROVIDER_CHILD_DOCUMENT, proof.method)
-        assertTrue(proof.method.isProviderBacked)
     }
 
     @Test
-    fun `a provider that denies the relationship overrides prefix agreement`() {
-        // The id names something under the root, but the provider says it is
-        // not a descendant. The provider is the final authority.
-        val proof = SafContainment.prove(treeUri, "$rootId/2026", refusingProver)
-        assertTrue(proof is SafContainmentProof.Outside)
+    fun `provider-confirmed path authorises every operation`() {
+        SafContainmentOperation.entries.forEach { operation ->
+            assertEquals(
+                "$operation",
+                SafContainmentDecision.ALLOWED,
+                SafContainmentPolicy.decide(pathEvidence(), operation, storedIdentityMatches = true),
+            )
+        }
     }
 
     @Test
-    fun `a provider that cannot say yields containment unknown, never acceptance`() {
-        val proof = SafContainment.prove(treeUri, "$rootId/2026", silentProver)
-        val unknown = proof as? SafContainmentProof.ContainmentUnknown
-            ?: error("expected ContainmentUnknown, got $proof")
-        assertEquals(rootId, unknown.rootDocumentId)
-        // The crucial property: not inside, and not a silent pass.
-        assertFalse(SafContainmentProof.isInside(unknown))
-    }
-
-    @Test
-    fun `a provider that fails to answer yields containment unknown`() {
-        val failing = FakeProver(
-            SafChildProof.Failed(TransferStorageError.ProviderFailure("document_provider")),
-        )
-        assertTrue(
-            SafContainment.prove(treeUri, "$rootId/2026", failing)
-                is SafContainmentProof.ContainmentUnknown,
-        )
-    }
-
-    @Test
-    fun `a SecurityException during the containment query is a revocation, not a failure`() {
-        // A revoked grant is not "not a child" and not "the provider broke".
-        val proof = SafContainment.prove(treeUri, "$rootId/2026", revokedProver)
-        val revoked = proof as? SafContainmentProof.Revoked ?: error("expected Revoked, got $proof")
-        assertTrue(revoked.error is TransferStorageError.PermissionRevoked)
-    }
-
-    @Test
-    fun `with no prover available containment is recorded as prefix-only, not provider-backed`() {
-        // This is the API 23-25 path: isChildDocument is API 29 and
-        // findDocumentPath is API 26, so below 26 the platform cannot ask.
-        val proof = inside(SafContainment.prove(treeUri, "$rootId/2026", prover = null))
-        assertEquals(SafContainmentMethod.CANONICAL_PREFIX, proof.method)
-        assertFalse(
-            "a prefix match must not be dressed up as provider proof",
-            proof.method.isProviderBacked,
-        )
-    }
-
-    @Test
-    fun `an unaddressable target is containment unknown rather than a crash`() {
-        val oddTree = Uri.parse("content://odd/tree/root%00id")
-        val proof = SafContainment.prove(oddTree, "root id/child", answeringProver)
-        assertTrue(
-            "a NUL-bearing root is not a grant we can reason about: $proof",
-            proof is SafContainmentProof.Malformed ||
-                proof is SafContainmentProof.ContainmentUnknown,
-        )
-    }
-
-    // -----------------------------------------------------------------------
-    // Which proof the platform can offer at each level
-    // -----------------------------------------------------------------------
-
-    @Test
-    fun `the strongest available proof depends on the platform level`() {
+    fun `grant-scoped canonical authorises creation only`() {
         assertEquals(
-            SafContainmentMethod.CANONICAL_PREFIX,
-            SafContainmentMethod.availableOn(23),
+            SafContainmentDecision.ALLOWED,
+            SafContainmentPolicy.decide(canonicalEvidence(), SafContainmentOperation.CREATE_DESTINATION),
+        )
+        listOf(
+            SafContainmentOperation.REOPEN_TEMPORARY,
+            SafContainmentOperation.RENAME_TEMPORARY,
+            SafContainmentOperation.DELETE_TEMPORARY,
+            SafContainmentOperation.RECONCILE_FINAL,
+        ).forEach { operation ->
+            assertEquals(
+                "$operation must not rest on canonical evidence alone",
+                SafContainmentDecision.REJECTED,
+                SafContainmentPolicy.decide(canonicalEvidence(), operation),
+            )
+        }
+    }
+
+    @Test
+    fun `outside and malformed are rejected`() {
+        SafContainmentOperation.entries.forEach { operation ->
+            assertEquals(SafContainmentDecision.REJECTED, SafContainmentPolicy.decide(outsideEvidence(), operation))
+            assertEquals(SafContainmentDecision.REJECTED, SafContainmentPolicy.decide(malformedEvidence(), operation))
+        }
+    }
+
+    @Test
+    fun `unknown forbids writing renaming and deleting`() {
+        listOf(
+            SafContainmentOperation.CREATE_DESTINATION,
+            SafContainmentOperation.REOPEN_TEMPORARY,
+            SafContainmentOperation.RENAME_TEMPORARY,
+            SafContainmentOperation.DELETE_TEMPORARY,
+            SafContainmentOperation.RECONCILE_FINAL,
+        ).forEach { operation ->
+            assertEquals(
+                "$operation",
+                SafContainmentDecision.FORBIDDEN_NO_WRITE,
+                SafContainmentPolicy.decide(unknownEvidence(), operation, storedIdentityMatches = true),
+            )
+        }
+    }
+
+    @Test
+    fun `a revoked grant authorises nothing`() {
+        SafContainmentOperation.entries.forEach { operation ->
+            assertEquals(
+                "$operation",
+                SafContainmentDecision.FORBIDDEN_NO_WRITE,
+                SafContainmentPolicy.decide(revokedEvidence(), operation, storedIdentityMatches = true),
+            )
+        }
+    }
+
+    @Test
+    fun `deletion additionally requires the stored temporary identity to match`() {
+        assertEquals(
+            SafContainmentDecision.REJECTED,
+            SafContainmentPolicy.decide(
+                childEvidence(), SafContainmentOperation.DELETE_TEMPORARY, storedIdentityMatches = false,
+            ),
         )
         assertEquals(
-            SafContainmentMethod.CANONICAL_PREFIX,
-            SafContainmentMethod.availableOn(25),
+            SafContainmentDecision.ALLOWED,
+            SafContainmentPolicy.decide(
+                childEvidence(), SafContainmentOperation.DELETE_TEMPORARY, storedIdentityMatches = true,
+            ),
         )
+        // Containment alone is never enough to delete, even at the strongest level.
         assertEquals(
-            SafContainmentMethod.PROVIDER_DOCUMENT_PATH,
-            SafContainmentMethod.availableOn(26),
+            SafContainmentDecision.REJECTED,
+            SafContainmentPolicy.decide(pathEvidence(), SafContainmentOperation.DELETE_TEMPORARY),
         )
-        assertEquals(
-            SafContainmentMethod.PROVIDER_DOCUMENT_PATH,
-            SafContainmentMethod.availableOn(28),
-        )
-        // isChildDocument is API 29, not 21 -- the reason this tiering exists.
-        assertEquals(
-            SafContainmentMethod.PROVIDER_CHILD_DOCUMENT,
-            SafContainmentMethod.availableOn(29),
-        )
-    }
-
-    @Test
-    fun `only provider answers count as provider-backed`() {
-        assertTrue(SafContainmentMethod.PROVIDER_CHILD_DOCUMENT.isProviderBacked)
-        assertTrue(SafContainmentMethod.PROVIDER_DOCUMENT_PATH.isProviderBacked)
-        assertFalse(SafContainmentMethod.CANONICAL_PREFIX.isProviderBacked)
-        assertFalse(SafContainmentMethod.IDENTITY.isProviderBacked)
     }
 }
