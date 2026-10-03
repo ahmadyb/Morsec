@@ -311,8 +311,26 @@ class DocumentsContractSafGatewayTest {
     fun `delete reports absent rather than success when the provider affected no rows`() {
         provider.noOpOnDelete = true
         val created = gateway.create(uriFor(rootId).toString(), "video/mp4", "temp.part") as SafCreate.Created
+
+        // Each assertion narrows where a disagreement can come from. The first
+        // fails if the provider was never asked, the second if it was asked but
+        // ignored the instruction to affect no row, and only the third tests
+        // the gateway. Without the first two, "expected Absent but was Deleted"
+        // is ambiguous between a gateway that mistakes no-rows for success and a
+        // platform that never consulted the provider at all.
+        val outcome = gateway.delete(created.documentUri)
+
+        assertEquals(
+            "the provider must be asked to delete, not assumed to have",
+            1,
+            provider.callCount("android:deleteDocument"),
+        )
+        assertTrue(
+            "the provider must keep the document when told to affect no rows",
+            provider.contains(created.documentId),
+        )
         // A zero affected-row count is not success and not an error to swallow.
-        assertEquals(SafDelete.Absent, gateway.delete(created.documentUri))
+        assertEquals(SafDelete.Absent, outcome)
     }
 
     // -----------------------------------------------------------------------
@@ -499,6 +517,9 @@ class DocumentsContractSafGatewayTest {
             documents[id] = Doc(id, name, mime, size, flags)
         }
 
+        /** Whether the provider still has a document, by id. */
+        fun contains(documentId: String): Boolean = documentId in documents
+
         fun addMalformedRow(id: String) {
             documents[id] = Doc(id, "", "", null, null)
             malformed += id
@@ -624,11 +645,15 @@ class DocumentsContractSafGatewayTest {
                 "android:deleteDocument" -> {
                     val target = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
                     val id = target?.let { DocumentsContract.getDocumentId(it) }
-                    val existed = id != null && documents.remove(id) != null
-                    // A provider that affected no row must say so rather than
-                    // implying success, and the gateway has to notice.
+                    // Existence is checked without removing: a provider that
+                    // affects no row has not deleted anything, and its documents
+                    // must still be there afterwards.
+                    val existed = id != null && documents.containsKey(id)
                     val removed = existed && !noOpOnDelete
-                    if (removed) contents.remove(id)
+                    if (removed) {
+                        documents.remove(id)
+                        contents.remove(id)
+                    }
                     Bundle().apply { putBoolean("result", removed) }
                 }
 

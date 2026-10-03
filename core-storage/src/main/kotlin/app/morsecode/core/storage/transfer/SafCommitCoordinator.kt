@@ -126,7 +126,14 @@ public interface SafDocumentGateway {
  */
 public sealed class SafHandle : Closeable {
 
-    /** How many times this handle has actually closed its primary resource. */
+    /**
+     * How many times this handle has actually closed its primary resource.
+     *
+     * It counts closes, not calls to [close]: a handle closed twice reports 1,
+     * because counting attempts would make "closed exactly once" unverifiable
+     * and would tell a caller that a descriptor released once was released
+     * twice. [OwnedFileDescriptor] counts the same way.
+     */
     public var closeCount: Int = 0
         protected set
 
@@ -170,7 +177,8 @@ public class SafWriteHandle internal constructor(
     }
 
     override fun close() {
-        if (closeCount++ > 0) return
+        if (closeCount > 0) return
+        closeCount++
         runCatching { stream.close() }
     }
 }
@@ -208,7 +216,8 @@ public class SafReadHandle internal constructor(
         }
 
     override fun close() {
-        if (closeCount++ > 0) return
+        if (closeCount > 0) return
+        closeCount++
         runCatching { stream.close() }
     }
 }
