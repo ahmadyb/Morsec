@@ -5,6 +5,7 @@ import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
 import app.morsecode.core.model.DuplicatePolicy
+import app.morsecode.core.storage.saf.SafPaths
 
 /*
  * Committing a verified staging file into a user-granted SAF tree.
@@ -158,7 +159,11 @@ public class SafWriteHandle internal constructor(
      */
     public fun flush(): FlushDurability = try {
         stream.flush()
-        descriptor?.sync()
+        // ParcelFileDescriptor has no sync of its own; the force belongs to the
+        // java.io.FileDescriptor underneath it. This is still only an attempt:
+        // a provider is free to hand back a socket, a pipe or an in-memory
+        // handle, none of which have a durable medium to force to.
+        descriptor?.fileDescriptor?.sync()
         FlushDurability.FlushAttemptedGuaranteeUnknown
     } catch (e: Exception) {
         FlushDurability.FlushFailed(TransferStorageError.Io("sync"))
