@@ -626,7 +626,7 @@ class SafContainmentTest {
     }
 
     @Test
-    fun `an empty provider path is unknown`() {
+    fun `an empty opaque provider path is unknown`() {
         val evidence = SafDestinationResolver.validateExistingUri(
             grant, documentUri("target-opaque-b913"), pathProver("root-id", emptyList()), 27,
         )
