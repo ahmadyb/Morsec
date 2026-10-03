@@ -55,19 +55,32 @@ class FileBackedTransferSourceTest {
     }
 
     @Test
-    fun `a traversal is refused before any descriptor is opened`() {
+    fun `a traversal cannot be expressed as a relative path at all`() {
         root = newRoot()
-        seed(ByteArray(64))
-        val escaping = RelativeTransferPath("Camera/../../outside.mp4")
-        assertFalse(sources().contains(escaping))
-        assertNull(sources().create(escaping))
+
+        // Guarded at the type first: a value that cannot exist cannot reach the
+        // filesystem layer. That is why there is no test for "a source opened a
+        // traversing path" — the path cannot be constructed to try.
+        assertFalse(RelativeTransferPath.isValid("Camera/../../outside.mp4"))
+        assertNull(RelativeTransferPath.orNull("Camera/../../outside.mp4"))
+
+        // And the containment layer refuses a `..` even handed raw files, which
+        // is what a value arriving by some other route would look like.
+        root = newRoot()
+        assertFalse(
+            "a traversal must resolve outside the root",
+            ApprovedRoots.isInside(root, File(root, "Camera/../../outside.mp4")),
+        )
     }
 
     @Test
     fun `an absolute path is refused`() {
         root = newRoot()
-        val absolute = RelativeTransferPath("/etc/passwd")
-        assertNull(sources().create(absolute))
+        seed(ByteArray(64))
+
+        assertFalse(RelativeTransferPath.isValid("/etc/passwd"))
+        assertNull(RelativeTransferPath.orNull("/etc/passwd"))
+        assertFalse(ApprovedRoots.isInside(root, File("/etc/passwd")))
     }
 
     @Test
@@ -268,11 +281,17 @@ class FileBackedTransferSourceTest {
         )
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `a negative offset is rejected rather than clamped`() {
+    @Test
+    fun `a negative offset is refused rather than clamped to zero`() {
         root = newRoot()
         seed(ByteArray(64))
-        sources().create(relative)!!.openAt(-1L)
+
+        // Clamping would be worse than refusing: it would silently transfer the
+        // wrong bytes, from the start of the file instead of from the offset.
+        val opened = sources().create(relative)!!.openAt(-1L)
+        assertTrue(opened is SourceOpenResult.Failed)
+        val error = (opened as SourceOpenResult.Failed).error
+        assertEquals("negative_offset", (error as TransferStorageError.StateConflict).reason)
     }
 
     // --- non-seekable fallback ---------------------------------------------------

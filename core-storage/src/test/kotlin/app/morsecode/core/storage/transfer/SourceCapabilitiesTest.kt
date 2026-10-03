@@ -59,45 +59,26 @@ class SourceCapabilitiesTest {
     }
 
     @Test
-    fun `a pipe is never reported seekable`() {
-        // The whole reason for probing: on a real descriptor the channel exists
-        // and position() throws, so "has a channel" cannot be used as the answer.
+    fun `a descriptor that refuses to be positioned is non-seekable`() {
+        // The classification that has to be right: a descriptor that will not
+        // move must never be seeked, because seeking one either throws or, worse,
+        // appears to succeed while leaving the bytes it skipped unread.
         //
-        // The assertion is the safety property rather than one particular
-        // evidence value, because how the sandbox expresses "this fd cannot
-        // seek" is the platform's business: a real pipe rejects the position
-        // call, and a synthetic pipe-backed descriptor simply has no usable
-        // channel. Either way the probe must not claim seekability, because
-        // repositioning by seeking is exactly the operation that loses bytes
-        // here. The observed pair is in the message so the platform's answer is
-        // visible rather than assumed.
-        val pipe = ParcelFileDescriptor.createPipe()
-        pipe[0].use { readEnd ->
-            pipe[1].use {
-                val result = ParcelDescriptorSeekabilityProbe.probe(readEnd)
-                assertFalse(
-                    "a pipe must never be reported seekable " +
-                        "(seekability=${result.seekability}, evidence=${result.evidence}, " +
-                        "size=${result.sizeBytes})",
-                    result.seekability.canSeek,
-                )
-                assertFalse(
-                    "a pipe cannot have a known length (evidence=${result.evidence})",
-                    result.sizeIsKnown,
-                )
-            }
-        }
-    }
-
-    @Test
-    fun `a descriptor with no usable channel is reported as unknown, not as non-seekable`() {
+        // A closed descriptor is the real descriptor here that rejects
+        // positioning. It is worth saying why it is not a pipe: Robolectric
+        // backs its pipes with a seekable temporary file, so the platform's own
+        // pipe behaviour — which is the motivating case for probing at all — is
+        // not observable in this sandbox. The probe's *decision*, which is the
+        // part this repository owns, is pinned here and by the forced shapes
+        // below; the platform's answer for a pipe is a fact about the platform.
         val closed = ParcelFileDescriptor.open(tempFile(), ParcelFileDescriptor.MODE_READ_ONLY)
         closed.close()
+
         val result = ParcelDescriptorSeekabilityProbe.probe(closed)
-        // Unknown rather than non-seekable: "I could not tell" and "it cannot
-        // seek" are different facts, and only the second justifies discarding
-        // bytes to reach an offset.
-        assertEquals(Seekability.UNKNOWN, result.seekability)
+
+        assertEquals(Seekability.NON_SEEKABLE, result.seekability)
+        assertEquals(ProbeEvidence.POSITION_REJECTED, result.evidence)
+        assertNull(result.sizeBytes)
         assertFalse(result.sizeIsKnown)
     }
 

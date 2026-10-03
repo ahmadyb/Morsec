@@ -160,12 +160,14 @@ class MediaStoreSourceTest {
         id: Long = 42L,
         name: String = "clip.mp4",
         size: Int = 4_096,
-        sizeOverride: Long? = null,
+        /** What the row reports. Null means the provider will not say, which is
+         *  a different fact from zero and must stay null all the way through. */
+        reportedSize: Long? = size.toLong(),
         mime: String? = "video/mp4",
         modifiedSeconds: Long? = 1_700_000_000L,
         file: File = tempFile(name, size),
     ): File {
-        provider.rows[id] = FakeMediaProvider.Row(id, name, sizeOverride ?: size.toLong(), mime, modifiedSeconds)
+        provider.rows[id] = FakeMediaProvider.Row(id, name, reportedSize, mime, modifiedSeconds)
         provider.files[id] = file
         return file
     }
@@ -223,7 +225,7 @@ class MediaStoreSourceTest {
 
     @Test
     fun `a provider that will not state a length says so instead of claiming zero`() {
-        seed(sizeOverride = null)
+        seed(reportedSize = null)
         val source = MediaStoreTransferSources.create(resolver, uriFor(42L), relative)
 
         // -1 is "the provider would not say"; 0 would be a real, transferable
@@ -272,7 +274,7 @@ class MediaStoreSourceTest {
         RandomAccessFile(file, "rw").use {
             it.channel.write(ByteBuffer.wrap(payload), offset)
         }
-        seed(name = "sparse.bin", sizeOverride = offset + payload.size, file = file)
+        seed(name = "sparse.bin", reportedSize = offset + payload.size, file = file)
 
         val source = MediaStoreTransferSources.create(resolver, uriFor(42L), relative)
         val handle = (source.openAt(offset) as SourceOpenResult.Opened).handle
@@ -303,7 +305,7 @@ class MediaStoreSourceTest {
         // length. Setting only the column is not enough: the probe measures the
         // descriptor, which happily answers for a real file, and then the opener
         // would validate after all. Both have to be unknown to reach the case.
-        seed(size = 16, sizeOverride = null)
+        seed(size = 16, reportedSize = null)
         val source = MediaStoreTransferSources.create(
             resolver = resolver,
             uri = uriFor(42L),

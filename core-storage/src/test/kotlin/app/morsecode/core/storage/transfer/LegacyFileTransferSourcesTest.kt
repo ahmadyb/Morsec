@@ -100,31 +100,50 @@ class LegacyFileTransferSourcesTest {
     }
 
     @Test
-    fun `a traversal out of the root is refused rather than opened`() {
+    fun `a traversal cannot be expressed as a relative path at all`() {
         grant()
         seed()
-        val escaping = RelativeTransferPath("Download/../../outside.mp4")
 
-        assertNull(sources().create(escaping))
-        assertFalse(sources().contains(escaping))
+        // Guarded at the type, so it cannot reach the filesystem layer.
+        assertFalse(RelativeTransferPath.isValid("Download/../../outside.mp4"))
+        assertNull(RelativeTransferPath.orNull("Download/../../outside.mp4"))
+        assertFalse(
+            "a traversal must resolve outside the root",
+            ApprovedRoots.isInside(root, File(root, "Download/../../outside.mp4")),
+        )
     }
 
     @Test
     fun `an absolute path is refused`() {
         grant()
-        assertNull(sources().create(RelativeTransferPath("/etc/passwd")))
+        seed()
+
+        assertFalse(RelativeTransferPath.isValid("/etc/passwd"))
+        assertNull(RelativeTransferPath.orNull("/etc/passwd"))
+        assertFalse(ApprovedRoots.isInside(root, File("/etc/passwd")))
     }
 
     @Test
-    fun `a file outside every approved root is not found`() {
+    fun `a file that is not in the approved root is reported as missing, not as unapproved`() {
         grant()
+        // The file lives under some other root. The same relative path still
+        // *resolves* inside the approved one, because approval is about roots
+        // and not about existence — so the honest outcome is a typed NotFound
+        // at use time rather than a refusal to build a source.
         val elsewhere = Files.createTempDirectory("not-approved-").toFile()
         val dir = File(elsewhere, "Download").apply { mkdirs() }
         File(dir, "clip.mp4").writeBytes(ByteArray(64))
 
-        // Same relative path, different root: the approval list is what makes
-        // the difference, not the shape of the path.
-        assertNull(sources().create(relative))
+        val source = sources().create(relative)
+        assertNotNull(source)
+        assertTrue(source!!.fingerprint() is SourceFingerprintResult.Unavailable)
+
+        val opened = source.openAtZero()
+        assertTrue(opened is SourceOpenResult.Failed)
+        assertEquals(
+            TransferStorageErrorCategory.NOT_FOUND,
+            (opened as SourceOpenResult.Failed).error.category,
+        )
     }
 
     // --- the runtime permission ------------------------------------------------------------------
