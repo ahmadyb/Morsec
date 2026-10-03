@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import androidx.core.net.toUri
 import app.morsecode.core.model.SafGrant
 import app.morsecode.core.storage.saf.PathResolution
 import app.morsecode.core.storage.saf.SafPaths
@@ -210,7 +211,7 @@ public object SafDocumentTransferSources {
             TransferStorageError.Unsupported("saf_outside_tree"),
         )
 
-        val treeUri = Uri.parse(grant.treeUri)
+        val treeUri = grant.treeUri.toUri()
         if (!grantChecker.isReadGranted(treeUri)) {
             return SafSourceResult.Refused(TransferStorageError.PermissionRevoked("read"))
         }

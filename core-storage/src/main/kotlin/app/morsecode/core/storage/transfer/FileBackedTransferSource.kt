@@ -1,6 +1,7 @@
 package app.morsecode.core.storage.transfer
 
 import android.net.Uri
+import androidx.core.net.toUri
 import app.morsecode.core.transfer.identity.RelativeTransferPath
 import java.io.File
 import java.io.FileInputStream
@@ -274,7 +275,7 @@ public class FileBackedTransferSources(
             key = key,
             // Synthetic and deliberately not resolvable: a file:// Uri here would
             // put an absolute private path into a value callers log and persist.
-            uri = Uri.parse("content://$PRIVATE_AUTHORITY/${Uri.encode(key.value)}"),
+            uri = "content://$PRIVATE_AUTHORITY/${Uri.encode(key.value)}".toUri(),
             displayName = name,
             relativePath = relativePath,
             mimeType = mimeType ?: guessMimeType(name),
