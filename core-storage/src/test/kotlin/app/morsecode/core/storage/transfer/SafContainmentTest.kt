@@ -29,6 +29,7 @@ class SafContainmentTest {
     private val rootId = "primary:Download"
 
     private val grant = SafTreeGrant(
+        grantId = "g-1",
         treeUri = treeUri,
         rootDocumentId = rootId,
         authority = authority,
@@ -107,11 +108,21 @@ class SafContainmentTest {
     }
 
     @Test
-    fun `a document under a different tree grant from the same authority is outside`() {
+    fun `a document under a different tree grant is outside when the provider denies it`() {
         val moviesTree = Uri.parse("content://$authority/tree/primary%3AMovies")
         val moviesDoc = SafContainment.documentUriUsingTree(moviesTree, "primary:Movies/2026")!!
-        val evidence = SafDestinationResolver.validateExistingUri(grant, moviesDoc, FakeProver(), 34)
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant, moviesDoc, FakeProver(child = SafChildAnswer.Answered(false)), 34,
+        )
         assertTrue("got $evidence", evidence is SafContainmentEvidence.Outside)
+    }
+
+    @Test
+    fun `a document under a different tree grant is unknown on API 23, never prefix-accepted`() {
+        val moviesTree = Uri.parse("content://$authority/tree/primary%3AMovies")
+        val moviesDoc = SafContainment.documentUriUsingTree(moviesTree, "primary:Movies/2026")!!
+        val evidence = SafDestinationResolver.validateExistingUri(grant, moviesDoc, FakeProver(), 23)
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
     }
 
     @Test
@@ -486,10 +497,10 @@ class SafContainmentTest {
             SafContainmentPolicy.decide(canonicalEvidence(), SafContainmentOperation.CREATE_DESTINATION),
         )
         listOf(
-            SafContainmentOperation.REOPEN_TEMPORARY,
-            SafContainmentOperation.RENAME_TEMPORARY,
+            SafContainmentOperation.OPEN_WRITE,
+            SafContainmentOperation.RENAME,
             SafContainmentOperation.DELETE_TEMPORARY,
-            SafContainmentOperation.RECONCILE_FINAL,
+            SafContainmentOperation.RECONCILE,
         ).forEach { operation ->
             assertEquals(
                 "$operation must not rest on canonical evidence alone",
@@ -511,10 +522,10 @@ class SafContainmentTest {
     fun `unknown forbids writing renaming and deleting`() {
         listOf(
             SafContainmentOperation.CREATE_DESTINATION,
-            SafContainmentOperation.REOPEN_TEMPORARY,
-            SafContainmentOperation.RENAME_TEMPORARY,
+            SafContainmentOperation.OPEN_WRITE,
+            SafContainmentOperation.RENAME,
             SafContainmentOperation.DELETE_TEMPORARY,
-            SafContainmentOperation.RECONCILE_FINAL,
+            SafContainmentOperation.RECONCILE,
         ).forEach { operation ->
             assertEquals(
                 "$operation",
@@ -554,5 +565,96 @@ class SafContainmentTest {
             SafContainmentDecision.REJECTED,
             SafContainmentPolicy.decide(pathEvidence(), SafContainmentOperation.DELETE_TEMPORARY),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // API 26-28: provider document ids may be opaque
+    // -----------------------------------------------------------------------
+
+    private fun pathProver(rootId: String?, segments: List<String>) = FakeProver(
+        path = SafPathAnswer.Resolved(rootId = rootId, segments = segments),
+    )
+
+    @Test
+    fun `opaque non-prefix ids are accepted when findDocumentPath proves ancestry`() {
+        // No entry is a textual prefix or descendant of the one before it.
+        // Ancestry comes from the provider having listed the path, not from
+        // comparing the strings.
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant,
+            documentUri("target-opaque-b913"),
+            pathProver("root-id", listOf("root-id", "child-opaque-74a2", "target-opaque-b913")),
+            27,
+        )
+        val result = evidence as? SafContainmentEvidence.ProviderConfirmedPath
+            ?: error("got $evidence")
+        assertEquals("target-opaque-b913", result.targetDocumentId)
+        assertEquals(listOf("root-id", "child-opaque-74a2", "target-opaque-b913"), result.segments)
+    }
+
+    @Test
+    fun `a path whose root is the approved root but whose target differs is unknown`() {
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant,
+            documentUri("target-opaque-b913"),
+            pathProver("root-id", listOf("root-id", "child-opaque-74a2", "some-other-opaque")),
+            27,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a path whose root is not the approved root is unknown`() {
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant,
+            documentUri("target-opaque-b913"),
+            pathProver("other-root-id", listOf("root-id", "target-opaque-b913")),
+            27,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a path starting somewhere other than the approved root is outside`() {
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant,
+            documentUri("target-opaque-b913"),
+            pathProver("root-id", listOf("a-totally-different-root", "target-opaque-b913")),
+            27,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Outside)
+    }
+
+    @Test
+    fun `an empty provider path is unknown`() {
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant, documentUri("target-opaque-b913"), pathProver("root-id", emptyList()), 27,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `duplicate opaque entries make a path incoherent`() {
+        val evidence = SafDestinationResolver.validateExistingUri(
+            grant,
+            documentUri("child-opaque-74a2"),
+            pathProver("root-id", listOf("root-id", "child-opaque-74a2", "child-opaque-74a2")),
+            27,
+        )
+        assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
+    }
+
+    @Test
+    fun `a malformed or null-shaped entry is unknown`() {
+        for (bad in listOf("", "..", ".", "a\\b", "/abs")) {
+            val evidence = SafDestinationResolver.validateExistingUri(
+                grant,
+                documentUri("target-opaque-b913"),
+                pathProver("root-id", listOf("root-id", bad, "target-opaque-b913")),
+                27,
+            )
+            assertTrue("entry '$bad' must be unknown, got $evidence",
+                evidence is SafContainmentEvidence.Unknown)
+        }
     }
 }

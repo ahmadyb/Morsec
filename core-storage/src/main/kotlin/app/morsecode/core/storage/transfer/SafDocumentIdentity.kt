@@ -1,0 +1,264 @@
+package app.morsecode.core.storage.transfer
+
+import androidx.core.net.toUri
+import app.morsecode.core.transfer.identity.TransferId
+
+/*
+ * Identity: not "is this place inside the grant" but "is this the document I
+ * made".
+ *
+ * Containment and identity are different questions, and the second one cannot
+ * be answered by looking at a name. A provider is free to hand back a different
+ * name because of a collision, a user can rename a file, a cloud-sync client can
+ * append " (1)", and a second transfer of a file with the same name would
+ * collide with the first. Locating a document again by searching for its name is
+ * how one transfer ends up deleting another's work.
+ *
+ * So once a document has been created, the SAF layer records exactly what came
+ * back — the grant, the tree, the parent, the document URI, the document id,
+ * and the transfer and commit it belongs to — and every later operation is
+ * checked against that record. Nothing is located by name, ever.
+ *
+ * This matters most on API 23-25, where GrantScopedCanonical is enough to
+ * construct and create a new child but can say nothing about a document that
+ * already exists. After creation the application has a stronger fact available:
+ * it made this document, and it knows exactly which one.
+ */
+
+/**
+ * A document this application created, recorded exactly as the provider
+ * reported it.
+ *
+ * Persisted later by the Room layer; modelled here because the SAF layer is
+ * what decides whether an operation may proceed, and it cannot make that
+ * decision from containment alone.
+ */
+public data class InternallyCreatedDocument(
+    public val grantId: String,
+    public val treeUri: String,
+    public val authority: String,
+    public val parentDocumentId: String,
+    public val documentUri: String,
+    public val documentId: String,
+    public val transferId: TransferId,
+    public val commitId: PartialIdentity,
+) {
+    init {
+        require(grantId.isNotBlank()) { "grantId must not be blank" }
+        require(treeUri.isNotBlank()) { "treeUri must not be blank" }
+        require(authority.isNotBlank()) { "authority must not be blank" }
+        require(documentUri.isNotBlank()) { "documentUri must not be blank" }
+        require(documentId.isNotBlank()) { "documentId must not be blank" }
+    }
+}
+
+/** What a caller must present to act on a recorded document. */
+public data class SafOperationContext(
+    public val grant: SafTreeGrant,
+    public val transferId: TransferId,
+    public val commitId: PartialIdentity,
+)
+
+/**
+ * Whether a recorded identity authorises an operation.
+ *
+ * Every field is checked, because each one rules out a different accident:
+ * the grant and tree rule out acting under a different grant, the authority
+ * rules out a different provider, and the transfer and commit ids rule out one
+ * transfer touching another's document.
+ */
+public object SafDocumentIdentityPolicy {
+
+    public fun decide(
+        identity: InternallyCreatedDocument,
+        context: SafOperationContext,
+        operation: SafContainmentOperation,
+        /** What the caller wants to act on. Null means the stored identity itself. */
+        presentedDocumentUri: String? = null,
+        /** Whether the recorded commit state authorises the operation. */
+        commitStateAllows: Boolean = true,
+    ): SafContainmentDecision {
+        // A grant that is no longer held authorises nothing, and that is not
+        // the same thing as a mismatch.
+        if (!context.grant.writable) {
+            return SafContainmentDecision.FORBIDDEN_NO_WRITE
+        }
+
+        if (identity.grantId != context.grant.grantId) return SafContainmentDecision.REJECTED
+        if (identity.authority != context.grant.authority) return SafContainmentDecision.REJECTED
+        if (identity.treeUri != context.grant.treeUri.toString()) {
+            return SafContainmentDecision.REJECTED
+        }
+        if (identity.transferId != context.transferId) return SafContainmentDecision.REJECTED
+        if (identity.commitId != context.commitId) return SafContainmentDecision.REJECTED
+        if (!commitStateAllows) return SafContainmentDecision.REJECTED
+
+        if (presentedDocumentUri != null) {
+            // Exact match or nothing. A document found by searching for the
+            // same name is a different document until the id says otherwise.
+            if (presentedDocumentUri != identity.documentUri) {
+                return SafContainmentDecision.REJECTED
+            }
+            if (presentedDocumentUri.toUri().authority != identity.authority) {
+                return SafContainmentDecision.REJECTED
+            }
+        }
+
+        // Deletion demands the exact stored identity, named explicitly. There
+        // is no deletion by containment, by name, or by search result.
+        if (operation == SafContainmentOperation.DELETE_TEMPORARY && presentedDocumentUri == null) {
+            return SafContainmentDecision.REJECTED
+        }
+
+        return SafContainmentDecision.ALLOWED
+    }
+
+    /**
+     * Re-records an identity after the provider returned a new identity.
+     *
+     * Returns null while the rename is unresolved, because there is no honest
+     * identity to record yet.
+     */
+    public fun afterRename(
+        identity: InternallyCreatedDocument,
+        resolved: SafRenameIdentity,
+    ): InternallyCreatedDocument? {
+        val uri = resolved.authoritativeDocumentUri ?: return null
+        val id = resolved.authoritativeDocumentId ?: return null
+        return identity.copy(documentUri = uri, documentId = id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rename: the provider may hand back a different identity
+// ---------------------------------------------------------------------------
+
+/**
+ * What a rename left behind.
+ *
+ * A rename is not atomic and not guaranteed to preserve identity: a provider
+ * may return a new URI, the same URI, or nothing at all. Each of those is a
+ * different fact and needs a different next step.
+ */
+public enum class SafRenameReconciliation(public val id: String) {
+
+    /** Only the returned identity resolves. It becomes authoritative. */
+    RESOLVED_TO_RETURNED("resolved_to_returned"),
+
+    /** The rename returned the same identity, and it resolves. */
+    RESOLVED_TO_ORIGINAL("resolved_to_original"),
+
+    /** Both identities resolve. Nothing is known about what the rename did. */
+    AMBIGUOUS_BOTH_RESOLVE("ambiguous_both_resolve"),
+
+    /** The returned identity does not resolve, but the original still does. */
+    RETURNED_UNRESOLVED("returned_unresolved"),
+
+    /** Neither identity resolves. */
+    NEITHER_RESOLVES("neither_resolves"),
+
+    /** The provider returned no identity at all. */
+    NULL_RETURN("null_return"),
+    ;
+
+    public val isResolved: Boolean
+        get() = this == RESOLVED_TO_RETURNED || this == RESOLVED_TO_ORIGINAL
+
+    public val requiresReconciliation: Boolean get() = !isResolved
+}
+
+/**
+ * The identities a rename involves, and which one is authoritative.
+ *
+ * Both are preserved while unresolved, because the next pass will need to ask
+ * the provider which of them actually exists rather than guessing.
+ */
+public data class SafRenameIdentity(
+    public val beforeDocumentUri: String,
+    public val beforeDocumentId: String,
+    public val renameRequested: Boolean,
+    public val returnedDocumentUri: String?,
+    public val returnedDocumentId: String?,
+    public val reconciliation: SafRenameReconciliation,
+) {
+
+    /**
+     * The identity to use from now on.
+     *
+     * Null while reconciliation is required. Callers must not fall back to the
+     * old identity when this is null: that is precisely the case where the old
+     * identity is no longer known to mean anything.
+     */
+    public val authoritativeDocumentUri: String?
+        get() = when (reconciliation) {
+            SafRenameReconciliation.RESOLVED_TO_RETURNED -> returnedDocumentUri
+            SafRenameReconciliation.RESOLVED_TO_ORIGINAL -> beforeDocumentUri
+            else -> null
+        }
+
+    public val authoritativeDocumentId: String?
+        get() = when (reconciliation) {
+            SafRenameReconciliation.RESOLVED_TO_RETURNED -> returnedDocumentId
+            SafRenameReconciliation.RESOLVED_TO_ORIGINAL -> beforeDocumentId
+            else -> null
+        }
+
+    /** Every identity known, so a later pass can disambiguate. */
+    public val knownUris: List<String>
+        get() = listOfNotNull(beforeDocumentUri, returnedDocumentUri).distinct()
+
+    public val requiresReconciliation: Boolean get() = reconciliation.requiresReconciliation
+}
+
+/**
+ * Decides what a rename left behind, from what the provider returned and what
+ * still resolves.
+ *
+ * Pure: the two `resolves` flags come from provider queries the caller has
+ * already made, so this is testable without a provider at all.
+ */
+public object SafRenameIdentityResolver {
+
+    public fun resolve(
+        beforeDocumentUri: String,
+        beforeDocumentId: String,
+        returnedDocumentUri: String?,
+        returnedDocumentId: String?,
+        originalStillResolves: Boolean,
+        returnedResolves: Boolean,
+    ): SafRenameIdentity {
+        val outcome = when {
+            // The provider gave nothing back. Nothing is known.
+            returnedDocumentUri == null -> SafRenameReconciliation.NULL_RETURN
+
+            // The rename reported the same identity back.
+            returnedDocumentUri == beforeDocumentUri -> if (originalStillResolves) {
+                SafRenameReconciliation.RESOLVED_TO_ORIGINAL
+            } else {
+                SafRenameReconciliation.NEITHER_RESOLVES
+            }
+
+            // A genuinely new identity, and the old one is gone.
+            returnedResolves && !originalStillResolves -> SafRenameReconciliation.RESOLVED_TO_RETURNED
+
+            // Both exist. The rename may have copied rather than moved, or the
+            // provider may be mid-operation. Not ours to guess.
+            returnedResolves && originalStillResolves -> SafRenameReconciliation.AMBIGUOUS_BOTH_RESOLVE
+
+            // The new identity does not exist but the old one does, so the
+            // rename probably did not happen. Still not a certainty.
+            originalStillResolves -> SafRenameReconciliation.RETURNED_UNRESOLVED
+
+            else -> SafRenameReconciliation.NEITHER_RESOLVES
+        }
+
+        return SafRenameIdentity(
+            beforeDocumentUri = beforeDocumentUri,
+            beforeDocumentId = beforeDocumentId,
+            renameRequested = true,
+            returnedDocumentUri = returnedDocumentUri,
+            returnedDocumentId = returnedDocumentId,
+            reconciliation = outcome,
+        )
+    }
+}

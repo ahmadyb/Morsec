@@ -444,6 +444,8 @@ public sealed interface SafContainmentEvidence {
  * destination and must not be treated as one.
  */
 public data class SafTreeGrant(
+    /** Identity of the persisted grant row this came from. */
+    public val grantId: String,
     public val treeUri: Uri,
     public val rootDocumentId: String,
     public val authority: String,
@@ -626,14 +628,6 @@ public object SafDestinationResolver {
             )
         }
 
-        if (!SafDocumentIdRules.isWithinOnSegmentBoundary(root.canonical, target.canonical)) {
-            return SafContainmentEvidence.Outside(
-                rootDocumentId = root.canonical,
-                targetDocumentId = target.canonical,
-                targetUri = documentUri.toString(),
-            )
-        }
-
         // Below API 26 there is no provider descendant API at all. An arbitrary
         // URI is therefore never accepted on a prefix, however well it matches.
         if (sdkInt < 26) {
@@ -644,6 +638,14 @@ public object SafDestinationResolver {
                 reason = TransferStorageError.Unsupported("saf_containment_unknown"),
             )
         }
+
+        // From API 26 the provider can answer, so the provider decides. A
+        // string comparison is deliberately not applied here: provider document
+        // ids are frequently opaque, so "target-opaque-b913" can be a genuine
+        // descendant of "root-id" while sharing no prefix with it. Rejecting on
+        // the string would reject a valid ancestry the provider is ready to
+        // prove. The provider's own root, and the authority already checked
+        // above, are what bound this.
 
         return confirm(
             grant = grant,
@@ -672,6 +674,10 @@ public object SafDestinationResolver {
                 targetUri = targetUri,
                 reason = TransferStorageError.Unsupported("saf_document_uri"),
             )
+
+        if (targetUri.toUri().authority != grant.authority) {
+            return SafContainmentEvidence.Outside(rootId, targetId, targetUri)
+        }
 
         return try {
             when (SafContainmentTier.forSdk(sdkInt)) {
@@ -753,51 +759,66 @@ public object SafDestinationResolver {
         val segments = answer.segments
 
         if (segments.isEmpty()) {
-            return SafContainmentEvidence.Unknown(
-                rootId, targetId, targetUri,
-                TransferStorageError.Unsupported("saf_containment_unknown"),
-            )
+            return unknownPath(rootId, targetId, targetUri)
         }
 
-        // A provider that names a different root is not contradicting us so
-        // much as describing somewhere else; that is unknown, not outside.
+        // A provider that names a different root is describing somewhere else.
+        // That is an inconsistency to be distrusted, not a proven contradiction.
         if (answer.rootId != null && answer.rootId != rootId) {
-            return SafContainmentEvidence.Unknown(
-                rootId, targetId, targetUri,
-                TransferStorageError.Unsupported("saf_containment_unknown"),
-            )
+            return unknownPath(rootId, targetId, targetUri)
         }
 
+        // The path not starting at the approved root is conclusive: the
+        // provider has described an ancestry that does not include our grant.
         if (segments.first() != rootId) {
             return SafContainmentEvidence.Outside(rootId, targetId, targetUri)
         }
 
         if (segments.last() != targetId) {
-            return SafContainmentEvidence.Unknown(
-                rootId, targetId, targetUri,
-                TransferStorageError.Unsupported("saf_containment_unknown"),
-            )
+            return unknownPath(rootId, targetId, targetUri)
         }
 
+        // Structural checks only. Provider document ids are frequently opaque:
+        // "child-opaque-74a2" is not a textual descendant of "root-id" and
+        // does not have to be. Ancestry comes from the provider having listed
+        // the path, never from comparing the strings in it.
         for (segment in segments) {
-            if (SafDocumentIdRules.validate(segment) !is SafDocumentIdCheck.Valid) {
-                return SafContainmentEvidence.Unknown(
-                    rootId, targetId, targetUri,
-                    TransferStorageError.Unsupported("saf_containment_unknown"),
-                )
+            if (!isUsablePathEntry(segment)) {
+                return unknownPath(rootId, targetId, targetUri)
             }
         }
 
-        for (index in 0 until segments.lastIndex) {
-            if (!SafDocumentIdRules.isWithinOnSegmentBoundary(segments[index], segments[index + 1])) {
-                return SafContainmentEvidence.Unknown(
-                    rootId, targetId, targetUri,
-                    TransferStorageError.Unsupported("saf_containment_unknown"),
-                )
-            }
+        // A path that repeats an entry is not a coherent ancestry.
+        if (segments.size > 1 && segments.toSet().size != segments.size) {
+            return unknownPath(rootId, targetId, targetUri)
         }
 
         return SafContainmentEvidence.ProviderConfirmedPath(rootId, targetId, targetUri, segments)
+    }
+
+    private fun unknownPath(
+        rootId: String,
+        targetId: String,
+        targetUri: String,
+    ): SafContainmentEvidence = SafContainmentEvidence.Unknown(
+        rootId, targetId, targetUri,
+        TransferStorageError.Unsupported("saf_containment_unknown"),
+    )
+
+    /**
+     * Whether one provider-reported path entry is a usable value.
+     *
+     * Opaque ids are expected and welcome. What is refused is an empty, null,
+     * control-bearing or traversal-shaped entry, because those indicate a
+     * broken or hostile provider rather than an unfamiliar naming scheme.
+     */
+    private fun isUsablePathEntry(entry: String): Boolean = when {
+        entry.isEmpty() -> false
+        entry.indexOf('\u0000') >= 0 -> false
+        entry.indexOf('\\') >= 0 -> false
+        entry == "." || entry == ".." -> false
+        entry.startsWith("/") -> false
+        else -> true
     }
 }
 
@@ -810,17 +831,20 @@ public enum class SafContainmentOperation(public val id: String) {
     /** Create a new destination document under the grant. */
     CREATE_DESTINATION("create_destination"),
 
-    /** Reopen a temporary document this application created earlier. */
-    REOPEN_TEMPORARY("reopen_temporary"),
+    /** Open the destination for writing. */
+    OPEN_WRITE("open_write"),
 
-    /** Rename a temporary document to its final name. */
-    RENAME_TEMPORARY("rename_temporary"),
+    /** Reopen read-only and verify what the provider is holding. */
+    VERIFY("verify"),
+
+    /** Rename the document to its final name. */
+    RENAME("rename"),
+
+    /** Inspect an existing document during reconciliation. */
+    RECONCILE("reconcile"),
 
     /** Delete a temporary document this application created earlier. */
     DELETE_TEMPORARY("delete_temporary"),
-
-    /** Inspect an existing final document during reconciliation. */
-    RECONCILE_FINAL("reconcile_final"),
 }
 
 /** What containment policy decided. */
