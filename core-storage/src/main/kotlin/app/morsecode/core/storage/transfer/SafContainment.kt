@@ -2,6 +2,7 @@ package app.morsecode.core.storage.transfer
 
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.core.net.toUri
 
 /*
  * Containment: proving that a write target is inside the tree the user granted.
@@ -561,7 +562,7 @@ public object SafDestinationResolver {
         // The URI was built from the grant, so this is a self-check rather
         // than a test of caller input: if the authority drifted, something is
         // wrong with the grant and the destination must not be used.
-        if (Uri.parse(targetUri).authority != grant.authority) {
+        if (targetUri.toUri().authority != grant.authority) {
             return SafContainmentEvidence.Outside(root.canonical, targetId, targetUri)
         }
 
@@ -675,7 +676,7 @@ public object SafDestinationResolver {
         return try {
             when (SafContainmentTier.forSdk(sdkInt)) {
                 SafContainmentTier.CHILD_DOCUMENT -> when (
-                    val answer = prover.isChildDocument(rootUri, Uri.parse(targetUri))
+                    val answer = prover.isChildDocument(rootUri, targetUri.toUri())
                 ) {
                     is SafChildAnswer.Answered -> if (answer.isChild) {
                         SafContainmentEvidence.ProviderConfirmedChild(rootId, targetId, targetUri)
@@ -697,7 +698,7 @@ public object SafDestinationResolver {
                 }
 
                 SafContainmentTier.DOCUMENT_PATH -> when (
-                    val answer = prover.documentPath(Uri.parse(targetUri))
+                    val answer = prover.documentPath(targetUri.toUri())
                 ) {
                     is SafPathAnswer.Resolved -> evaluatePath(rootId, targetId, targetUri, answer)
                     SafPathAnswer.Revoked -> SafContainmentEvidence.PermissionRevoked(
