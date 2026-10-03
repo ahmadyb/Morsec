@@ -196,7 +196,14 @@ class AppPrivatePartialTest {
         val data = payload(200_000)
         partial.writeAt(0L, data, 0, data.size)
 
-        val expected = Sha256Digest.of(data)
+        // SHA-256 of payload(200_000, seed = 7), computed independently with
+        // Python's hashlib. Not with Sha256Digest.of(), which is not a hash
+        // function: it wraps exactly 32 raw digest bytes and returns null for
+        // anything else, so feeding it file content silently produced no
+        // expected digest at all.
+        val expected = Sha256Digest.fromHex(
+            "3d46a15a54cf33991f077e628582a654e184f139cf03fcbcd7c89fb4213e1023",
+        )
         assertNotNull(expected)
 
         val result = DestinationVerifier.verify(
@@ -219,12 +226,16 @@ class AppPrivatePartialTest {
         partial.writeAt(0L, data, 0, data.size)
 
         // Claim the file is one byte shorter than it is: verification must read
-        // exactly what it was told and reach a verdict on that basis.
-        val short = data.copyOf(data.size - 1)
+        // exactly what it was told and reach a verdict on that basis. The
+        // expected digest is SHA-256 of the first 9,999 bytes of
+        // payload(10_000, seed = 7), again computed outside the implementation.
+        val expected = Sha256Digest.fromHex(
+            "5cf8415bad23d6be1c92edeb3bd85baeee4263f564a71833326076baf8570635",
+        )
         val result = DestinationVerifier.verify(
             source = partial.verificationSource(),
-            totalBytes = short.size.toLong(),
-            expected = Sha256Digest.of(short),
+            totalBytes = 9_999L,
+            expected = expected,
         )
 
         assertTrue(result is VerifyResult.Matched)

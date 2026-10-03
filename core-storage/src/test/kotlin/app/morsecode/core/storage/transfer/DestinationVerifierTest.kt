@@ -3,6 +3,7 @@ package app.morsecode.core.storage.transfer
 import app.morsecode.core.transfer.integrity.Sha256Digest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -124,6 +125,30 @@ class DestinationVerifierTest {
         assertTrue(result is VerifyResult.Matched)
         assertEquals(abcHex, (result as VerifyResult.Matched).digest.hex)
         assertEquals(3L, result.bytes)
+    }
+
+    @Test
+    fun `a multi-chunk file matches a digest computed outside the implementation`() {
+        // The published "abc" vector only exercises a single pass. This one is
+        // 1,000,000 bytes read through a 4,096-byte buffer, so the digest is
+        // assembled across ~245 incremental updates — the path a real transfer
+        // takes. The expected value was computed with Python's hashlib, so a bug
+        // in this repository's accumulator cannot agree with itself.
+        val data = ByteArray(1_000_000) { (it % 97).toByte() }
+        val expected = Sha256Digest.fromHex(
+            "9a9a5b1d51a95041f59a9a7a062f15f00c9e9681c8965f922323ed7f96978c4f",
+        )
+        assertNotNull(expected)
+
+        val result = DestinationVerifier.verify(
+            source = ByteSource(data),
+            totalBytes = data.size.toLong(),
+            expected = expected,
+            buffer = ByteArray(4_096),
+        )
+
+        assertTrue(result is VerifyResult.Matched)
+        assertEquals(1_000_000L, (result as VerifyResult.Matched).bytes)
     }
 
     @Test
