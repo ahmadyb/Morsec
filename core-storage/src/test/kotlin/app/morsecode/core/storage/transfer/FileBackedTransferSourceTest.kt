@@ -234,8 +234,8 @@ class FileBackedTransferSourceTest {
         val opened = source.openAt(2_048L)
         assertTrue(opened is SourceOpenResult.Failed)
         val error = (opened as SourceOpenResult.Failed).error
-        assertTrue(error is TransferStorageError.StateConflict)
-        assertEquals("offset_past_end", error.reason)
+        val conflict = error as TransferStorageError.StateConflict
+        assertEquals("offset_past_end", conflict.reason)
     }
 
     @Test
