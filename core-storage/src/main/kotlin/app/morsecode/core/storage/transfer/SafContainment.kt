@@ -393,7 +393,18 @@ public object SafContainment {
                 reason = TransferStorageError.Unsupported("saf_document_uri"),
             )
 
-        return when (val proof = prover.prove(rootUri, targetUri)) {
+        val proof = try {
+            prover.prove(rootUri, targetUri)
+        } catch (e: SecurityException) {
+            // A revoked grant is not "not a child", and not "the provider
+            // broke". It needs its own outcome so the caller can preserve the
+            // identity and state for later reconciliation.
+            SafChildProof.Revoked(TransferStorageError.PermissionRevoked("write"))
+        } catch (e: Exception) {
+            SafChildProof.Indeterminate
+        }
+
+        return when (proof) {
             is SafChildProof.Answered -> if (proof.isChild) {
                 SafContainmentProof.Inside(rootRaw, targetRaw, proof.method)
             } else {
