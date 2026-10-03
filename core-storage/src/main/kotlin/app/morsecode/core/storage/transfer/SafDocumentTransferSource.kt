@@ -183,18 +183,6 @@ public class SafDocumentTransferSource internal constructor(
     }
 }
 
-private fun android.database.Cursor.stringOrNull(column: String): String? {
-    val index = getColumnIndex(column)
-    if (index < 0 || isNull(index)) return null
-    return getString(index)
-}
-
-private fun android.database.Cursor.longOrNull(column: String): Long? {
-    val index = getColumnIndex(column)
-    if (index < 0 || isNull(index)) return null
-    return getLong(index)
-}
-
 /** Builds SAF sources, refusing anything outside the granted trees. */
 public object SafDocumentTransferSources {
 

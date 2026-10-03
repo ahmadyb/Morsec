@@ -94,24 +94,13 @@ public class MediaStoreTransferSource internal constructor(
         val cursor = resolver.query(uri, PROJECTION, null, null, null) ?: return null
         cursor.use {
             if (!it.moveToFirst()) return null
-            val id = it.indexOf(MediaStore.MediaColumns._ID)
-                .takeIf { index -> index >= 0 }
-                ?.let { index -> if (it.isNull(index)) null else it.getLong(index) }
-            val name = it.indexOf(OpenableColumns.DISPLAY_NAME)
-                .takeIf { index -> index >= 0 }
-                ?.let { index -> if (it.isNull(index)) null else it.getString(index) }
-            val size = it.indexOf(OpenableColumns.SIZE)
-                .takeIf { index -> index >= 0 }
-                ?.let { index -> if (it.isNull(index)) null else it.getLong(index) }
-            val mime = it.indexOf(MediaStore.MediaColumns.MIME_TYPE)
-                .takeIf { index -> index >= 0 }
-                ?.let { index -> if (it.isNull(index)) null else it.getString(index) }
-            val modified = it.indexOf(DATE_MODIFIED)
-                .takeIf { index -> index >= 0 }
-                ?.let { index ->
-                    if (it.isNull(index)) null else it.getLong(index) * 1_000L
-                }
-            return MediaStoreRow(id, name, size, mime, modified)
+            return MediaStoreRow(
+                id = it.longOrNull(MediaStore.MediaColumns._ID),
+                displayName = it.stringOrNull(OpenableColumns.DISPLAY_NAME),
+                sizeBytes = it.longOrNull(OpenableColumns.SIZE),
+                mimeType = it.stringOrNull(MediaStore.MediaColumns.MIME_TYPE),
+                modifiedEpochMillis = it.longOrNull(DATE_MODIFIED)?.times(1_000L),
+            )
         }
     }
 
@@ -120,7 +109,7 @@ public class MediaStoreTransferSource internal constructor(
         public fun contentIdFor(mediaId: Long): String = "media:$mediaId"
 
         /** `date_modified` is in seconds; the rest of the app uses milliseconds. */
-        private const val DATE_MODIFIED = "date_modified"
+        internal const val DATE_MODIFIED = "date_modified"
 
         internal val PROJECTION = arrayOf(
             MediaStore.MediaColumns._ID,
@@ -182,19 +171,14 @@ public object MediaStoreTransferSources {
             ?: return null
         cursor.use {
             if (!it.moveToFirst()) return null
-            val id = it.indexOf(MediaStore.MediaColumns._ID)
-                .takeIf { i -> i >= 0 }?.let { i -> if (it.isNull(i)) null else it.getLong(i) }
-            val name = it.indexOf(OpenableColumns.DISPLAY_NAME)
-                .takeIf { i -> i >= 0 }?.let { i -> if (it.isNull(i)) null else it.getString(i) }
-            val size = it.indexOf(OpenableColumns.SIZE)
-                .takeIf { i -> i >= 0 }?.let { i -> if (it.isNull(i)) null else it.getLong(i) }
-            val mime = it.indexOf(MediaStore.MediaColumns.MIME_TYPE)
-                .takeIf { i -> i >= 0 }?.let { i -> if (it.isNull(i)) null else it.getString(i) }
-            val modified = it.indexOf("date_modified")
-                .takeIf { i -> i >= 0 }?.let { i ->
-                    if (it.isNull(i)) null else it.getLong(i) * 1_000L
-                }
-            return MediaStoreRow(id, name, size, mime, modified)
+            return MediaStoreRow(
+                id = it.longOrNull(MediaStore.MediaColumns._ID),
+                displayName = it.stringOrNull(OpenableColumns.DISPLAY_NAME),
+                sizeBytes = it.longOrNull(OpenableColumns.SIZE),
+                mimeType = it.stringOrNull(MediaStore.MediaColumns.MIME_TYPE),
+                modifiedEpochMillis = it.longOrNull(MediaStoreTransferSource.DATE_MODIFIED)
+                    ?.times(1_000L),
+            )
         }
     }
 
