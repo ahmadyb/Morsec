@@ -286,13 +286,18 @@ class SafContainmentTest {
 
     @Test
     fun `a provider path whose root disagrees with the approved root is unknown`() {
+        // Root ids are only comparable with root ids, so the grant has to know
+        // its own for a disagreement to be detectable at all.
+        val grantWithRoot = grant.copy(rootId = "primary")
         val prover = FakeProver(
             path = SafPathAnswer.Resolved(
                 rootId = "some.other.root",
                 segments = listOf(rootId, "$rootId/2026"),
             ),
         )
-        val evidence = SafDestinationResolver.resolveDestination(grant, listOf("2026"), prover, 27)
+        val evidence = SafDestinationResolver.resolveDestination(
+            grantWithRoot, listOf("2026"), prover, 27,
+        )
         assertTrue("got $evidence", evidence is SafContainmentEvidence.Unknown)
     }
 
@@ -589,7 +594,7 @@ class SafContainmentTest {
         val result = evidence as? SafContainmentEvidence.ProviderConfirmedPath
             ?: error("got $evidence")
         assertEquals("target-opaque-b913", result.targetDocumentId)
-        assertEquals(listOf("root-id", "child-opaque-74a2", "target-opaque-b913"), result.segments)
+        assertEquals(listOf(rootId, "child-opaque-74a2", "target-opaque-b913"), result.segments)
     }
 
     @Test
