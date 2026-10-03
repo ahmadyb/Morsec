@@ -135,7 +135,13 @@ class SafDestinationTest {
 
     @Test
     fun `a tree uri with no root segment cannot be resolved at all`() {
-        val error = rejected(tree = "content://com.android.externalstorage.documents/tree")
+        // The grant has to match, or the rejection comes from the grant lookup
+        // and never reaches the parse this test is about.
+        val brokenTree = "content://com.android.externalstorage.documents/tree"
+        val error = rejected(
+            tree = brokenTree,
+            grants = listOf(readWriteGrant.copy(treeUri = brokenTree)),
+        )
         assertTrue(error is TransferStorageError.Unsupported)
         assertEquals("saf_document_uri", (error as TransferStorageError.Unsupported).capability)
     }
@@ -192,12 +198,32 @@ class SafDestinationTest {
     }
 
     @Test
-    fun `a recorded document id is re-checked against the grant before reuse`() {
+    fun `a recorded descendant id is still accepted when re-checked`() {
         assertTrue(SafDestinationTree.isInsideGrantedTree(treeUri, "$rootDocumentId/2026"))
+    }
+
+    @Test
+    fun `the recorded root id is still accepted when re-checked`() {
         assertTrue(SafDestinationTree.isInsideGrantedTree(treeUri, rootDocumentId))
+    }
+
+    @Test
+    fun `a blank recorded id means the root and is accepted`() {
         assertTrue(SafDestinationTree.isInsideGrantedTree(treeUri, null))
+    }
+
+    @Test
+    fun `a recorded id naming another tree is refused when re-checked`() {
         assertFalse(SafDestinationTree.isInsideGrantedTree(treeUri, "primary:Movies"))
+    }
+
+    @Test
+    fun `a recorded id carrying a parent traversal is refused`() {
         assertFalse(SafDestinationTree.isInsideGrantedTree(treeUri, "$rootDocumentId/../x"))
+    }
+
+    @Test
+    fun `a recorded id carrying an encoded traversal is refused`() {
         assertFalse(SafDestinationTree.isInsideGrantedTree(treeUri, "$rootDocumentId/%2E%2E"))
     }
 
@@ -318,7 +344,13 @@ class SafDestinationTest {
         val name = temporaryDocumentName("holiday.mp4", identity)
         assertTrue(name.startsWith("holiday.mp4."))
         assertTrue(name.endsWith(".morsec-part"))
-        assertTrue(name.contains(identity.value))
+        // The id is deliberately sanitised: ':' and '/' are not safe in a
+        // filename, so the name carries a filename-safe form of it rather than
+        // the raw value.
+        val sanitised = identity.value.map { char ->
+            if (char.isLetterOrDigit() || char == '-' || char == '_') char else '-'
+        }.joinToString("")
+        assertTrue(name.contains(sanitised))
     }
 
     @Test

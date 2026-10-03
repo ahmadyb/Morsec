@@ -520,23 +520,26 @@ public object SafDestinationTree {
 
         val target = targetDocumentId?.takeIf { it.isNotBlank() } ?: rootDocumentId
 
-        // `SafPaths.classify` compares segments against the literal strings "."
-        // and "..". A raw document id carrying a *percent-encoded* separator —
-        // `primary:Download/..%2F..%2Fetc` — has no segment equal to "..", so it
-        // would be classified as safely inside. Decode-inspect it here instead.
-        // A legitimate id containing a literal "%2F" is vanishingly rare, and
-        // refusing one fails closed: it rejects a destination, it never widens one.
-        if (ENCODED_TRAVERSAL.containsMatchIn(target)) {
-            return SafTargetResolution.Rejected(
+        // Canonicalise once, then validate. An earlier rule here rejected any id
+        // containing an encoded dot or slash, which was too broad: a document id
+        // is one percent-encoded URI segment, so primary:Download%2F2026 carries
+        // a legitimate %2F and ordinary Downloads destinations broke on it.
+        // SafDocumentIdRules now owns this, and the canonical form is what gets
+        // resolved below, so an encoded slash and a literal slash name the same
+        // place.
+        val canonical = when (val check = SafDocumentIdRules.validate(target)) {
+            is SafDocumentIdCheck.Valid -> check.canonical
+            is SafDocumentIdCheck.Invalid -> return SafTargetResolution.Rejected(
                 TransferStorageError.Unsupported(
                     "saf_document_uri",
-                    diagnostic = "target contains an encoded traversal",
+                    diagnostic = check.violation.id,
                 ),
             )
         }
 
         // SafPaths rejects blank ids, NULs, '.' and '..' segments, and anything
         // that is not under the granted root.
+
         val resolved = when (val resolution = SafPaths.resolve(target, treeUri)) {
             is PathResolution.Inside -> resolution.documentId
             PathResolution.Outside -> return SafTargetResolution.Rejected(
@@ -566,9 +569,6 @@ public object SafDestinationTree {
         )
     }
 
-    /** Percent-encoded `.` and `/`, the two characters a traversal needs. */
-    private val ENCODED_TRAVERSAL: Regex = Regex("%2[EeFf]")
-
     /**
      * Whether [documentId] is a well-formed descendant of the granted root.
      *
@@ -577,6 +577,12 @@ public object SafDestinationTree {
      */
     public fun isInsideGrantedTree(treeUri: String, documentId: String?): Boolean {
         if (documentId.isNullOrBlank()) return true
-        return SafPaths.resolve(documentId, treeUri) is PathResolution.Inside
+        val root = SafPaths.rootDocumentIdOf(treeUri) ?: return false
+        val canonical = when (val check = SafDocumentIdRules.validate(documentId)) {
+            is SafDocumentIdCheck.Valid -> check.canonical
+            is SafDocumentIdCheck.Invalid -> return false
+        }
+        return SafPaths.resolve(canonical, treeUri) is PathResolution.Inside &&
+            SafDocumentIdRules.contains(root, canonical)
     }
 }
