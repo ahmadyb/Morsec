@@ -55,6 +55,26 @@ public sealed interface PendingOpen {
     public data class Refused(public val error: TransferStorageError) : PendingOpen
 }
 
+/**
+ * Whether a pending row exists, and if so whether it is still hidden.
+ *
+ * Three states rather than a boolean, because "gone" and "published" are not the
+ * same answer and the difference decides whether a transfer completed. A row
+ * deleted by the user, or by a cleanup pass, is missing work — not a finished
+ * file — and reporting it as published would turn a lost transfer into a
+ * completed one.
+ */
+public enum class PendingState {
+    /** The row exists and the pending flag is still set. */
+    PENDING,
+
+    /** The row exists and the flag is clear, so the file is visible. */
+    PUBLISHED,
+
+    /** There is no row at all. */
+    MISSING,
+}
+
 /** Outcome of publishing a pending row. */
 public sealed interface Publication {
     /** Verification passed and the pending flag was cleared. */
@@ -296,18 +316,33 @@ public object MediaStorePendingDestination {
         resolver: ContentResolver,
         uri: Uri,
         sdk: Int = Build.VERSION.SDK_INT,
-    ): Boolean {
-        if (!isAvailable(sdk)) return false
+    ): Boolean = stateOf(resolver, uri, sdk) == PendingState.PENDING
+
+    /**
+     * What the row is, as far as the resolver can say.
+     *
+     * A provider that will not report the pending column is treated as
+     * [PendingState.PUBLISHED] rather than as missing: there is nothing to clear,
+     * and the ambiguity must never be resolved by deleting the user's file.
+     */
+    @RequiresApi(29)
+    public fun stateOf(
+        resolver: ContentResolver,
+        uri: Uri,
+        sdk: Int = Build.VERSION.SDK_INT,
+    ): PendingState {
+        if (!isAvailable(sdk)) return PendingState.MISSING
         val cursor = try {
             resolver.query(uri, arrayOf(MediaStore.MediaColumns.IS_PENDING), null, null, null)
         } catch (e: Exception) {
             null
-        } ?: return false
+        }
+        if (cursor == null) return PendingState.MISSING
         cursor.use {
-            if (!it.moveToFirst()) return false
+            if (!it.moveToFirst()) return PendingState.MISSING
             val index = it.getColumnIndex(MediaStore.MediaColumns.IS_PENDING)
-            if (index < 0 || it.isNull(index)) return false
-            return it.getInt(index) != 0
+            if (index < 0 || it.isNull(index)) return PendingState.PUBLISHED
+            return if (it.getInt(index) == 0) PendingState.PUBLISHED else PendingState.PENDING
         }
     }
 
@@ -338,8 +373,15 @@ public object MediaStorePendingDestination {
                 TransferStorageError.Unsupported("media_store_pending"),
             )
         }
-        if (!isPending(resolver, uri, sdk)) {
-            return Publication.AlreadyPublished
+        when (stateOf(resolver, uri, sdk)) {
+            PendingState.PUBLISHED -> return Publication.AlreadyPublished
+
+            // A row that no longer exists is lost work, not a completed file.
+            PendingState.MISSING -> return Publication.Refused(
+                TransferStorageError.NotFound("partial"),
+            )
+
+            PendingState.PENDING -> Unit
         }
 
         val partial = when (val opened = open(resolver, uri, identity, sdk)) {

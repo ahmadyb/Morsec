@@ -91,8 +91,13 @@ class MediaStorePendingDestinationTest {
             return 1
         }
 
-        override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int =
-            if (rows.remove(ContentUris.parseId(uri)) != null) 1 else 0
+        override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
+            val id = ContentUris.parseId(uri)
+            // The bytes go with the row, as they do in MediaStore: deleting a
+            // pending item that kept its file would leave an orphan nobody owns.
+            files.remove(id)
+            return if (rows.remove(id) != null) 1 else 0
+        }
 
         override fun getType(uri: Uri): String? =
             rows[ContentUris.parseId(uri)]?.getAsString(MediaStore.MediaColumns.MIME_TYPE)
@@ -430,6 +435,7 @@ class MediaStorePendingDestinationTest {
         val uri = createPending()
         assertTrue(MediaStorePendingDestination.abandon(resolver, uri))
 
+        assertEquals(PendingState.MISSING, MediaStorePendingDestination.stateOf(resolver, uri))
         assertFalse(MediaStorePendingDestination.isPending(resolver, uri))
         assertTrue(MediaStorePendingDestination.open(resolver, uri, identity) is PendingOpen.Refused)
     }
