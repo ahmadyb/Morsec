@@ -1,5 +1,6 @@
 package app.morsecode.core.storage.transfer
 
+import app.morsecode.core.model.DuplicatePolicy
 import java.io.ByteArrayInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

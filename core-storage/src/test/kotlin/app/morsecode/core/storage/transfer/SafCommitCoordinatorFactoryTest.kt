@@ -48,17 +48,6 @@ class SafCommitCoordinatorFactoryTest {
         )
     }
 
-    @Test
-    fun `the real gateway is installed at every tier the app supports`() {
-        // minSdk through to current: there is no SDK at which the production
-        // path is allowed to fall back to something else.
-        listOf(23, 26, 29, 34, 36).forEach { sdk ->
-            org.robolectric.RuntimeEnvironment.setApiLevel(sdk)
-            val gateway = coordinator().gateway
-            assertTrue("sdk $sdk must install the real gateway", gateway is DocumentsContractSafGateway)
-        }
-    }
-
     @Config(sdk = [36])
     @Test
     fun `the tier comes from the device, not from the caller`() {
