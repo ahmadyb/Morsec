@@ -188,6 +188,24 @@ public interface SafDocumentGateway {
     public fun query(documentUri: String): SafLookup
     public fun openWrite(documentUri: String): SafOpen
     public fun openRead(documentUri: String): SafOpen
+
+    /**
+     * Deletes [documentUri] and then asks what is actually there.
+     *
+     * The delete request's own answer is not the outcome: a provider can report
+     * success and leave the row, or report failure and have removed it. Absence
+     * is settled only by a completed query that finds nothing, which is what
+     * [SafDeletion.ConfirmedAbsent] means.
+     *
+     * [expectedDocumentId] is the identity to act on. It is checked against what
+     * the query finds, so that a document which happens to hold the same name
+     * now is not mistaken for the one that was meant.
+     */
+    public fun deleteAndReconcile(
+        documentUri: String,
+        expectedDocumentId: String,
+        grant: SafTreeGrant? = null,
+    ): SafDeletion
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +558,21 @@ public sealed interface SafCommitOutcome {
         public val finalName: String,
     ) : SafCommitOutcome
 
+    /**
+     * The destination already holds a document and this commit cannot replace it
+     * safely, so it did not try.
+     *
+     * Not a failure and not a success. The existing document is untouched and the
+     * staged bytes are still there, so a caller can offer Rename or Skip and lose
+     * nothing. The one thing it must never become is a delete-first overwrite:
+     * that is the only route from here that can destroy the user's file.
+     */
+    public data class SafeOverwriteUnsupported(
+        public val record: SafCommitRecord,
+        public val existingUri: String,
+        public val reason: String,
+    ) : SafCommitOutcome
+
     /** The commit failed in a typed, explainable way. Staging is retained. */
     public data class Failed(
         public val record: SafCommitRecord,
@@ -634,6 +667,12 @@ public class SafCommitCoordinator(
         val existing = gateway.findChild(record.uriForTree(record.parentDocumentId), record.expectedFinalName)
         val finalName = when (val choice = applyDuplicatePolicy(record, existing)) {
             is SafNameDecision.Use -> choice.displayName
+
+            // Overwrite is not a naming decision. The final name is already
+            // taken, and replacing is a different sequence rather than a
+            // different name, so it leaves before anything is resolved.
+            is SafNameDecision.Overwrite -> return commitOverwrite(record, choice.existingUri)
+
             is SafNameDecision.Skip -> return SafCommitOutcome.Skipped(record, choice.existingUri)
             is SafNameDecision.Ask -> return SafCommitOutcome.PendingUserDecision(
                 record = record,
@@ -656,15 +695,230 @@ public class SafCommitCoordinator(
         }
     }
 
+    // -- Recoverable overwrite ----------------------------------------------
+
+    /**
+     * Replaces an existing document without ever deleting it first.
+     *
+     * The ordering is the whole content of "safe" here. The replacement is built
+     * and verified under a temporary identity before the existing document is
+     * moved, and the existing document is moved rather than deleted, so that
+     * every intermediate state has a way back. Delete-first has one intermediate
+     * state -- the bytes are gone and the replacement is not in place -- and no
+     * way back from it.
+     *
+     * Ambiguity stops the commit rather than being resolved by guesswork, and
+     * every identity involved is preserved on the way out so the next pass can
+     * ask the provider what exists.
+     */
+    private fun commitSafeOverwrite(
+        record: SafCommitRecord,
+        existingUri: String,
+    ): SafCommitOutcome {
+        val tempName = temporaryDocumentName(record.expectedFinalName, record.partialId)
+        val provisional = when (val produced = produceVerifiedTemporary(record, tempName)) {
+            is VerifiedTemporary.Stopped -> return produced.outcome
+            is VerifiedTemporary.Ready -> produced
+        }
+        val replacement = provisional.created
+
+        // 4. Everything needed to finish is now present, and nothing the user
+        // had has been touched yet.
+        var current = provisional.record.copy(state = SafCommitState.REPLACEMENT_READY)
+
+        // 5. Resolve the existing final again. The first lookup was before the
+        // copy and the destination may have changed underneath it; acting on the
+        // earlier answer is how an overwrite replaces the wrong document.
+        val existing = when (val looked = gateway.query(existingUri)) {
+            is SafLookup.Found -> looked.document
+            SafLookup.Absent -> return reconcile(
+                current,
+                TransferStorageError.StateConflict("overwrite_target_absent"),
+            )
+
+            is SafLookup.Failed -> return reconcile(current, looked.error)
+        }
+
+        // 6. Move the existing document aside rather than deleting it. This is
+        // the last point at which nothing has been given up.
+        val backupName = backupDocumentName(record.expectedFinalName, record.partialId)
+        val moved = when (val result = gateway.rename(existing.documentUri, backupName)) {
+            is SafRename.Renamed -> result
+            is SafRename.Failed -> return onOverwriteUnsupported(
+                current,
+                existing.documentUri,
+                "backup_rename_unsupported",
+            )
+        }
+        current = current.copy(state = SafCommitState.BACKUP_CREATED)
+
+        // 7. Settle what that rename left. Only a unique result is authoritative:
+        // a provider that copies rather than moves has left two documents and
+        // guessing which to delete next is how the wrong one goes.
+        val backup = when (val settled = settleRename(
+            existing.documentUri,
+            existing.documentId,
+            moved.documentUri,
+        )) {
+            is RenameSettlement.Unknown -> return reconcileKnown(
+                current,
+                settled.error,
+                settled.knownUris + replacement.documentUri + existing.documentUri,
+            )
+
+            is RenameSettlement.Settled -> settled.identity
+        }
+        val backupUri = backup.authoritativeDocumentUri
+            ?: return reconcileKnown(
+                current,
+                TransferStorageError.StateConflict("overwrite_backup_ambiguous"),
+                backup.knownUris + replacement.documentUri,
+            )
+        val backupId = backup.authoritativeDocumentId
+            ?: return reconcileKnown(
+                current,
+                TransferStorageError.StateConflict("overwrite_backup_ambiguous"),
+                backup.knownUris + replacement.documentUri,
+            )
+
+        // 8. Promote the replacement to the final name.
+        val promoted = when (val result = gateway.rename(replacement.documentUri, record.expectedFinalName)) {
+            is SafRename.Renamed -> result
+            is SafRename.Failed -> return reconcileKnown(
+                current,
+                result.error,
+                listOf(backupUri, replacement.documentUri, existing.documentUri).distinct(),
+            )
+        }
+        current = current.copy(state = SafCommitState.RENAME_STARTED)
+
+        // 9. Settle that rename too.
+        val finalIdentity = when (val settled = settleRename(
+            replacement.documentUri,
+            replacement.documentId,
+            promoted.documentUri,
+        )) {
+            is RenameSettlement.Unknown -> return reconcileKnown(
+                current,
+                settled.error,
+                settled.knownUris + backupUri,
+            )
+
+            is RenameSettlement.Settled -> settled.identity
+        }
+        val finalUri = finalIdentity.authoritativeDocumentUri
+            ?: return reconcileKnown(
+                current,
+                TransferStorageError.StateConflict("overwrite_final_ambiguous"),
+                finalIdentity.knownUris + backupUri,
+            )
+
+        // 10. Verify the document under its final name, not the temporary's. A
+        // rename is a provider operation; it has to be shown to have produced the
+        // bytes that were verified, not assumed to have.
+        val verified = verifyProviderCopy(finalUri, record)
+        if (verified is VerifyResult.Failed) {
+            return reconcileKnown(
+                current,
+                verified.error,
+                listOf(backupUri, finalUri).distinct(),
+            )
+        }
+        if (verified is VerifyResult.Mismatched) {
+            return reconcileKnown(
+                current,
+                TransferStorageError.IntegrityMismatch("digest"),
+                listOf(backupUri, finalUri).distinct(),
+            )
+        }
+        current = current.copy(
+            state = SafCommitState.PUBLISHED_OR_VISIBLE,
+            finalUri = finalUri,
+        )
+
+        // 11. Recorded before the deletion, so that a crash before it and a crash
+        // after it are distinguishable by state alone.
+        current = current.copy(state = SafCommitState.BACKUP_CLEANUP_PENDING)
+
+        // 12. Deleted by the identity the provider issued for the backup, never
+        // by filename: a name resolves to whatever holds it now, which after two
+        // renames is not something this commit should be guessing at.
+        val deletion = gateway.deleteAndReconcile(backupUri, backupId)
+
+        // 13. Absence is settled by the follow-up query, never by the delete
+        // request's own answer.
+        return when (deletion) {
+            is SafDeletion.ConfirmedAbsent -> finish(current, finalUri)
+
+            // The backup is still there, or the grant is gone: the document is
+            // delivered either way, and the retry targets the stored identity.
+            is SafDeletion.StillPresent,
+            is SafDeletion.PermissionRevoked ->
+                finish(current, finalUri, setOf(SafCleanupPending.BACKUP))
+
+            // What is there is not known, or is not the backup. Deleting on that
+            // basis is how a cleanup removes a document it did not create.
+            is SafDeletion.QueryUnknown,
+            is SafDeletion.IdentityMismatch,
+            is SafDeletion.DeleteRequestFailed -> reconcileKnown(
+                current,
+                TransferStorageError.StateConflict("backup_cleanup_unsettled"),
+                listOf(backupUri, finalUri).distinct(),
+            )
+        }
+    }
+
+    private fun onOverwriteUnsupported(
+        record: SafCommitRecord,
+        existingUri: String,
+        reason: String,
+    ): SafCommitOutcome = SafCommitOutcome.SafeOverwriteUnsupported(
+        record = record.copy(state = SafCommitState.DESTINATION_RESOLVED),
+        existingUri = existingUri,
+        reason = reason,
+    )
+
+    private fun reconcileKnown(
+        record: SafCommitRecord,
+        error: TransferStorageError,
+        knownUris: List<String>,
+    ): SafCommitOutcome = SafCommitOutcome.ReconciliationRequired(
+        record = record.copy(state = SafCommitState.RECONCILIATION_REQUIRED),
+        error = error,
+        knownUris = knownUris.distinct(),
+    )
+
     // -- Strategy A ---------------------------------------------------------
 
-    private fun commitTempThenRename(record: SafCommitRecord): SafCommitOutcome {
+    /**
+     * Where a commit got to in producing a verified temporary.
+     *
+     * Both strategies and the overwrite path share the same prologue, because the
+     * order of operations is not a per-strategy choice: create, copy, flush,
+     * close, reopen, verify is the only order in which the digest means anything.
+     * Duplicating it would let the copies drift apart, and the interesting bugs
+     * live in the differences.
+     */
+    private sealed interface VerifiedTemporary {
+        data class Ready(
+            val record: SafCommitRecord,
+            val created: SafCreate.Created,
+        ) : VerifiedTemporary
+
+        data class Stopped(val outcome: SafCommitOutcome) : VerifiedTemporary
+    }
+
+    private fun produceVerifiedTemporary(
+        record: SafCommitRecord,
+        tempName: String,
+    ): VerifiedTemporary {
         val parentUri = record.uriForTree(record.parentDocumentId)
-        val tempName = temporaryDocumentName(record.expectedFinalName, record.partialId)
 
         val created = when (val result = gateway.create(parentUri, "application/octet-stream", tempName)) {
             is SafCreate.Created -> result
-            is SafCreate.Failed -> return onCreateFailed(record, result.error)
+            is SafCreate.Failed -> return VerifiedTemporary.Stopped(
+                onCreateFailed(record, result.error),
+            )
         }
 
         var current = record.copy(
@@ -678,20 +932,26 @@ public class SafCommitCoordinator(
         current = current.copy(state = SafCommitState.COPY_STARTED)
         val phase = runCopy(current, created.documentUri)
         if (phase.outcome is SafCopyOutcome.Failed) {
-            return onCopyFailed(current, phase.outcome.error, created.documentUri)
+            return VerifiedTemporary.Stopped(
+                onCopyFailed(current, phase.outcome.error, created.documentUri),
+            )
         }
         current = current.copy(state = SafCommitState.COPY_COMPLETED)
 
         if (phase.flush is FlushDurability.FlushFailed) {
-            return onCopyFailed(current, phase.flush.error, created.documentUri)
+            return VerifiedTemporary.Stopped(
+                onCopyFailed(current, phase.flush.error, created.documentUri),
+            )
         }
         // A copy the provider would not flush is not a copy that can be
         // verified, let alone committed.
         if (phase.flush is FlushDurability.FlushUnsupported) {
-            return onCopyFailed(
-                current,
-                TransferStorageError.Unsupported("saf_flush"),
-                created.documentUri,
+            return VerifiedTemporary.Stopped(
+                onCopyFailed(
+                    current,
+                    TransferStorageError.Unsupported("saf_flush"),
+                    created.documentUri,
+                ),
             )
         }
         current = current.copy(state = SafCommitState.PROVIDER_FLUSH_COMPLETED)
@@ -699,21 +959,39 @@ public class SafCommitCoordinator(
         // Checked after the flush and before any verification: descriptors that
         // did not close mean the bytes are not known to have left the process,
         // so there is nothing here that a fresh read could trust.
-        phase.closeError?.let { return onCopyFailed(current, it, created.documentUri) }
+        phase.closeError?.let {
+            return VerifiedTemporary.Stopped(onCopyFailed(current, it, created.documentUri))
+        }
 
         current = current.copy(state = SafCommitState.PROVIDER_VERIFICATION_STARTED)
         val verified = verifyProviderCopy(created.documentUri, record)
         if (verified is VerifyResult.Failed) {
-            return onCopyFailed(current, verified.error, created.documentUri)
+            return VerifiedTemporary.Stopped(
+                onCopyFailed(current, verified.error, created.documentUri),
+            )
         }
         if (verified is VerifyResult.Mismatched) {
-            return onCopyFailed(
-                current,
-                TransferStorageError.IntegrityMismatch("digest"),
-                created.documentUri,
+            return VerifiedTemporary.Stopped(
+                onCopyFailed(
+                    current,
+                    TransferStorageError.IntegrityMismatch("digest"),
+                    created.documentUri,
+                ),
             )
         }
         current = current.copy(state = SafCommitState.PROVIDER_VERIFIED)
+
+        return VerifiedTemporary.Ready(current, created)
+    }
+
+    private fun commitTempThenRename(record: SafCommitRecord): SafCommitOutcome {
+        val tempName = temporaryDocumentName(record.expectedFinalName, record.partialId)
+        val provisional = when (val produced = produceVerifiedTemporary(record, tempName)) {
+            is VerifiedTemporary.Stopped -> return produced.outcome
+            is VerifiedTemporary.Ready -> produced
+        }
+        var current = provisional.record
+        val created = provisional.created
 
         // Recorded before the call so that a death either side of it is
         // answerable: RENAMED with no final document means the rename did not
@@ -731,7 +1009,7 @@ public class SafCommitCoordinator(
         // nothing. Which of those it was decides what exists now, so it is
         // settled by querying both -- never by preferring the old URI because
         // it is the one already to hand.
-        when (val settled = settleRename(created, renamed.documentUri)) {
+        when (val settled = settleRename(created.documentUri, created.documentId, renamed.documentUri)) {
             is RenameSettlement.Unknown -> return onRenameUnresolved(current, settled, created.documentUri)
 
             is RenameSettlement.Settled -> {
@@ -1041,15 +1319,16 @@ public class SafCommitCoordinator(
      * confused with the deciding.
      */
     private fun settleRename(
-        created: SafCreate.Created,
+        beforeUri: String,
+        beforeId: String,
         returnedUri: String?,
     ): RenameSettlement {
-        val known = listOfNotNull(created.documentUri, returnedUri).distinct()
+        val known = listOfNotNull(beforeUri, returnedUri).distinct()
 
         // An identity under a different authority is not something this rename
         // produced. It is not adopted in either direction.
         if (returnedUri != null &&
-            created.documentUri.toUri().authority != returnedUri.toUri().authority
+            beforeUri.toUri().authority != returnedUri.toUri().authority
         ) {
             return RenameSettlement.Unknown(
                 TransferStorageError.StateConflict("rename_authority_changed"),
@@ -1057,7 +1336,7 @@ public class SafCommitCoordinator(
             )
         }
 
-        val originalResolves = when (val looked = gateway.query(created.documentUri)) {
+        val originalResolves = when (val looked = gateway.query(beforeUri)) {
             is SafLookup.Found -> true
             SafLookup.Absent -> false
             is SafLookup.Failed -> return RenameSettlement.Unknown(looked.error, known)
@@ -1066,7 +1345,7 @@ public class SafCommitCoordinator(
         val returnedResolves = when {
             returnedUri == null -> false
             // The same identity came back; there is nothing separate to ask.
-            returnedUri == created.documentUri -> originalResolves
+            returnedUri == beforeUri -> originalResolves
             else -> when (val looked = gateway.query(returnedUri)) {
                 is SafLookup.Found -> true
                 SafLookup.Absent -> false
@@ -1077,8 +1356,8 @@ public class SafCommitCoordinator(
         val returnedId = returnedUri?.toUri()?.let { SafContainment.documentIdOf(it) }
         return RenameSettlement.Settled(
             SafRenameIdentityResolver.resolve(
-                beforeDocumentUri = created.documentUri,
-                beforeDocumentId = created.documentId,
+                beforeDocumentUri = beforeUri,
+                beforeDocumentId = beforeId,
                 returnedDocumentUri = returnedUri,
                 returnedDocumentId = returnedId,
                 originalStillResolves = originalResolves,
@@ -1157,6 +1436,31 @@ public class SafCommitCoordinator(
         }
     }
 
+    /**
+     * Replaces the document at [existingUri], or refuses to.
+     *
+     * The refusal matters as much as the replacement: under the visible-copy
+     * fallback there is no rename with which to move the existing document
+     * aside, so an overwrite there would mean writing new bytes under the final
+     * name while the old ones are still there. That is not an overwrite, it is a
+     * collision, and it is refused rather than attempted.
+     */
+    private fun commitOverwrite(
+        record: SafCommitRecord,
+        existingUri: String,
+    ): SafCommitOutcome {
+        val resolved = record.copy(state = SafCommitState.DESTINATION_RESOLVED)
+        return when (record.strategy) {
+            SafCommitStrategy.TEMP_THEN_RENAME -> commitSafeOverwrite(resolved, existingUri)
+
+            SafCommitStrategy.VISIBLE_FINAL_COPY -> SafCommitOutcome.SafeOverwriteUnsupported(
+                record = resolved,
+                existingUri = existingUri,
+                reason = "visible_final_copy_cannot_replace",
+            )
+        }
+    }
+
     private fun fail(record: SafCommitRecord, error: TransferStorageError): SafCommitOutcome =
         SafCommitOutcome.Failed(record.copy(state = SafCommitState.COMMIT_FAILED), error)
 
@@ -1172,6 +1476,16 @@ public class SafCommitCoordinator(
         data class Use(val displayName: String) : SafNameDecision
         data class Skip(val existingUri: String) : SafNameDecision
         data class Ask(val existingUri: String) : SafNameDecision
+
+        /**
+         * Replace [existingUri], but only by the recoverable route.
+         *
+         * Carries the existing identity rather than a name: the overwrite has to
+         * act on the document the lookup found, and by the time it is acted on
+         * another lookup has to confirm it is still the same one.
+         */
+        data class Overwrite(val existingUri: String) : SafNameDecision
+
         data class Unavailable(val error: TransferStorageError) : SafNameDecision
         data class Refused(val error: TransferStorageError) : SafNameDecision
     }
@@ -1199,11 +1513,9 @@ public class SafCommitCoordinator(
 
             // The old destination is never deleted first. The replacement is
             // created, copied and verified under a temporary identity, and only
-            // then is the existing document reconciled. Doing it the other way
+            // then is the existing document moved aside. Doing it the other way
             // round means a crash mid-copy destroys the file the user had.
-            DuplicatePolicy.OVERWRITE -> SafNameDecision.Refused(
-                TransferStorageError.Unsupported("saf_overwrite"),
-            )
+            DuplicatePolicy.OVERWRITE -> SafNameDecision.Overwrite(existing.document.documentUri)
 
             DuplicatePolicy.SKIP -> SafNameDecision.Skip(existing.document.documentUri)
 

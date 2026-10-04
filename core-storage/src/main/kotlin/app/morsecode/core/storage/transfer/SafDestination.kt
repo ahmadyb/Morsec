@@ -403,6 +403,22 @@ public fun temporaryDocumentName(finalName: String, partialId: PartialIdentity):
     return "$finalName.$body.morsec-part"
 }
 
+/**
+ * The name the existing document is moved to during a recoverable overwrite.
+ *
+ * Parameterised by the partial for the same reason the temporary name is: two
+ * concurrent transfers of the same filename must not share a backup slot. It is
+ * a different suffix from the temporary's so that a directory containing both is
+ * readable to whoever has to look at it, and so a cleanup that is handed one
+ * cannot be confused about which it holds.
+ */
+public fun backupDocumentName(finalName: String, partialId: PartialIdentity): String {
+    val body = partialId.value.map { char ->
+        if (char.isLetterOrDigit() || char == '-' || char == '_') char else '-'
+    }.joinToString("")
+    return "$finalName.$body.morsec-backup"
+}
+
 // ---------------------------------------------------------------------------
 // Provider capabilities
 // ---------------------------------------------------------------------------
