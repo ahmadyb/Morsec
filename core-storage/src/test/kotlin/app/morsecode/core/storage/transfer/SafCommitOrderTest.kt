@@ -122,6 +122,10 @@ class SafCommitOrderTest {
         val (outcome, order) = record(gateway = gateway)
         assertTrue(outcome is SafCommitOutcome.Committed)
 
+        // Staging is hashed in a bounded fresh pass before any provider child lookup.
+        assertTrue(order.after("staging:open", "findChild:"))
+        assertEquals(2, gateway.calls.count { it == "staging:open" })
+
         // A live grant is checked immediately before each provider phase.
         assertTrue(order.after("authorize:reconcile", "findChild:"))
         assertTrue(order.after("authorize:create_destination", "create:"))

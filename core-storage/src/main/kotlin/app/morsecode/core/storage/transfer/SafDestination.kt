@@ -138,7 +138,7 @@ public enum class SafCommitState(public val id: String) {
      */
     BACKUP_CREATED("backup_created"),
 
-    /** The backup identity may now be removed. */
+    /** A backup identity may be removed; other cleanup can also be pending. */
     BACKUP_CLEANUP_PENDING("backup_cleanup_pending"),
 
     /** A provider temporary is no longer needed and may be removed. */
@@ -176,9 +176,10 @@ public enum class SafCommitState(public val id: String) {
                 "Move the existing final document to a backup identity, then promote the replacement."
             BACKUP_CREATED ->
                 "Promote the replacement to the final name, or restore the backup. Never both."
-            BACKUP_CLEANUP_PENDING -> "Delete the exact stored backup identity, then confirm absence."
+            BACKUP_CLEANUP_PENDING ->
+                "Retry every pending cleanup item by its recorded identity and confirm absence."
             PROVIDER_TEMPORARY_CLEANUP_PENDING ->
-                "Delete the exact stored temporary identity, then confirm absence."
+                "Retry every pending cleanup item by its recorded identity and confirm absence."
             STAGING_CLEANUP_PENDING -> "Delete the staged file, then record committed."
             COMMITTED -> "Nothing; the commit is finished."
             COMMIT_FAILED -> "Retry from the last durable state, or surface for reconciliation."
@@ -190,7 +191,7 @@ public enum class SafCommitState(public val id: String) {
     /** True when a crash in this state needs work on the next start. */
     public val requiresRecovery: Boolean get() = this != COMMITTED
 
-    /** True when the staged file must still exist. */
+    /** Conservative state-only answer; a record's stagingReleased flag is authoritative. */
     public val ownsStaging: Boolean get() = this != COMMITTED
 
     public companion object {
@@ -227,15 +228,21 @@ public enum class SafCommitState(public val id: String) {
             ),
             FINAL_CREATED to setOf(COPY_STARTED, COMMIT_FAILED, RECONCILIATION_REQUIRED),
             PUBLISHED_OR_VISIBLE to setOf(
-                STAGING_CLEANUP_PENDING, PROVIDER_TEMPORARY_CLEANUP_PENDING, COMMIT_FAILED,
+                STAGING_CLEANUP_PENDING, PROVIDER_TEMPORARY_CLEANUP_PENDING,
+                BACKUP_CLEANUP_PENDING, COMMIT_FAILED,
             ),
             PROVIDER_TEMPORARY_CLEANUP_PENDING to setOf(
-                STAGING_CLEANUP_PENDING, COMMITTED, RECONCILIATION_REQUIRED,
+                PROVIDER_TEMPORARY_CLEANUP_PENDING, STAGING_CLEANUP_PENDING,
+                COMMITTED, RECONCILIATION_REQUIRED,
             ),
             STAGING_CLEANUP_PENDING to setOf(
-                COMMITTED, BACKUP_CLEANUP_PENDING, RECONCILIATION_REQUIRED,
+                STAGING_CLEANUP_PENDING, COMMITTED, BACKUP_CLEANUP_PENDING,
+                RECONCILIATION_REQUIRED,
             ),
-            BACKUP_CLEANUP_PENDING to setOf(COMMITTED, RECONCILIATION_REQUIRED),
+            BACKUP_CLEANUP_PENDING to setOf(
+                BACKUP_CLEANUP_PENDING, PROVIDER_TEMPORARY_CLEANUP_PENDING,
+                STAGING_CLEANUP_PENDING, COMMITTED, RECONCILIATION_REQUIRED,
+            ),
             COMMITTED to emptySet(),
             COMMIT_FAILED to setOf(DESTINATION_RESOLVED, COMMIT_FAILED, RECONCILIATION_REQUIRED),
             RECONCILIATION_REQUIRED to entries.toSet(),
@@ -364,6 +371,9 @@ public data class SafCommitRecord(
     /** The digest the staged file was verified against, when one was supplied. */
     public val expectedDigest: Sha256Digest? = null,
 
+    /** Persisted grant-row identity authorizing every provider operation. */
+    public val grantId: String? = null,
+
     /** Which strategy was selected, and why. */
     public val strategy: SafCommitStrategy = SafCommitStrategy.TEMP_THEN_RENAME,
 
@@ -375,18 +385,56 @@ public data class SafCommitRecord(
 
     /** Bytes believed written so far. Diagnostic only; never the source of truth. */
     public val copiedBytes: Long = 0L,
+
+    /** Exact identities retained for recovery; URI and id are never reconstructed from a name. */
+    public val temporaryIdentity: SafStoredDocumentIdentity? = null,
+    public val finalIdentity: SafStoredDocumentIdentity? = null,
+    public val existingIdentity: SafStoredDocumentIdentity? = null,
+    public val backupIdentity: SafStoredDocumentIdentity? = null,
+    public val renameHistory: List<SafRenameEvidence> = emptyList(),
+
+    /** The exact cleanup work still outstanding when the commit record is persisted. */
+    public val pendingCleanup: Set<SafCleanupPending> = emptySet(),
+
+    /** True only after app-private staging deletion returned successfully. */
+    public val stagingReleased: Boolean = false,
 ) {
     init {
         require(expectedSizeBytes >= 0L) {
             "expectedSizeBytes must not be negative, was $expectedSizeBytes"
         }
         require(expectedFinalName.isNotBlank()) { "expectedFinalName must not be blank" }
+        require(grantId == null || grantId.isNotBlank()) { "grantId must not be blank when present" }
+        require(temporaryIdentity == null || temporaryIdentity.documentUri == temporaryUri) {
+            "temporary identity uri must match temporaryUri"
+        }
+        require(finalIdentity == null || finalIdentity.documentUri == finalUri) {
+            "final identity uri must match finalUri"
+        }
     }
 
-    /** The document identity cleanup must use. Never a filename. */
+    /** All known URI/id pairs, retained for reconciliation, never authorization by name. */
+    public val knownDocumentIdentities: List<SafStoredDocumentIdentity>
+        get() = buildList {
+            temporaryIdentity?.let { add(it) }
+            finalIdentity?.let { add(it) }
+            existingIdentity?.let { add(it) }
+            backupIdentity?.let { add(it) }
+            renameHistory.forEach { addAll(it.knownIdentities) }
+        }.distinct()
+
+    /** Exact staging ownership; unlike the state alone, this survives mixed cleanup states. */
+    public val ownsStaging: Boolean get() = !stagingReleased
+
+    /** Legacy URI summary only; never sufficient authorization for provider deletion. */
     public val cleanupUri: String? get() = temporaryUri ?: finalUri
 
     public fun withState(next: SafCommitState): SafCommitRecord = copy(state = next)
+
+    /** Do not leak tree/document URIs, names, ids or digest bytes to diagnostics. */
+    override fun toString(): String =
+        "SafCommitRecord(state=${state.id}, strategy=${strategy.id}, expectedSizeBytes=$expectedSizeBytes, " +
+            "pendingCleanup=${pendingCleanup.map { it.id }.sorted()})"
 }
 
 /**

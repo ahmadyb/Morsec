@@ -317,9 +317,7 @@ public class DocumentsContractSafGateway(
     }
 
     private fun readRow(uri: Uri, cursor: Cursor): SafLookup {
-        val documentId =
-            cursor.stringOrNull(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                ?: SafContainment.documentIdOf(uri)
+        val documentId = cursor.stringOrNull(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
         val displayName =
             cursor.stringOrNull(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
 
@@ -483,8 +481,10 @@ public class DocumentsContractSafGateway(
      * ignored. It is not the provider answering "is it gone" -- measured on a
      * real provider round trip, it reports success whether or not anything was
      * removed -- so letting it decide would close cleanup against a claim
-     * nobody verified. What decides is the follow-up query on the same stored
-     * URI: only a query that completed and returned no row proves absence.
+     * nobody verified. What decides is the observation of the same stored URI
+     * before deletion and once afterwards: the first refuses a stale
+     * identity (or confirms it was already absent), and a successful post-delete
+     * query with no row proves the request removed it.
      *
      * [grant] is optional. When supplied it is re-checked first, because a
      * grant can be revoked between the decision to clean up and the cleanup.
@@ -531,7 +531,28 @@ public class DocumentsContractSafGateway(
             }
         }
 
-        // 2. Request deletion. A throw here is a failed request, not an
+        // 2. Re-resolve the exact URI before deletion. A stored URI can become
+        // stale after a provider move or replacement; never issue a delete when
+        // the row now resolves to another identity or cannot be queried.
+        when (val beforeDelete = queryInternal(uri)) {
+            SafLookup.Absent -> return SafDeletion.ConfirmedAbsent()
+            is SafLookup.Found -> {
+                if (beforeDelete.document.documentId != expectedDocumentId) {
+                    return SafDeletion.IdentityMismatch(
+                        expectedDocumentId = expectedDocumentId,
+                        observedDocumentId = beforeDelete.document.documentId,
+                        observedDisplayName = beforeDelete.document.displayName,
+                    )
+                }
+            }
+
+            is SafLookup.Failed -> when (val error = beforeDelete.error) {
+                is TransferStorageError.PermissionRevoked -> return SafDeletion.PermissionRevoked(error)
+                else -> return SafDeletion.QueryUnknown("pre-delete query did not complete")
+            }
+        }
+
+        // 3. Request deletion. A throw here is a failed request, not an
         // absence: nothing has been observed about the document yet.
         val deleteReported = try {
             DocumentsContract.deleteDocument(resolver, uri)
@@ -543,8 +564,8 @@ public class DocumentsContractSafGateway(
             return SafDeletion.DeleteRequestFailed(mapFailure(e, "delete"))
         }
 
-        // 3 and 4. Query the exact stored identity, then classify what was
-        // observed. The delete result is carried as a diagnostic only.
+        // 4. Query the exact stored identity after the request. The delete
+        // result is carried as a diagnostic only; observation settles cleanup.
         return when (val looked = queryInternal(uri)) {
             // A query that completed and found no row is the only proof.
             is SafLookup.Absent -> SafDeletion.ConfirmedAbsent(deleteReported = deleteReported)

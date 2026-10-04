@@ -40,24 +40,64 @@ class LogRedactorTest {
     }
 
     @Test
-    fun `private absolute paths are generalised`() {
-        val out = LogRedactor.redact("wrote /data/user/0/app.morsecode/files/incoming/photo.jpg")
-        assertTrue(out.contains("<app-data>/incoming/photo.jpg"))
-        assertFalse(out.contains("app.morsecode"))
+    fun `private absolute paths are removed whole`() {
+        val appData = LogRedactor.redact("wrote /data/user/0/app.morsecode/files/incoming/photo.jpg")
+        assertTrue(appData.contains("<app-data>"))
+        assertFalse(appData.contains("app.morsecode"))
+        assertFalse(appData.contains("photo.jpg"))
 
         val shared = LogRedactor.redact("committing to /storage/emulated/0/Download/Morsecode/x.mp4")
-        assertTrue(shared.contains("<storage>/Download/Morsecode/x.mp4"))
+        assertTrue(shared.contains("<storage>"))
         assertFalse(shared.contains("/storage/emulated/0"))
+        assertFalse(shared.contains("x.mp4"))
 
         val legacy = LogRedactor.redact("legacy path /sdcard/Pictures/a.png")
-        assertTrue(legacy.contains("<storage>/Pictures/a.png"))
+        assertTrue(legacy.contains("<storage>"))
+        assertFalse(legacy.contains("a.png"))
+
+        val host = LogRedactor.redact("scratch /home/alice/secret.bin and /tmp/morsec-part")
+        assertTrue(host.contains("<private-path>"))
+        assertFalse(host.contains("/home/alice"))
+        assertFalse(host.contains("secret.bin"))
+        assertFalse(host.contains("/tmp/morsec-part"))
+
+        val fileUri = LogRedactor.redact("source file:///data/user/0/app.morsecode/files/private.db")
+        assertTrue(fileUri.contains("<file-uri>"))
+        assertFalse(fileUri.contains("private.db"))
     }
 
     @Test
-    fun `sha256 digests survive redaction`() {
+    fun `control characters are removed from log-safe text`() {
+        val out = LogRedactor.redact("first\u0000second\nthird\tlast\u007f")
+        assertFalse(out.any { it.code < 0x20 || it.code in 0x7f..0x9f })
+        assertTrue(out.contains("first second third last "))
+    }
+
+    @Test
+    fun `content URIs are redacted before logs are shared`() {
+        val uri = "content://provider.documents/tree/primary%3ADownload/document/" +
+            "primary%3ADownload%2Fprivate.mp4"
+        val out = LogRedactor.redact("selected destination $uri")
+        assertFalse(out.contains("provider.documents"))
+        assertFalse(out.contains("private.mp4"))
+        assertTrue(out.contains("content://[redacted]"))
+    }
+
+    @Test
+    fun `long opaque identifiers are redacted regardless of token punctuation`() {
+        val opaque = "A".repeat(24) + "/" + "b".repeat(24) + "=="
+        val out = LogRedactor.redact("provider id=$opaque complete")
+        assertFalse(out.contains(opaque))
+        assertTrue(out.contains("id=[redacted]"))
+        assertTrue(out.endsWith("complete"))
+    }
+
+    @Test
+    fun `sha256 digests are redacted from log-safe text`() {
         val digest = "a".repeat(64)
         val out = LogRedactor.redact("verified sha256=$digest for sunset.jpg")
-        assertTrue("digest must stay auditable", out.contains(digest))
+        assertFalse("digest bytes are not log-safe", out.contains(digest))
+        assertTrue(out.contains("sha256=[redacted]"))
         assertTrue(out.contains("sunset.jpg"))
     }
 

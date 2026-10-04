@@ -9,41 +9,88 @@ GitHub repository:
 https://github.com/ahmadyb/Morsec
 
 Working branch for this Arena session:
-arena/01a0f8ba-morsec
+arena/01a0f97d-morsec
 
 Upstream baseline branch:
 arena/01a0e98a-morsec
 
-Last confirmed code commit on the session branch:
-136711e2da47d612a9b898527296a025c5324168
+Last confirmed pushed code commit at the start of the current Part C work:
+93c6d3959a18c184687b1ce35a48d2f815e353c7
 
 The session branch was created from baseline SHA
-`13d8bf1312c7e39064d9a398935f2f9830ce0eed`. Do not switch branches or push to
-the baseline. Trust `git ls-remote origin refs/heads/arena/01a0f8ba-morsec` for
+`ed7e841e0c3ccb867e76aaaad3953dcedd9f2098`. Do not switch branches or push to
+the baseline. Trust `git ls-remote origin refs/heads/arena/01a0f97d-morsec` for
 the session head; query `arena/01a0e98a-morsec` separately.
 
-Before changing anything:
+Before continuing, inspect the current worktree and compare local HEAD with the
+session branch's `git ls-remote` SHA. Preserve surviving uncommitted and untracked
+work. Never switch branches, reset, rewrite history, or overwrite newer work.
 
-1. Open the existing repository.
-2. Fetch both known refs without rewriting them:
-   `git fetch origin refs/heads/arena/01a0e98a-morsec:refs/remotes/origin/arena/01a0e98a-morsec`
-   and
-   `git fetch origin refs/heads/arena/01a0f8ba-morsec:refs/remotes/origin/arena/01a0f8ba-morsec`.
-3. Continue on `arena/01a0f8ba-morsec`; never switch away from the Arena
-   session branch.
-4. Run `git status` and compare `HEAD` with the session branch's `git ls-remote`
-   SHA. Preserve any surviving uncommitted work.
-5. Run `git log --oneline --decorate -10`.
-6. Read the files listed below.
-7. Report the actual repository state.
-8. Do not write code until you confirm the branch and existing work.
-
-Continue from the newest remote session-branch commit. Never reset, rewrite
-history, or overwrite newer work.
+Older session notes below may name a prior Arena branch and prior heads; those
+are historical records, not branch instructions. The authoritative active scope
+and latest status are in the Part C state at the top of this handoff.
 
 ---
 
-## Session state — 2026-10-03: the SAF destination gateway, two platform-safety corrections
+## Current authoritative state — 2026-10-04: Part C SAF destination group active
+
+A and B are complete and approved. Work only on Part C, then stop; do not begin Room v2,
+a migration/adapter, cleanup service, restoration coordinator beyond SAF reconciliation,
+LAN, Nearby, FGS, notifications, UI, Media3 or WebShare. Room schema remains version 1.
+
+The last pushed SHA at the start of this continuation is
+`93c6d3959a18c184687b1ce35a48d2f815e353c7`, matching `origin/arena/01a0f97d-morsec`;
+its exact-head Android CI run `37218808121` was green. This checkout's local branch
+metadata currently points to grafted `ed7e841e0c3ccb867e76aaaad3953dcedd9f2098`
+while the remote ref is `93c6d39`; do not assume ancestry or tree equivalence, and do
+not rewrite/merge history or force-push to repair that mismatch. The working source tree contains the Part A/B/C files and all earlier
+untracked rescue artifacts, which must be preserved. This worktree then gained
+uncommitted changes to `SafDocumentIdentity.kt`, `SafDestination.kt`,
+`SafCommitCoordinator.kt`, `DestinationVerifier.kt`, `DocumentsContractSafGateway.kt`,
+`SafCommitOrderTest.kt`, `SafCommitReconciliationTest.kt`, `SafDeletionReconciliationTest.kt`,
+`RecordingSafGateway.kt`, `FakeSafProvider.kt`, `LogRedactor.kt` and its tests, ADR-0003,
+architecture, and this handoff. Those changes are **not yet tested** by Gradle: the focused task
+`./gradlew :core-storage:testDebugUnitTest --tests
+'app.morsecode.core.storage.transfer.SafCommitReconciliationTest'` stopped before Gradle
+started because no Java runtime is installed. The read-only Node verifiers did pass:
+references/hygiene 31/31, token parity 195/195, protocol limits 21/21, Room schema 9/9
+(version 1, 29,767 bytes). These are not substitutes for Kotlin compilation or the SAF
+suite. Do not report the code edits as green or push them without first reviewing the
+diff and then waiting for CI on the exact pushed SHA. The local changes are also
+preserved as `MORSEC_OFFLINE_PATCH/unverified-part-c-followup.patch`, generated against
+and dry-run checked on the fetched `93c6d3959a18c184687b1ce35a48d2f815e353c7` snapshot;
+this is a safety copy, not a commit, and the existing green bundle was not refreshed.
+
+The current code intent is to keep provider URI/id pairs and rename evidence on the
+commit record, expose exact-identity cleanup retry for a delivered record, and separate
+`stagingReleased` from delivery. Every commit hashes staging in a bounded fresh pass
+through exact EOF, even without a caller-supplied expected digest; a supplied digest is
+compared with that pass, and the transient staged SHA-256 is required to match a fresh
+provider read through exact EOF before publication. A locally calculated digest proves
+the provider copy matches staging; without a sender-provided expected digest or equivalent
+trusted verification, it does not prove sender authenticity. A bounded one-byte probe
+rejects trailing provider data even when size metadata is absent. Cleanup retry validates
+stored grant/tree context and a cleanup-authorizing state, and provider deletion queries
+the exact identity before and after the request. Digest bytes, content URIs, private
+paths, and control characters are redacted from diagnostic strings/log-safe text. No
+final Part C acceptance report exists yet.
+
+**Part C acceptance remains open until verified on one exact SHA:** production factory
+uses the real gateway with no fake fallback; ordered failure-safe copy/flush/close/fresh
+read/verify; temp-plus-rename recovery; visible-final-copy only under explicit policy and
+never as an implicit downgrade; RENAME/SKIP/ASK/OVERWRITE behavior; recoverable overwrite
+without delete-first; rename-reconciliation cases with stored-identity evidence;
+cleanup-pending states and exact-identity retries; reconciliation, storage-full and
+grant-revocation matrices; descriptor ownership and close-failure proof; bounded virtual
+large-file tests above 4 GiB; production-gateway coordinator success/failure flow; ADR,
+architecture, compatibility and state/reconciliation tables. §18 must pass on the final
+SHA. §19 must report the exact SHA, CI/test/lint/APK evidence, provider limitations, and
+confirm Room v2 was not started.
+
+Rescue bundles and patches are based on the previous green SHA. Refresh them only after
+an exact-head green run; never label the current untested edits green.
+
+## Historical gate — 2026-10-03: SAF destination gateway, two platform-safety corrections
 
 Branch `arena/01a0f97d-morsec`. Part B of the transfer storage group. `TRANSFER_ENGINE`
 is still gated at milestone 5 and `CURRENT_MILESTONE` is still 2.
@@ -125,14 +172,13 @@ Both red runs are worth remembering:
 warnings. `app-debug.apk` 18.78 MiB, `app-debug-androidTest.apk` 1.10 MiB. Room schema
 `1.json` unchanged.
 
-### Next in this group
+### Gate handoff at that historical point (superseded)
 
-Wire the real gateway into `SafCommitCoordinator`; prove
-open/copy/flush/close/reopen/verify ordering; temp-plus-rename; the explicit
-visible-copy fallback; duplicate policies; recoverable safe overwrite; rename identity
-reconciliation; cleanup-pending behaviour; the storage-full and grant-revocation
-matrices; above-4-GiB virtual evidence. Room schema version 2 does not start until the
-whole SAF destination gate is green and approved.
+At this point the coordinator was not yet wired. That wiring and its first tests were
+completed in later Part C commits; the active remaining criteria are listed in the
+current authoritative state and the latest Part C acceptance report below. Room schema
+version 2 remains gated until the whole SAF destination group is green and explicitly
+approved.
 
 ## Session state — 2026-10-03: the transfer storage slice is COMPLETE and green
 
@@ -726,8 +772,8 @@ dimensions: radii 8/12/16/24/28/999, 180 ms `bezier(0.2,0,0,1)`, pressed scale
 (Transfer, History, Device, Diagnostics, WebShare, Settings), one Preferences
 DataStore file with corrupt-store fallback and clamped writes, `MorseLogger` +
 `RoomMorseLogger`, `LogRedactor` (authorization headers, bearer tokens, long
-opaque blobs, app-private paths, `/storage/emulated/…`, `/sdcard/…` → `[redacted]`;
-SHA-256 digests deliberately kept), `CrashRecorder`, Hilt modules.
+opaque blobs including SHA-256 digest bytes, app-private paths, `/storage/emulated/…`,
+`/sdcard/…` → `[redacted]`), `CrashRecorder`, Hilt modules.
 
 **`:core-storage`** (7 files) — `MediaStoreReader`, `SafTreeReader` (tree grants,
 persisted-permission release), `InstalledAppsReader` (uses the manifest's
@@ -926,8 +972,8 @@ were added during CI validation and carry the same weight:
   sizes in `MorseType`, mockup-derived values in `MockupTokens`, colours in
   `MorseColorTokens`. `token-parity.mjs` (191 assertions) enforces agreement with
   the mockup and must stay green.
-- **Logs are redacted before they are written**, and SHA-256 digests are kept on
-  purpose so a transfer stays auditable.
+- **Logs are redacted before they are written**, including private paths and
+  SHA-256 digest bytes; auditability comes from typed status, not secret-bearing data.
 - **CI must keep republishing its own diagnostics as annotations** (failures, lint
   findings, test/lint/APK totals): in some environments that is the only readable
   output of a run.

@@ -148,9 +148,10 @@ corrupt store, and clamps every write to the ranges the model's `require` blocks
 
 Logging is a first-class concern: `MorseLogger` writes through `RoomMorseLogger`, and
 **every** message and stack trace passes `LogRedactor` first — authorization headers,
-bearer tokens, long opaque blobs, private app paths, `/storage/emulated/…` and `/sdcard/…`
-are replaced with `[redacted]`, while SHA-256 digests are deliberately kept so a transfer
-can still be audited. `CrashRecorder` captures uncaught throwables into `crash_reports`.
+bearer tokens, long opaque blobs, private app paths, `/storage/emulated/…`, `/sdcard/…`,
+and digest values are replaced with `[redacted]`. Transfer auditability comes from typed
+state and byte counts, not paths or digest bytes. `CrashRecorder` captures uncaught
+throwables into `crash_reports`.
 
 ### Storage — `:core-storage`
 
@@ -249,6 +250,73 @@ Three properties it holds:
   fault gets read as "the file was never created".
 - **Deletion is proved, not assumed.** See Decision 11.
 - **The API tier is a type, not a number.** See Decision 12.
+
+### SAF destination commit pipeline — Part C
+
+The SAF commit path is distinct from browsing. `SafTreeReader` may use `DocumentFile`
+for listing and presentation, but commit containment and authorization do not use it as
+proof. `SafCommitCoordinatorFactory.create()` constructs the production coordinator with
+`DocumentsContractSafGateway` over the supplied real `ContentResolver`; it has no fake
+fallback. Unit tests inject a fake gateway explicitly. The production API tier is chosen
+from `Build.VERSION.SDK_INT`, not an arbitrary integer.
+
+The coordinator treats the sequence as an ordered safety boundary:
+
+| Phase | Required observation before advancing |
+| --- | --- |
+| Verify/resolve | The staged length is checked and its bytes are hashed in a bounded fresh pass through exact EOF; a supplied expected digest must match. The observed digest is transient and anchors provider-copy verification. The grant context is rechecked; the destination is provider-resolved and the duplicate policy is explicit. |
+| Create/copy | A provider-created temporary URI/id is retained; bytes are copied with a bounded buffer; flush is attempted before closing the writer; all owners close before verification. |
+| Verify | A fresh reader is opened after writer close; length and SHA-256 are checked against the staged-byte digest before rename or publication. If size metadata is absent, a bounded one-byte EOF probe rejects a matching prefix with trailing bytes. SAF flush remains guarantee-unknown. |
+| Rename | The provider-returned identity and the before identity are queried; only a unique, verified identity is authoritative. A null return, duplicate surviving identities, query failure or mismatch is reconciliation, not success. |
+| Deliver/cleanup | Final identity is recorded before cleanup. Staging, provider-temporary and backup cleanup are independent pending items and each provider deletion uses the exact stored URI/id followed by an absence query. |
+
+The default strategy is temporary-copy-then-rename. `VISIBLE_FINAL_COPY` is a separate
+strategy and requires explicit policy; it is not a fallback when rename is unsupported.
+It remains visible while incomplete and reports that fact. It cannot implement overwrite.
+Overwrite builds and verifies the replacement first, rechecks the selected existing
+identity, moves the old document to a backup, promotes and verifies the replacement, and
+only then requests deletion of the backup. There is no delete-first path.
+
+#### Commit and reconciliation states
+
+| State / item | Record evidence | Next action |
+| --- | --- | --- |
+| `RENAME_STARTED` / `RENAMED` | temporary identity plus rename evidence | query the exact before/returned URI/id pairs; do not select by name |
+| `RECONCILIATION_REQUIRED` | every known URI/id pair and typed cause | query again only when authorized; unknown stays unresolved |
+| `BACKUP_CLEANUP_PENDING` | final identity, backup identity, and pending set | retry the exact backup identity; confirm absence |
+| `PROVIDER_TEMPORARY_CLEANUP_PENDING` | final identity and exact obsolete temporary identity | retry that stored identity; confirm absence |
+| `STAGING_CLEANUP_PENDING` | final identity, `STAGING` pending, `stagingReleased = false` | retry app-private deletion for the exact partial id |
+| `COMMITTED` | final identity, empty pending set, `stagingReleased = true` | terminal |
+
+`SafCommitRecord.pendingCleanup` is a set because backup/provider cleanup and staging
+cleanup can overlap. `stagingReleased` is independent of delivery; a delivered file can
+remain committed while cleanup is pending. The commit record binds the stored grant id,
+tree/root, transfer id, partial/commit id, final identity, pending item and state.
+`retryPendingCleanup()` validates the grant/tree context and an eligible cleanup state;
+staging deletion targets the stored partial id. Provider deletion also re-queries the
+exact stored URI/id before the request and after it; a stale id, replacement, or unknown
+query does not authorize deletion. Retry does not copy, rename, or search by filename.
+Log-safe diagnostics redact document URIs, ids, private paths, control characters and
+digest bytes.
+
+A locally calculated staging digest proves only that the provider copy matches the staged
+bytes. Without a sender-provided expected digest or equivalent trusted transfer
+verification, it does not independently prove sender authenticity.
+
+#### SAF provider compatibility
+
+| Android API | Available containment evidence | Safe behavior |
+| --- | --- | --- |
+| 23–25 | Grant-scoped canonical validation only; it is not provider ancestry proof. | The selected tree root is usable. A child destination without provider evidence is `ContainmentUnknown`; no prefix heuristic is used. |
+| 26–28 | `findDocumentPath`; root id may be null. | Use returned path evidence; a null root id skips only that comparison and is not a mismatch. Missing/failed evidence remains unknown. |
+| 29+ | `isChildDocument` (with the API-26 path capability retained). | Use the provider answer; false is outside and unavailable/failed is unknown. |
+
+Provider document ids are opaque: ancestry never comes from string-prefix matching. The
+containment parser decodes once, inspects a second decode for traversal, and never
+repeatedly decodes or compares encodings to establish ancestry. A provider that cannot
+answer the required query or rename question yields a typed unknown/refusal, not a
+silent downgrade. This Part C work does not start Room v2 or add a Room migration,
+adapter, cleanup service, transport, foreground service, notification or UI.
 
 ## Dependency injection
 

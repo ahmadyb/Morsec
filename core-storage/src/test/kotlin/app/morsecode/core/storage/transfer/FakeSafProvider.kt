@@ -110,6 +110,11 @@ class FakeSafProvider : ContentProvider() {
     var nullCursor = false
     var throwOnQuery = false
     var throwSecurityOnQuery = false
+    var nullCursorOnQueryNumber: Int? = null
+    var throwOnQueryNumber: Int? = null
+    var throwSecurityOnQueryNumber: Int? = null
+    var omitDocumentIdOnQuery = false
+    private var queryCount = 0
     var nullOnCreate = false
     var nullOnRename = false
     var nullOnOpen = false
@@ -130,6 +135,8 @@ class FakeSafProvider : ContentProvider() {
         treeBaseUri = treeUri
         documents.clear(); contents.clear(); calls.clear(); malformed.clear()
         nullCursor = false; throwOnQuery = false; throwSecurityOnQuery = false
+        nullCursorOnQueryNumber = null; throwOnQueryNumber = null
+        throwSecurityOnQueryNumber = null; omitDocumentIdOnQuery = false; queryCount = 0
         nullOnCreate = false; nullOnRename = false; nullOnOpen = false
         throwSecurityOnCall = false; throwSecurityOnOpen = false
         queryDocumentIdOverride = null
@@ -185,9 +192,14 @@ class FakeSafProvider : ContentProvider() {
         selectionArgs: Array<out String>?,
         sortOrder: String?,
     ): Cursor? {
-        if (throwSecurityOnQuery) throw SecurityException("revoked")
-        if (throwOnQuery) throw RuntimeException("provider crashed")
-        if (nullCursor) return null
+        queryCount++
+        if (throwSecurityOnQuery || queryCount == throwSecurityOnQueryNumber) {
+            throw SecurityException("revoked")
+        }
+        if (throwOnQuery || queryCount == throwOnQueryNumber) {
+            throw RuntimeException("provider crashed")
+        }
+        if (nullCursor || queryCount == nullCursorOnQueryNumber) return null
 
         val childrenParentId = childrenParentId(uri)
         if (childrenParentId != null) {
@@ -218,7 +230,10 @@ class FakeSafProvider : ContentProvider() {
             // [queryDocumentIdOverride] answers with a different identity than
             // the one requested, which is what a same-name replacement looks
             // like from the caller's side.
-            add(COLUMN_ID, queryDocumentIdOverride ?: doc.id)
+            add(
+                COLUMN_ID,
+                if (omitDocumentIdOnQuery) null else queryDocumentIdOverride ?: doc.id,
+            )
             add(COLUMN_NAME, if (doc.id in malformed) null else doc.name)
             add(COLUMN_SIZE, observedSize(doc))
             add(COLUMN_MIME, doc.mime)

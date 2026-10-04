@@ -22,8 +22,9 @@ import app.morsecode.core.transfer.integrity.Sha256Digest
  *     of the wrong data.
  *  3. A mismatch is returned, never published. The verifier does not rename,
  *     move, log, notify or commit anything; a mismatch comes back as a value and
- *     the caller decides. The digest pair is safe to persist — hex pairs only,
- *     no path, no stream, no descriptor.
+ *     the caller decides. Digest bytes are transient verification material and
+ *     must not be persisted or logged; only typed state and byte counts belong in
+ *     recovery diagnostics.
  *
  * The digest is injectable so the loop can be tested over ranges no CI machine
  * should actually hash. That is not weaker testing, it is testing the right

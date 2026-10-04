@@ -3,9 +3,13 @@ package app.morsecode.core.storage.transfer
 import android.net.Uri
 import app.morsecode.core.model.DuplicatePolicy
 import app.morsecode.core.transfer.identity.TransferId
+import app.morsecode.core.transfer.integrity.Sha256Accumulator
 import java.io.ByteArrayInputStream
+import java.io.IOException
+import java.io.InputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -78,7 +82,7 @@ class SafCommitReconciliationTest {
 
     private class ByteArrayStaging(
         private val bytes: ByteArray,
-        private val releases: Boolean = true,
+        var releases: Boolean = true,
     ) : SafStaging {
         override fun length(identity: PartialIdentity): Long? = bytes.size.toLong()
 
@@ -97,6 +101,326 @@ class SafCommitReconciliationTest {
         val committed = outcome as SafCommitOutcome.Committed
         assertTrue("rename must not fall back to the pre-rename URI", committed.finalUri != gateway.lastCreatedUri)
         assertEquals("doc-2", committed.finalUri.substringAfterLast('/'))
+        assertEquals(gateway.lastCreatedUri, committed.record.temporaryIdentity?.documentUri)
+        assertEquals("doc-1", committed.record.temporaryIdentity?.documentId)
+        assertEquals(committed.finalUri, committed.record.finalIdentity?.documentUri)
+        assertEquals("doc-2", committed.record.finalIdentity?.documentId)
+        assertEquals(1, committed.record.renameHistory.size)
+        assertEquals(
+            SafRenameReconciliation.RESOLVED_TO_RETURNED,
+            committed.record.renameHistory.single().reconciliation,
+        )
+        assertFalse("record diagnostics must not include document identity", committed.record.toString().contains("content://"))
+        assertFalse("outcome diagnostics must not include final URI", committed.toString().contains("content://"))
+        assertFalse("outcome diagnostics must not include staged digest material", committed.toString().contains("sha256:"))
+    }
+
+    @Test
+    fun `an empty staging file verifies through EOF and commits`() {
+        val gateway = RecordingSafGateway()
+        val staging = ByteArrayStaging(ByteArray(0))
+        val record = SafCommitRecord(
+            transferId = TransferId("t-1"),
+            partialId = PartialIdentity("p-1"),
+            treeUri = treeUri,
+            rootDocumentId = parentDocumentId,
+            parentDocumentId = parentDocumentId,
+            expectedFinalName = "empty.bin",
+            expectedSizeBytes = 0L,
+        )
+
+        val committed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Committed
+
+        assertTrue(committed.cleanupComplete)
+        assertEquals(0L, committed.record.copiedBytes)
+        assertEquals(1, gateway.countOf("rename:"))
+    }
+
+    @Test
+    fun `a staged SHA mismatch stops before provider lookup or creation`() {
+        val gateway = RecordingSafGateway()
+        val incorrectDigest = Sha256Accumulator().apply {
+            update(payload.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() })
+        }.digest()
+        val record = SafCommitRecord(
+            transferId = TransferId("t-1"),
+            partialId = PartialIdentity("p-1"),
+            treeUri = treeUri,
+            rootDocumentId = parentDocumentId,
+            parentDocumentId = parentDocumentId,
+            expectedFinalName = "movie.mp4",
+            expectedSizeBytes = payload.size.toLong(),
+            expectedDigest = incorrectDigest,
+        )
+        val coordinator = SafCommitCoordinator(gateway, ByteArrayStaging(payload))
+
+        val failed = coordinator.commit(record, grant) as SafCommitOutcome.Failed
+
+        assertEquals(TransferStorageError.IntegrityMismatch("staging_digest"), failed.error)
+        assertEquals(0, gateway.countOf("findChild:"))
+        assertEquals(0, gateway.countOf("create:"))
+    }
+
+    @Test
+    fun `a staged length mismatch stops before opening or provider lookup`() {
+        val gateway = RecordingSafGateway()
+        var stagingOpens = 0
+        val staging = object : SafStaging {
+            override fun length(identity: PartialIdentity): Long? = payload.size.toLong() - 1L
+
+            override fun open(identity: PartialIdentity): SafOpen {
+                stagingOpens++
+                return SafOpen.Refused(TransferStorageError.Io("read"))
+            }
+
+            override fun delete(identity: PartialIdentity): Boolean = true
+        }
+        val record = SafCommitRecord(
+            transferId = TransferId("t-1"),
+            partialId = PartialIdentity("p-1"),
+            treeUri = treeUri,
+            rootDocumentId = parentDocumentId,
+            parentDocumentId = parentDocumentId,
+            expectedFinalName = "movie.mp4",
+            expectedSizeBytes = payload.size.toLong(),
+        )
+
+        val failed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Failed
+
+        assertEquals(TransferStorageError.StateConflict("staging_length_disagrees"), failed.error)
+        assertEquals(0, stagingOpens)
+        assertEquals(0, gateway.countOf("findChild:"))
+        assertEquals(0, gateway.countOf("create:"))
+    }
+
+    @Test
+    fun `premature staging EOF fails and closes the staging reader`() {
+        val gateway = RecordingSafGateway()
+        val handle = SafReadHandle(ByteArrayInputStream(payload.copyOf(payload.size - 1)))
+        val staging = object : SafStaging {
+            override fun length(identity: PartialIdentity): Long? = payload.size.toLong()
+            override fun open(identity: PartialIdentity): SafOpen = SafOpen.Opened(handle)
+            override fun delete(identity: PartialIdentity): Boolean = true
+        }
+        val record = SafCommitRecord(
+            transferId = TransferId("t-1"),
+            partialId = PartialIdentity("p-1"),
+            treeUri = treeUri,
+            rootDocumentId = parentDocumentId,
+            parentDocumentId = parentDocumentId,
+            expectedFinalName = "movie.mp4",
+            expectedSizeBytes = payload.size.toLong(),
+        )
+
+        val failed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Failed
+
+        assertEquals("verification_source_ended_early", (failed.error as TransferStorageError.StateConflict).reason)
+        assertFalse(handle.isOpen)
+        assertEquals(0, gateway.countOf("findChild:"))
+        assertEquals(0, gateway.countOf("create:"))
+    }
+
+    @Test
+    fun `staging read failure is typed and closes its owner`() {
+        val gateway = RecordingSafGateway()
+        var closed = false
+        val handle = SafReadHandle(object : InputStream() {
+            override fun read(): Int = throw IOException("staging read failed")
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                throw IOException("staging read failed")
+
+            override fun close() {
+                closed = true
+            }
+        })
+        val staging = object : SafStaging {
+            override fun length(identity: PartialIdentity): Long? = payload.size.toLong()
+            override fun open(identity: PartialIdentity): SafOpen = SafOpen.Opened(handle)
+            override fun delete(identity: PartialIdentity): Boolean = true
+        }
+        val record = SafCommitRecord(
+            transferId = TransferId("t-1"),
+            partialId = PartialIdentity("p-1"),
+            treeUri = treeUri,
+            rootDocumentId = parentDocumentId,
+            parentDocumentId = parentDocumentId,
+            expectedFinalName = "movie.mp4",
+            expectedSizeBytes = payload.size.toLong(),
+        )
+
+        val failed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Failed
+
+        assertTrue(failed.error is TransferStorageError.Io)
+        assertTrue(closed)
+        assertFalse(handle.isOpen)
+        assertEquals(0, gateway.countOf("findChild:"))
+        assertEquals(0, gateway.countOf("create:"))
+    }
+
+    @Test
+    fun `provider bytes that differ from the staged SHA are never renamed`() {
+        val gateway = RecordingSafGateway()
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_OPEN_READ) {
+                val uri = requireNotNull(gateway.lastCreatedUri)
+                gateway.written[uri] = payload.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+            }
+            null
+        }
+
+        val failed = commit(gateway) as SafCommitOutcome.Failed
+
+        assertEquals(TransferStorageError.IntegrityMismatch("digest"), failed.error)
+        assertEquals(0, gateway.countOf("rename:"))
+        assertEquals(0, gateway.liveHandles)
+        assertFalse(failed.isDelivered)
+    }
+
+    @Test
+    fun `staging with trailing bytes is rejected before provider lookup`() {
+        val gateway = RecordingSafGateway()
+        val longerPayload = payload + byteArrayOf(0x7f)
+        val staging = object : SafStaging {
+            override fun length(identity: PartialIdentity): Long? = payload.size.toLong()
+
+            override fun open(identity: PartialIdentity): SafOpen =
+                SafOpen.Opened(SafReadHandle(ByteArrayInputStream(longerPayload)))
+
+            override fun delete(identity: PartialIdentity): Boolean = true
+        }
+        val record = SafCommitRecord(
+            transferId = TransferId("t-1"),
+            partialId = PartialIdentity("p-1"),
+            treeUri = treeUri,
+            rootDocumentId = parentDocumentId,
+            parentDocumentId = parentDocumentId,
+            expectedFinalName = "movie.mp4",
+            expectedSizeBytes = payload.size.toLong(),
+        )
+
+        val failed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Failed
+
+        assertEquals(TransferStorageError.IntegrityMismatch("length"), failed.error)
+        assertEquals(0, gateway.countOf("findChild:"))
+        assertEquals(0, gateway.countOf("create:"))
+    }
+
+    @Test
+    fun `provider trailing bytes fail even when size metadata is omitted`() {
+        val gateway = RecordingSafGateway(omitSizeOnQuery = true)
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_OPEN_READ) {
+                val uri = requireNotNull(gateway.lastCreatedUri)
+                gateway.written[uri] = payload + byteArrayOf(0x7f)
+            }
+            null
+        }
+
+        val failed = commit(gateway) as SafCommitOutcome.Failed
+
+        assertEquals(TransferStorageError.IntegrityMismatch("length"), failed.error)
+        assertEquals(0, gateway.countOf("rename:"))
+        assertEquals(0, gateway.liveHandles)
+    }
+
+    @Test
+    fun `matching provider size metadata does not skip the trailing-byte probe`() {
+        val gateway = RecordingSafGateway(
+            overrideReportedSize = true,
+            reportedSizeBytes = payload.size.toLong(),
+        )
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_OPEN_READ) {
+                val uri = requireNotNull(gateway.lastCreatedUri)
+                gateway.written[uri] = payload + byteArrayOf(0x7f)
+            }
+            null
+        }
+
+        val failed = commit(gateway) as SafCommitOutcome.Failed
+
+        assertEquals(TransferStorageError.IntegrityMismatch("length"), failed.error)
+        assertEquals(0, gateway.countOf("rename:"))
+        assertEquals(0, gateway.liveHandles)
+    }
+
+    @Test
+    fun `provider verification commits an exact stream when size metadata is absent`() {
+        val gateway = RecordingSafGateway(omitSizeOnQuery = true)
+
+        val committed = commit(gateway) as SafCommitOutcome.Committed
+
+        assertTrue(committed.cleanupComplete)
+        assertEquals(payload.size.toLong(), committed.record.copiedBytes)
+    }
+
+    @Test
+    fun `provider premature EOF fails without publication and closes the reader`() {
+        val gateway = RecordingSafGateway(omitSizeOnQuery = true)
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_OPEN_READ) {
+                val uri = requireNotNull(gateway.lastCreatedUri)
+                gateway.written[uri] = payload.copyOf(payload.size - 1)
+            }
+            null
+        }
+
+        val failed = commit(gateway) as SafCommitOutcome.Failed
+
+        assertEquals(
+            "verification_source_ended_early",
+            (failed.error as TransferStorageError.StateConflict).reason,
+        )
+        assertEquals(0, gateway.countOf("rename:"))
+        assertEquals(0, gateway.liveHandles)
+    }
+
+    @Test
+    fun `provider length metadata mismatch fails before opening a reader`() {
+        val gateway = RecordingSafGateway()
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_QUERY) {
+                val uri = requireNotNull(gateway.lastCreatedUri)
+                gateway.written[uri] = payload.copyOf(payload.size - 1)
+            }
+            null
+        }
+
+        val failed = commit(gateway) as SafCommitOutcome.Failed
+
+        assertEquals(TransferStorageError.IntegrityMismatch("length"), failed.error)
+        assertEquals(0, gateway.countOf("openRead:"))
+        assertEquals(0, gateway.countOf("rename:"))
+    }
+
+    @Test
+    fun `provider query unknown fails without publication`() {
+        val gateway = RecordingSafGateway()
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_QUERY) IOException("provider offline") else null
+        }
+
+        val failed = commit(gateway) as SafCommitOutcome.Failed
+
+        assertFalse(failed.isDelivered)
+        assertEquals(0, gateway.countOf("rename:"))
+        assertEquals(0, gateway.countOf("openRead:"))
+    }
+
+    @Test
+    fun `provider read failure fails without publication and closes the writer`() {
+        val gateway = RecordingSafGateway()
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_OPEN_READ) IOException("read failed") else null
+        }
+
+        val failed = commit(gateway) as SafCommitOutcome.Failed
+
+        assertTrue(failed.error is TransferStorageError.Io)
+        assertFalse(failed.isDelivered)
+        assertEquals(0, gateway.countOf("rename:"))
+        assertEquals(0, gateway.liveHandles)
     }
 
     @Test
@@ -116,6 +440,14 @@ class SafCommitReconciliationTest {
             listOf(gateway.lastCreatedUri),
             pending.knownUris,
         )
+        assertEquals(gateway.lastCreatedUri, pending.record.temporaryIdentity?.documentUri)
+        assertEquals(1, pending.record.renameHistory.size)
+        assertEquals(
+            SafRenameReconciliation.NULL_RETURN,
+            pending.record.renameHistory.single().reconciliation,
+        )
+        assertNull(pending.record.renameHistory.single().returned)
+        assertFalse("reconciliation diagnostics must not include URIs", pending.toString().contains("content://"))
     }
 
     @Test
@@ -352,6 +684,10 @@ class SafCommitReconciliationTest {
         val committed = outcome as SafCommitOutcome.Committed
         assertTrue(gateway.calls.any { it.startsWith("deleteAndReconcile:") })
         assertTrue(committed.cleanupComplete)
+        assertEquals("$treeUri/document/seed", committed.record.existingIdentity?.documentUri)
+        assertEquals("$treeUri/document/seed", committed.record.backupIdentity?.documentUri)
+        assertEquals(committed.finalUri, committed.record.finalIdentity?.documentUri)
+        assertEquals(2, committed.record.renameHistory.size)
     }
 
     @Test
@@ -390,8 +726,100 @@ class SafCommitReconciliationTest {
             "the backup is outstanding",
             SafCleanupPending.BACKUP in committed.pendingCleanup,
         )
+        assertEquals(SafCommitState.BACKUP_CLEANUP_PENDING, committed.record.state)
+        assertTrue(committed.record.stagingReleased)
         assertFalse(committed.cleanupComplete)
         assertTrue("the file itself is delivered", committed.isDelivered)
+    }
+
+    @Test
+    fun `cleanup retry deletes only the stored backup identity and never recopies`() {
+        val gateway = RecordingSafGateway()
+        val existingUri = "$treeUri/document/seed"
+        gateway.addNamed(existingUri, "movie.mp4")
+        gateway.deletionObserved = SafDeletion.StillPresent(
+            document = SafDocumentInfo(
+                documentUri = existingUri,
+                documentId = "seed",
+                displayName = backupDocumentName("movie.mp4", PartialIdentity("p-1")),
+                sizeBytes = 0L,
+                mimeType = null,
+                flags = 0,
+                isDirectory = false,
+            ),
+        )
+        val coordinator = SafCommitCoordinator(gateway, ByteArrayStaging(payload))
+        val record = SafCommitRecord(
+            transferId = TransferId("t-1"),
+            partialId = PartialIdentity("p-1"),
+            treeUri = treeUri,
+            rootDocumentId = parentDocumentId,
+            parentDocumentId = parentDocumentId,
+            expectedFinalName = "movie.mp4",
+            expectedSizeBytes = payload.size.toLong(),
+            duplicatePolicy = DuplicatePolicy.OVERWRITE,
+        )
+
+        val first = coordinator.commit(record, grant) as SafCommitOutcome.Committed
+        val backupIdentity = requireNotNull(first.record.backupIdentity)
+        assertEquals(existingUri, first.record.existingIdentity?.documentUri)
+        assertEquals(2, first.record.renameHistory.size)
+        assertTrue(SafCleanupPending.BACKUP in first.pendingCleanup)
+        assertTrue(first.record.stagingReleased)
+        assertEquals(grant.grantId, first.record.grantId)
+        val deletesBeforeRejectedRetries = gateway.countOf("deleteAndReconcile:")
+
+        val otherGrantOutcome = coordinator.retryPendingCleanup(
+            first.record,
+            grant.copy(grantId = "g-2"),
+        ) as SafCommitOutcome.ReconciliationRequired
+        assertEquals(
+            TransferStorageError.StateConflict("cleanup_grant_context_mismatch"),
+            otherGrantOutcome.error,
+        )
+        val wrongStateOutcome = coordinator.retryPendingCleanup(
+            first.record.copy(state = SafCommitState.PROVIDER_VERIFIED),
+            grant,
+        ) as SafCommitOutcome.ReconciliationRequired
+        assertEquals(
+            TransferStorageError.StateConflict("cleanup_state_not_authorized"),
+            wrongStateOutcome.error,
+        )
+        assertEquals(deletesBeforeRejectedRetries, gateway.countOf("deleteAndReconcile:"))
+
+        gateway.grantFailureOn = { operation ->
+            if (operation == SafContainmentOperation.DELETE_TEMPORARY) {
+                TransferStorageError.PermissionRevoked("write")
+            } else {
+                null
+            }
+        }
+        val revokedRetry = coordinator.retryPendingCleanup(first.record, grant) as SafCommitOutcome.Committed
+        assertEquals(setOf(SafCleanupPending.BACKUP), revokedRetry.pendingCleanup)
+        assertEquals(1, gateway.countOf("deleteAndReconcile:"))
+
+        gateway.grantFailureOn = null
+        gateway.deletionObserved = SafDeletion.ConfirmedAbsent()
+        val previousWriteCount = gateway.countOf("openWrite:")
+        val deleteCall = "deleteAndReconcile:${backupIdentity.documentUri}:${backupIdentity.documentId}"
+        val previousDeleteCount = gateway.calls.count { it == deleteCall }
+        val retried = coordinator.retryPendingCleanup(revokedRetry.record, grant) as SafCommitOutcome.Committed
+
+        assertTrue(retried.cleanupComplete)
+        assertTrue(retried.stagingReleased)
+        assertEquals(SafCommitState.COMMITTED, retried.record.state)
+        assertEquals(
+            "delete retry uses the recorded URI and provider id, not a backup filename lookup",
+            previousDeleteCount + 1,
+            gateway.calls.count { it == deleteCall },
+        )
+        assertFalse(backupIdentity.documentUri in gateway.existing)
+        assertEquals(previousWriteCount, gateway.countOf("openWrite:"))
+        assertEquals(2, gateway.countOf("rename:"))
+
+        val idempotent = coordinator.retryPendingCleanup(retried.record, grant) as SafCommitOutcome.Committed
+        assertTrue(idempotent.cleanupComplete)
+        assertEquals(previousDeleteCount + 1, gateway.calls.count { it == deleteCall })
     }
 
     @Test
@@ -401,6 +829,7 @@ class SafCommitReconciliationTest {
         gateway.deletionObserved = SafDeletion.QueryUnknown("provider would not answer")
         val outcome = commit(gateway, policy = DuplicatePolicy.OVERWRITE)
         assertTrue(outcome is SafCommitOutcome.ReconciliationRequired)
+        assertFalse(outcome.isDelivered)
     }
 
     // -- Cleanup pending ------------------------------------------------------
@@ -412,6 +841,7 @@ class SafCommitReconciliationTest {
         val committed = outcome as SafCommitOutcome.Committed
         assertTrue(SafCleanupPending.STAGING in committed.pendingCleanup)
         assertFalse(committed.stagingReleased)
+        assertEquals(SafCommitState.STAGING_CLEANUP_PENDING, committed.record.state)
         assertFalse(committed.cleanupComplete)
         assertTrue("delivery is not undone by a failed cleanup", committed.isDelivered)
         assertEquals(
@@ -428,6 +858,35 @@ class SafCommitReconciliationTest {
         assertTrue(committed.pendingCleanup.isEmpty())
         assertTrue(committed.cleanupComplete)
         assertTrue(committed.stagingReleased)
+    }
+
+    @Test
+    fun `a staging cleanup retry updates the exact partial without recopying`() {
+        val gateway = RecordingSafGateway()
+        val staging = ByteArrayStaging(payload, releases = false)
+        val coordinator = SafCommitCoordinator(gateway, staging)
+        val record = SafCommitRecord(
+            transferId = TransferId("t-1"),
+            partialId = PartialIdentity("p-1"),
+            treeUri = treeUri,
+            rootDocumentId = parentDocumentId,
+            parentDocumentId = parentDocumentId,
+            expectedFinalName = "movie.mp4",
+            expectedSizeBytes = payload.size.toLong(),
+        )
+
+        val first = coordinator.commit(record, grant) as SafCommitOutcome.Committed
+        assertFalse(first.record.stagingReleased)
+        assertEquals(setOf(SafCleanupPending.STAGING), first.record.pendingCleanup)
+        val writeCount = gateway.countOf("openWrite:")
+
+        staging.releases = true
+        val retried = coordinator.retryPendingCleanup(first.record, grant) as SafCommitOutcome.Committed
+
+        assertTrue(retried.cleanupComplete)
+        assertTrue(retried.record.stagingReleased)
+        assertEquals(SafCommitState.COMMITTED, retried.record.state)
+        assertEquals(writeCount, gateway.countOf("openWrite:"))
     }
 
     // -- Storage full ---------------------------------------------------------

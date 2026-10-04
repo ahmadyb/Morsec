@@ -10,9 +10,10 @@ import android.annotation.SuppressLint
 /**
  * Redaction applied to every log message and stack trace before it is written.
  *
- * The master prompt (§10) forbids logging session tokens, bearer secrets and
- * private absolute paths, and the Logs screen offers a Share action — so the
- * text a user exports must already be safe. Pure Kotlin, no Android APIs, so it
+ * The master prompt (§10) forbids logging session tokens, bearer secrets,
+ * digest values, content URIs and private absolute paths. The Logs screen offers
+ * a Share action, so the text a user exports must already be safe. Pure Kotlin,
+ * no Android APIs, so it
  * is covered by an ordinary JVM unit test.
  */
 public object LogRedactor {
@@ -46,46 +47,49 @@ public object LogRedactor {
         """(?i)\b(android[_-]?id|imei|serial|serialno|gaid|advertising[_-]?id)\b(\s*[=:]\s*)([^\s,;""']+)""",
     )
 
-    /** App private storage: `/data/user/0/app.morsecode/…` or `/data/data/…`. */
-    private val appDataPaths = Regex("""/data/(?:user/\d+|data)/[\w.]+/(?:files|cache|databases|no_backup)?/?""")
+    /** App-private file paths are replaced whole, including their child names. */
+    private val appDataPaths = Regex(
+        """(?i)(?<![\w:])/data/(?:user/\d+|data)/[\w.]+(?:/(?:files|cache|databases|no_backup))?(?:/[^\s,;"'<>]*)?""",
+    )
 
-    /** Shared storage root: `/storage/emulated/0/…`. */
-    private val sharedStoragePaths = Regex("""/storage/(?:emulated/\d+|[A-Z0-9-]{4,})/""")
+    /** Shared-storage paths are private too; do not retain the filename suffix. */
+    private val sharedStoragePaths = Regex(
+        """(?i)(?<![\w:])/storage/(?:emulated/\d+|[a-z0-9-]{4,})(?:/[^\s,;"'<>]*)?""",
+    )
 
     /** `/sdcard/…` legacy alias. */
-    private val sdcardPaths = Regex("""/sdcard/""")
+    private val sdcardPaths = Regex("""(?i)(?<![\w:])/sdcard(?:/[^\s,;"'<>]*)?""")
 
-    /**
-     * Long opaque blobs (bearer-style tokens, base64 payloads). 40+ characters
-     * is above any human readable word the app logs, and below a SHA-256 hex
-     * digest length only when it is not hex; digests are kept because the
-     * verification step must be auditable.
-     */
-    private val opaqueBlobs = Regex("""\b[A-Za-z0-9_\-]{40,}\b""")
+    /** Common host-private absolute paths that can appear in diagnostics. */
+    private val hostPrivatePaths = Regex(
+        """(?i)(?<![\w:])/(?:home|users|private/var|tmp|var/tmp)/[^\s,;"'<>]+""",
+    )
 
-    /** SHA-256 digests are useful and not secret: never redact them. */
-    private val sha256Hex = Regex("""\b[a-fA-F0-9]{64}\b""")
+    /** File URIs and SAF/content URIs can encode private folder and document names. */
+    private val fileUris = Regex("""(?i)\bfile://[^\s<>"']+""")
+    private val contentUris = Regex("""(?i)\bcontent://[^\s<>"']+""")
+
+    /** Long opaque blobs, including digest bytes, are not log-safe. */
+    private val opaqueBlobs = Regex("""(?<![\w])[A-Za-z0-9_+=./:-]{40,}(?![\w])""")
+
+    /** Keep shared/exported logs free of terminal and control characters. */
+    private val controlCharacters = Regex("""\p{Cc}""")
 
     public fun redact(input: String?): String {
         if (input.isNullOrEmpty()) return ""
-        // Protect digests first so the opaque-blob rule cannot eat them.
-        val digests = mutableListOf<String>()
-        var working = sha256Hex.replace(input) { match ->
-            digests += match.value
-            "\u0000DIGEST${digests.size - 1}\u0000"
-        }
+        var working = controlCharacters.replace(input, " ")
+        working = fileUris.replace(working, "<file-uri>")
+        working = contentUris.replace(working, "content://[redacted]")
         working = authorizationHeaders.replace(working) { m -> "${m.groupValues[1]}${m.groupValues[2]}$MARKER" }
         working = bearerTokens.replace(working) { m -> "${m.groupValues[1]} $MARKER" }
         working = secretAssignments.replace(working) { m -> "${m.groupValues[1]}${m.groupValues[2]}$MARKER${m.groupValues[4]}" }
         working = querySecrets.replace(working) { m -> "${m.groupValues[1]}${m.groupValues[2]}=$MARKER" }
         working = identifiers.replace(working) { m -> "${m.groupValues[1]}${m.groupValues[2]}$MARKER" }
-        working = appDataPaths.replace(working, "<app-data>/")
-        working = sharedStoragePaths.replace(working, "<storage>/")
-        working = sdcardPaths.replace(working, "<storage>/")
+        working = appDataPaths.replace(working, "<app-data>")
+        working = sharedStoragePaths.replace(working, "<storage>")
+        working = sdcardPaths.replace(working, "<storage>")
+        working = hostPrivatePaths.replace(working, "<private-path>")
         working = opaqueBlobs.replace(working, MARKER)
-        digests.forEachIndexed { index, digest ->
-            working = working.replace("\u0000DIGEST$index\u0000", digest)
-        }
         return working
     }
 

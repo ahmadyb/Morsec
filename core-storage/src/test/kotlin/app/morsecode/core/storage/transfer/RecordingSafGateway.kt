@@ -39,6 +39,11 @@ internal class RecordingSafGateway(
     var renameReturns: RenameReturn = RenameReturn.SAME,
     /** Set to make every query fail with this error. */
     var queryFailure: TransferStorageError? = null,
+    /** A provider that omits size metadata, so exact length must be read. */
+    var omitSizeOnQuery: Boolean = false,
+    /** Use this reported size independently of the bytes opened for reading. */
+    var overrideReportedSize: Boolean = false,
+    var reportedSizeBytes: Long? = null,
     /** Set to make a rename fail. */
     var renameFailure: TransferStorageError? = null,
     /** Set to make a create fail. */
@@ -319,7 +324,11 @@ internal class RecordingSafGateway(
         documentUri = uri,
         documentId = uri.substringAfterLast('/'),
         displayName = nameOf(uri),
-        sizeBytes = (written[uri] ?: contents[uri])?.size?.toLong(),
+        sizeBytes = when {
+            omitSizeOnQuery -> null
+            overrideReportedSize -> reportedSizeBytes
+            else -> (written[uri] ?: contents[uri])?.size?.toLong()
+        },
         mimeType = "application/octet-stream",
         flags = 0,
         isDirectory = false,

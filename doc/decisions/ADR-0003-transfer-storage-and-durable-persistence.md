@@ -175,50 +175,64 @@ acknowledgement.
 
 ---
 
-## Decision 4 — SAF destination: app-private staging is the default
+## Decision 4 — SAF destination: verified temporary plus rename by default
 
 SAF has no pending/hidden mechanism. A document created inside a user-granted tree is
-visible to every other app the moment it exists, whatever it is called. A `.part`
-suffix makes a file *unmistakably incomplete to a human*; it does not make it hidden,
-and this document will not describe it as such.
+visible to other apps from the moment it exists, whatever it is called. A `.morsec-part`
+suffix makes a document *unmistakably incomplete to a human*; it does not make it hidden.
+This rule is specific to SAF. MediaStore `IS_PENDING` is a separate API-29+ row protocol;
+it is not a SAF capability.
 
-**Default strategy: app-private staging, then a verified bounded copy to the final SAF
-document.**
+**Default SAF strategy: app-private staging, then a verified provider temporary and
+rename.** The ordered pipeline is:
 
-- Bytes land in `filesDir/transfer-partials/<opaque-id>` — not user-visible, not
-  indexed, not scannable.
-- SHA-256 is computed over the staged file. Nothing is copied anywhere before it
-  matches.
-- The final copy runs through a bounded buffer and is followed by a re-verification
-  policy documented below.
-- MediaStore `IS_PENDING` (API 29+) remains the **preferred** strategy where the
-  destination is a media collection: the row is inserted pending, stays hidden from the
-  gallery and from other apps, and is published only after verification succeeds.
+1. Check the staged length and hash staged bytes in a bounded fresh pass through exact EOF before creating a provider document. If a caller supplied an expected digest, it must match; otherwise the observed staged digest is the transient comparison value for the provider copy.
+2. Resolve the destination through the persisted grant and apply the selected duplicate
+   policy. Direct-child lookup comes from the provider's child listing and compares exact
+   display names; provider document ids remain opaque.
+3. Create a uniquely named `.morsec-part` temporary document and store the exact
+   provider-returned URI and document id together.
+4. Copy with a bounded buffer; flush while the writer is open; close that owner; then
+   open a fresh reader and verify length and SHA-256 against the digest from the staged
+   pass. Require exact EOF even when provider size metadata matches: a bounded one-byte
+   probe rejects trailing data rather than accepting a matching prefix, and a missing
+   size column does not bypass the probe. The digest itself is transient and is not logged
+   or stored in recovery state. SAF flush is `FlushAttemptedGuaranteeUnknown`, never a
+   claim of durable flush.
+5. Request rename only after verification. Query the before and returned identities;
+   publish only when one authoritative identity is proven. Both identities, neither, a
+   null return, a failed query, or an identity mismatch remain reconciliation cases.
+6. Release app-private staging only after delivery is known. If its deletion does not
+   complete, delivery stays delivered and the record retains staging cleanup as pending.
 
-**Documented consequences of the staging default:**
+A locally calculated staging digest proves only that the provider copy matches the staged
+bytes. Without a sender-provided expected digest or equivalent trusted transfer
+verification, it does not independently prove sender authenticity.
 
-- *Additional free space.* Staging plus the final copy means up to 2× the file size is
-  required at the moment of commit. For an 8 TiB − 1 ceiling that is not satisfiable on
-  any phone; the copy path is bounded by reality, not by the protocol.
-- *Insufficient staging space.* The allocator checks `StorageManager.getAllocatableBytes`
-  (API 26+) or `File.usableSpace` (API 23+) before staging and refuses with a typed
-  `InsufficientSpace(required, available)` rather than failing mid-write. A refusal is a
-  retryable failure and the partial is left clean.
-- *Very large files.* The copy is a single bounded-buffer stream. There is no
-  whole-file allocation, no memory-mapped shortcut and no second copy in memory. If
-  staging space is insufficient for the full size, the transfer fails retryably instead
-  of writing a truncated file.
-- *Commit-copy interruption recovery.* `commit_state` records
-  `final_created → content_copied → published → cleanup_pending → committed`. On
-  restoration, an interrupted copy is detected by comparing the final document's length
-  against the staged length: shorter means re-copy from zero (the final document is
-  deleted first if the provider allows it), equal means proceed to publish. The copy is
-  therefore idempotent-by-restart, not atomic — and is documented as such.
-- *Final-file visibility.* The final SAF document appears only after verification and a
-  complete copy. It is never visible with partial content.
-- *Cleanup.* The staged file is removed only after `committed`. A staged file whose
-  record is missing is an orphan and is removed by the cleanup planner, never by a name
-  match.
+A visible-final-copy strategy exists only as a separate, explicit policy. With policy
+false, lack of rename is a typed refusal; it is never an implicit downgrade. When
+explicitly selected, the final-name document is still copied, flushed, closed, and
+verified before it is reported delivered, but it is visible while incomplete and is
+reported as such. That strategy cannot perform overwrite.
+
+**Overwrite is recoverable and never delete-first.** The verified replacement is built
+under a temporary identity before the existing final is touched. The coordinator
+re-queries and checks the existing stored identity, renames that document to a backup,
+settles the rename, promotes and verifies the replacement, then requests deletion of the
+backup by its stored URI/id pair. Absence is established by a follow-up query, not by the
+delete request's boolean. An interruption or unknown answer retains the identities and
+requires reconciliation; it cannot destroy the old file to make room for a new one.
+
+Cleanup is modeled separately from delivery. `pendingCleanup` can contain `STAGING`,
+`PROVIDER_TEMPORARY`, and/or `BACKUP`. The commit record binds the stored grant id,
+tree/root, transfer id, partial/commit id, final identity, pending item and state. Retry
+validates grant/tree context and an eligible cleanup state. Provider cleanup uses the
+exact recorded URI/id, queries that identity before issuing a delete and again afterwards,
+and requires confirmed absence; names and containment alone never authorize a delete.
+`stagingReleased` records the app-private delete observation independently. Permission
+revocation or a still-present document remains pending; an unknown query is not success.
+These are commit-record facts only: this decision does not start Room v2, a Room adapter,
+or a cleanup service.
 
 ---
 
@@ -369,10 +383,9 @@ So `SafDeletion` is decided by a follow-up query on the exact stored identity:
 | `IdentityMismatch` | The URI resolves to a different document | nothing deleted, nothing assumed |
 | `DeleteRequestFailed` | The request itself threw or could not be issued | not complete |
 
-Only `ConfirmedAbsent` closes cleanup. The boolean from the request is carried on
-several outcomes as `deleteReported` and is never read to decide one — it is retained
-so a log can record what the platform claimed while the outcome records what was
-observed.
+Only `ConfirmedAbsent` closes cleanup. The request boolean is carried on several
+outcomes as `deleteReported` for diagnostics only; it never authorizes deletion, absence,
+or a committed state. The outcome records what was observed.
 
 The reason to insist on this is what an unverified delete costs: the file left behind is
 a partial under a name the user will see, and the record says it was cleaned up.
@@ -407,6 +420,62 @@ not: a fake can decide what to answer, but it cannot make production code refere
 symbol the device lacks.
 
 Both `NewApi` suppressions are gone as a consequence.
+
+## Decision 13 — Preserve provider identity evidence and retry cleanup exactly
+
+The document name is presentation, not identity. Every operation after `create` keeps the
+provider-returned URI and document id as one `SafStoredDocumentIdentity`; neither field is
+reconstructed from a display name. The commit record keeps the temporary, final, existing,
+and backup identities plus a `SafRenameEvidence` entry for each rename attempt. An
+unresolved attempt retains both the pre-rename and returned identities, along with its
+classification when provider observations completed. If a query failed, the evidence is
+marked unclassified rather than guessed.
+
+### Rename reconciliation table
+
+| Reconciliation result | Evidence | Coordinator decision |
+| --- | --- | --- |
+| `RESOLVED_TO_RETURNED` | returned identity resolves; before identity is absent | adopt the returned URI/id |
+| `RESOLVED_TO_ORIGINAL` | same/original identity resolves | adopt the original URI/id |
+| `AMBIGUOUS_BOTH_RESOLVE` | both distinct identities resolve | stop; retain both for a later query |
+| `RETURNED_UNRESOLVED` | before resolves but returned identity does not | stop; do not assume rename failed |
+| `NEITHER_RESOLVES` | neither identity resolves | stop; do not publish or delete |
+| `NULL_RETURN` | rename returned no URI | stop; retain the before identity |
+| query/authorization failure | presence was not established | stop with typed error and unclassified evidence |
+
+Only the two resolved rows authorize promotion. A same-name lookup, URI containment, or
+a provider's returned URI by itself does not settle identity. Before an operation the
+coordinator also checks grant context, authority, and the URI's encoded id against the
+stored id. Cleanup never searches by name.
+
+### Cleanup state and retry table
+
+| Pending item | Persisted target | Successful retry | Still present / grant revoked | Unknown query or identity mismatch |
+| --- | --- | --- | --- | --- |
+| `STAGING` | exact `PartialIdentity` in app-private storage | set `stagingReleased`; remove the item | keep pending | keep pending; do not claim cleanup |
+| `PROVIDER_TEMPORARY` | stored temporary URI + id | remove only after confirmed absence | keep pending | reconciliation required |
+| `BACKUP` | stored backup URI + id | remove only after confirmed absence | keep pending | reconciliation required |
+
+The record's `pendingCleanup` set can carry more than one item. `stagingReleased` is a
+separate observed fact, because the final document can be delivered while staging or a
+backup still needs cleanup. The `retryPendingCleanup` operation repeats only the recorded
+deletes and staging deletion; it does not recopy, rename, search by name, or turn an
+unknown result into success. It requires the stored final identity and a compatible grant
+context before returning a delivered outcome.
+
+### SAF API compatibility table
+
+| Platform API | Provider containment evidence available to the production tier | Consequence |
+| --- | --- | --- |
+| 23–25 | grant-scoped canonical evidence only; this is not provider ancestry proof | a selected tree root is usable; an unproven child destination is `ContainmentUnknown` |
+| 26–28 | `findDocumentPath`; nullable root id is passed through and a null root id does not become a false mismatch | use provider path evidence when available; missing/failed evidence is not a child assertion |
+| 29+ | `isChildDocument`, with `findDocumentPath` as the older path capability | use the provider's answer; false is outside, unavailable/failed is unknown |
+
+The production tier is chosen from `Build.VERSION.SDK_INT`. Tests inject a tier fake, not
+an arbitrary SDK number. No repeated decoding or raw-URI `%2F` test proves containment,
+and provider document ids are never assumed to be string-prefix descendants.
+
+---
 
 ## Consequences
 

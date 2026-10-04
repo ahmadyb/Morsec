@@ -135,7 +135,7 @@ class SafDeletionReconciliationTest {
     @Test
     fun `a reported success with an unknown follow-up query stays reconciliation-required`() {
         val target = created()
-        provider.nullCursor = true
+        provider.nullCursorOnQueryNumber = 3
 
         val outcome = delete(target)
 
@@ -152,7 +152,7 @@ class SafDeletionReconciliationTest {
     fun `a null follow-up cursor leaves the deletion unknown`() {
         val target = created()
         provider.deleteBehaviour = DeleteBehaviour.NO_OP
-        provider.nullCursor = true
+        provider.nullCursorOnQueryNumber = 3
 
         // A provider that declines to answer has not said the document is gone,
         // so this is unknown rather than absent.
@@ -162,7 +162,7 @@ class SafDeletionReconciliationTest {
     @Test
     fun `a throwing follow-up query leaves the deletion unknown`() {
         val target = created()
-        provider.throwOnQuery = true
+        provider.throwOnQueryNumber = 3
 
         assertTrue("got ${delete(target)}", delete(target) is SafDeletion.QueryUnknown)
     }
@@ -196,8 +196,8 @@ class SafDeletionReconciliationTest {
     @Test
     fun `a revoked grant during the follow-up query is reported as revoked`() {
         val target = created()
-        // The delete goes through; it is the proof of absence that is lost.
-        provider.throwSecurityOnQuery = true
+        // The pre-delete query succeeds; the proof after the request is lost.
+        provider.throwSecurityOnQueryNumber = 3
 
         val outcome = delete(target)
 
@@ -221,7 +221,8 @@ class SafDeletionReconciliationTest {
         val mismatch = outcome as SafDeletion.IdentityMismatch
         assertEquals(target.documentId, mismatch.expectedDocumentId)
         assertEquals("$rootId/a-different-document", mismatch.observedDocumentId)
-        // Nothing is deleted and nothing is assumed: this is not our document.
+        // The pre-delete query catches the stale identity before a request is issued.
+        assertEquals(0, provider.callCount("android:deleteDocument"))
         assertFalse(outcome.cleanupComplete)
     }
 
@@ -242,6 +243,29 @@ class SafDeletionReconciliationTest {
             mismatch.observedDisplayName,
         )
         assertEquals("$rootId/temp.part-replacement", mismatch.observedDocumentId)
+        assertEquals("a replacement is never deleted by its inherited name", 0, provider.callCount("android:deleteDocument"))
+    }
+
+    @Test
+    fun `an unknown pre-delete query prevents the request`() {
+        val target = created()
+        provider.nullCursor = true
+
+        val outcome = delete(target)
+
+        assertTrue("got $outcome", outcome is SafDeletion.QueryUnknown)
+        assertEquals(0, provider.callCount("android:deleteDocument"))
+    }
+
+    @Test
+    fun `a row without provider identity cannot authorize deletion`() {
+        val target = created()
+        provider.omitDocumentIdOnQuery = true
+
+        val outcome = delete(target)
+
+        assertTrue("got $outcome", outcome is SafDeletion.QueryUnknown)
+        assertEquals(0, provider.callCount("android:deleteDocument"))
     }
 
     // -----------------------------------------------------------------------
@@ -252,10 +276,15 @@ class SafDeletionReconciliationTest {
     fun `repeating a delete of an already absent identity stays confirmed absent`() {
         val target = created()
 
-        assertTrue("got ${delete(target)}", delete(target) is SafDeletion.ConfirmedAbsent)
-        // The second call finds nothing to remove and nothing to prove, which
-        // is the same observation and must give the same answer.
-        assertTrue("got ${delete(target)}", delete(target) is SafDeletion.ConfirmedAbsent)
+        val first = delete(target)
+        assertTrue("got $first", first is SafDeletion.ConfirmedAbsent)
+        assertEquals(1, provider.callCount("android:deleteDocument"))
+
+        // The second pre-delete query proves absence, so the provider is not
+        // asked to delete the already-absent identity a second time.
+        val second = delete(target)
+        assertTrue("got $second", second is SafDeletion.ConfirmedAbsent)
+        assertEquals(1, provider.callCount("android:deleteDocument"))
     }
 
     @Test

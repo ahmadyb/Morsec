@@ -25,13 +25,37 @@ import app.morsecode.core.transfer.identity.TransferId
  * it made this document, and it knows exactly which one.
  */
 
+/** A provider-issued URI and document id that were recorded together. */
+public data class SafStoredDocumentIdentity(
+    public val documentUri: String,
+    public val documentId: String,
+) {
+    init {
+        require(documentUri.isNotBlank()) { "documentUri must not be blank" }
+        require(documentId.isNotBlank()) { "documentId must not be blank" }
+    }
+
+    /** Keep provider identities out of accidental diagnostic strings. */
+    override fun toString(): String = "SafStoredDocumentIdentity([redacted])"
+}
+
+/** Identity evidence retained when a rename is reconciled after a restart. */
+public data class SafRenameEvidence(
+    public val before: SafStoredDocumentIdentity,
+    public val returned: SafStoredDocumentIdentity?,
+    /** Null means the provider state was not fully observed. */
+    public val reconciliation: SafRenameReconciliation? = null,
+) {
+    public val knownIdentities: List<SafStoredDocumentIdentity>
+        get() = listOfNotNull(before, returned).distinct()
+
+    override fun toString(): String = "SafRenameEvidence([redacted])"
+}
+
 /**
  * A document this application created, recorded exactly as the provider
- * reported it.
- *
- * Persisted later by the Room layer; modelled here because the SAF layer is
- * what decides whether an operation may proceed, and it cannot make that
- * decision from containment alone.
+ * reported it. Room persistence is a later layer; SAF makes the identity
+ * decision here without treating containment as identity.
  */
 public data class InternallyCreatedDocument(
     public val grantId: String,
@@ -215,7 +239,24 @@ public data class SafRenameIdentity(
     public val knownUris: List<String>
         get() = listOfNotNull(beforeDocumentUri, returnedDocumentUri).distinct()
 
+    /** URI and id pairs retained without substituting one identity for another. */
+    public val evidence: SafRenameEvidence
+        get() = SafRenameEvidence(
+            before = SafStoredDocumentIdentity(beforeDocumentUri, beforeDocumentId),
+            returned = returnedDocumentUri
+                ?.takeIf { it.isNotBlank() }
+                ?.let { uri ->
+                    returnedDocumentId
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { id -> SafStoredDocumentIdentity(uri, id) }
+                },
+            reconciliation = reconciliation,
+        )
+
     public val requiresReconciliation: Boolean get() = reconciliation.requiresReconciliation
+
+    override fun toString(): String =
+        "SafRenameIdentity(reconciliation=${reconciliation.id}, knownIdentityCount=${knownUris.size})"
 }
 
 /**
