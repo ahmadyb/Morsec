@@ -496,72 +496,20 @@ public class DocumentsContractSafGateway(
      * because the platform reports it as an ordinary IOException with an errno.
      */
     private fun mapFailure(error: Exception, operation: String): TransferStorageError = when {
-        isRevocation(error) -> TransferStorageError.PermissionRevoked("write")
-        isStorageFull(error) -> TransferStorageError.StorageFull(operation)
+        StorageFailureClassifier.isRevocation(error) ->
+            TransferStorageError.PermissionRevoked("write")
+
+        StorageFailureClassifier.isStorageFull(error) ->
+            TransferStorageError.StorageFull(operation)
+
         error is FileNotFoundException -> TransferStorageError.NotFound("staged_copy")
         error is IOException -> TransferStorageError.Io(operation)
         else -> TransferStorageError.ProviderFailure("document_provider")
     }
 
-    /**
-     * Whether [error] is the platform reporting that the grant is gone.
-     *
-     * The chain is walked because a provider's SecurityException can arrive
-     * wrapped by the resolver. A revocation is a revocation however it is
-     * delivered, and letting it fall through to a generic provider failure
-     * would turn "the user took the grant away" into "try again".
-     */
-    private fun isRevocation(error: Throwable): Boolean {
-        var current: Throwable? = error
-        var depth = 0
-        while (current != null && depth < MAX_CAUSE_DEPTH) {
-            if (current is SecurityException) return true
-            current = current.cause
-            depth++
-        }
-        return false
-    }
-
-    /**
-     * Whether an exception is the platform reporting a full medium.
-     *
-     * There is no exception type for this: it arrives as an IOException whose
-     * message carries the errno, so the message is the only signal available.
-     * The chain is walked for the same reason as [isRevocation] -- the errno
-     * survives a wrapper, and a miss here reports a full destination as an
-     * ordinary IO failure the caller is entitled to retry.
-     */
-    private fun isStorageFull(error: Throwable): Boolean {
-        var current: Throwable? = error
-        var depth = 0
-        while (current != null && depth < MAX_CAUSE_DEPTH) {
-            val message = current.message
-            if (!message.isNullOrBlank() && (
-                    message.contains("ENOSPC", ignoreCase = true) ||
-                        message.contains("No space left", ignoreCase = true) ||
-                        message.contains("not enough space", ignoreCase = true)
-                    )
-            ) {
-                return true
-            }
-            current = current.cause
-            depth++
-        }
-        return false
-    }
-
     private companion object {
         const val WRITE_MODE = "w"
         const val READ_MODE = "r"
-
-        /**
-         * How far a cause chain is followed when classifying a failure.
-         *
-         * Bounded because a provider is another process and a cyclic or
-         * pathologically deep chain must not become an unbounded loop inside
-         * error handling.
-         */
-        const val MAX_CAUSE_DEPTH = 8
 
         val QUERY_COLUMNS = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,

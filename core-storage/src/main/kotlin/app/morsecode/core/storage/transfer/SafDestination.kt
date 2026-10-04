@@ -120,6 +120,30 @@ public enum class SafCommitState(public val id: String) {
     /** The document is present under its final name. Not yet cleaned up. */
     PUBLISHED_OR_VISIBLE("published_or_visible"),
 
+    /**
+     * A verified replacement exists under a temporary identity, and the
+     * existing final document has not been touched.
+     *
+     * The recoverable position: everything needed to finish an overwrite is
+     * present, and nothing the user had has been destroyed yet.
+     */
+    REPLACEMENT_READY("replacement_ready"),
+
+    /**
+     * The existing final document has been moved aside to a backup identity.
+     *
+     * From here the only safe moves are forward (rename the replacement to the
+     * final name) or back (rename the backup to the final name). Stopping here
+     * is not an option the coordinator may choose silently.
+     */
+    BACKUP_CREATED("backup_created"),
+
+    /** The backup identity may now be removed. */
+    BACKUP_CLEANUP_PENDING("backup_cleanup_pending"),
+
+    /** A provider temporary is no longer needed and may be removed. */
+    PROVIDER_TEMPORARY_CLEANUP_PENDING("provider_temporary_cleanup_pending"),
+
     /** Staged bytes may now be removed. */
     STAGING_CLEANUP_PENDING("staging_cleanup_pending"),
 
@@ -148,6 +172,13 @@ public enum class SafCommitState(public val id: String) {
             RENAMED -> "Confirm the final document, then clean up staging."
             FINAL_CREATED -> "Re-copy from zero and verify."
             PUBLISHED_OR_VISIBLE -> "Clean up staging, then record committed."
+            REPLACEMENT_READY ->
+                "Move the existing final document to a backup identity, then promote the replacement."
+            BACKUP_CREATED ->
+                "Promote the replacement to the final name, or restore the backup. Never both."
+            BACKUP_CLEANUP_PENDING -> "Delete the exact stored backup identity, then confirm absence."
+            PROVIDER_TEMPORARY_CLEANUP_PENDING ->
+                "Delete the exact stored temporary identity, then confirm absence."
             STAGING_CLEANUP_PENDING -> "Delete the staged file, then record committed."
             COMMITTED -> "Nothing; the commit is finished."
             COMMIT_FAILED -> "Retry from the last durable state, or surface for reconciliation."
@@ -181,13 +212,30 @@ public enum class SafCommitState(public val id: String) {
                 PROVIDER_VERIFIED, COMMIT_FAILED, RECONCILIATION_REQUIRED,
             ),
             PROVIDER_VERIFIED to setOf(
-                RENAME_STARTED, PUBLISHED_OR_VISIBLE, COMMIT_FAILED,
+                RENAME_STARTED, PUBLISHED_OR_VISIBLE, REPLACEMENT_READY, COMMIT_FAILED,
             ),
             RENAME_STARTED to setOf(RENAMED, COMMIT_FAILED, RECONCILIATION_REQUIRED),
-            RENAMED to setOf(PUBLISHED_OR_VISIBLE, COMMIT_FAILED, RECONCILIATION_REQUIRED),
+            RENAMED to setOf(
+                PUBLISHED_OR_VISIBLE, PROVIDER_TEMPORARY_CLEANUP_PENDING,
+                COMMIT_FAILED, RECONCILIATION_REQUIRED,
+            ),
+            REPLACEMENT_READY to setOf(
+                BACKUP_CREATED, COMMIT_FAILED, RECONCILIATION_REQUIRED,
+            ),
+            BACKUP_CREATED to setOf(
+                RENAME_STARTED, COMMIT_FAILED, RECONCILIATION_REQUIRED,
+            ),
             FINAL_CREATED to setOf(COPY_STARTED, COMMIT_FAILED, RECONCILIATION_REQUIRED),
-            PUBLISHED_OR_VISIBLE to setOf(STAGING_CLEANUP_PENDING, COMMIT_FAILED),
-            STAGING_CLEANUP_PENDING to setOf(COMMITTED, RECONCILIATION_REQUIRED),
+            PUBLISHED_OR_VISIBLE to setOf(
+                STAGING_CLEANUP_PENDING, PROVIDER_TEMPORARY_CLEANUP_PENDING, COMMIT_FAILED,
+            ),
+            PROVIDER_TEMPORARY_CLEANUP_PENDING to setOf(
+                STAGING_CLEANUP_PENDING, COMMITTED, RECONCILIATION_REQUIRED,
+            ),
+            STAGING_CLEANUP_PENDING to setOf(
+                COMMITTED, BACKUP_CLEANUP_PENDING, RECONCILIATION_REQUIRED,
+            ),
+            BACKUP_CLEANUP_PENDING to setOf(COMMITTED, RECONCILIATION_REQUIRED),
             COMMITTED to emptySet(),
             COMMIT_FAILED to setOf(DESTINATION_RESOLVED, COMMIT_FAILED, RECONCILIATION_REQUIRED),
             RECONCILIATION_REQUIRED to entries.toSet(),
@@ -234,6 +282,41 @@ public enum class SafCommitState(public val id: String) {
             to: SafCommitState,
             strategy: SafCommitStrategy? = null,
         ): Boolean = to in next(from, strategy)
+    }
+}
+
+/**
+ * Something that outlived the commit and still has to be removed.
+ *
+ * Kept as a set on the outcome rather than one flag, because more than one can
+ * be outstanding at once -- staging and a leftover provider temporary, say --
+ * and collapsing them into "cleanup failed" leaves the cleanup planner unable
+ * to tell what to retry.
+ *
+ * Each entry names an identity to act on, never a name to search for. A cleanup
+ * that resolved its target by filename would eventually delete a document it
+ * did not create.
+ */
+public enum class SafCleanupPending(public val id: String) {
+
+    /** The app-private staging file. Safe to retry; nothing else depends on it. */
+    STAGING("staging"),
+
+    /**
+     * A provider temporary that is no longer the authoritative identity.
+     *
+     * Arises when a provider renames by copying rather than moving, so both
+     * identities survive the rename.
+     */
+    PROVIDER_TEMPORARY("provider_temporary"),
+
+    /** The pre-overwrite document, moved aside to a backup identity. */
+    BACKUP("backup"),
+    ;
+
+    public companion object {
+        public fun fromIds(ids: Collection<String>): Set<SafCleanupPending> =
+            ids.mapNotNull { id -> entries.firstOrNull { it.id == id } }.toSet()
     }
 }
 
