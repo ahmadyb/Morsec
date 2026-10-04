@@ -52,6 +52,7 @@ class SafCommitReconciliationTest {
         strategy: SafCommitStrategy = SafCommitStrategy.TEMP_THEN_RENAME,
         allowVisibleFinalCopy: Boolean = false,
         releasesStaging: Boolean = true,
+        parentOverride: String = parentDocumentId,
     ): SafCommitOutcome {
         val staging = ByteArrayStaging(payload, releases = releasesStaging)
         val coordinator = SafCommitCoordinator(
@@ -65,7 +66,7 @@ class SafCommitReconciliationTest {
                 partialId = PartialIdentity("p-1"),
                 treeUri = treeUri,
                 rootDocumentId = parentDocumentId,
-                parentDocumentId = parentDocumentId,
+                parentDocumentId = parentOverride,
                 expectedFinalName = "movie.mp4",
                 expectedSizeBytes = payload.size.toLong(),
                 strategy = strategy,
@@ -180,6 +181,18 @@ class SafCommitReconciliationTest {
             "a SecurityException must never be downgraded to Missing",
             outcome.error is TransferStorageError.PermissionRevoked,
         )
+    }
+
+    @Test
+    fun `a parent outside the proved tree is refused as ContainmentUnknown`() {
+        val gateway = RecordingSafGateway()
+
+        val outcome = commit(gateway, parentOverride = "$parentDocumentId/opaque-child")
+
+        val failed = outcome as SafCommitOutcome.Failed
+        assertTrue(failed.error is TransferStorageError.ContainmentUnknown)
+        assertEquals(0, gateway.countOf("findChild:"))
+        assertEquals(0, gateway.countOf("create:"))
     }
 
     @Test

@@ -768,7 +768,50 @@ public class SafCommitCoordinator(
         if (needsWrite && !grant.writable) {
             return TransferStorageError.PermissionRevoked("write")
         }
-        return gateway.recheckPersistedGrant(grant, operation)
+        gateway.recheckPersistedGrant(grant, operation)?.let { return it }
+
+        // The parent URI is built from the grant, never accepted from a caller.
+        // The exact root is already named by the persisted tree grant; every
+        // other parent must be proven by the provider's tiered containment API.
+        val parentUri = SafContainment.documentUriUsingTree(
+            grant.treeUri,
+            record.parentDocumentId,
+        ) ?: return TransferStorageError.ContainmentUnknown("parent_uri_unavailable")
+        if (record.parentDocumentId == grant.rootDocumentId) return null
+
+        val prover = gateway as? SafContainmentProver
+            ?: return TransferStorageError.ContainmentUnknown("containment_prover_unavailable")
+        return when (
+            val evidence = SafDestinationResolver.validateExistingUri(
+                grant = grant,
+                documentUri = parentUri,
+                prover = prover,
+                sdkInt = android.os.Build.VERSION.SDK_INT,
+            )
+        ) {
+            is SafContainmentEvidence.ProviderConfirmedChild,
+            is SafContainmentEvidence.ProviderConfirmedPath,
+            -> null
+
+            is SafContainmentEvidence.GrantScopedCanonical ->
+                if (operation == SafContainmentOperation.CREATE_DESTINATION) {
+                    null
+                } else {
+                    TransferStorageError.ContainmentUnknown("parent_not_provider_confirmed")
+                }
+
+            is SafContainmentEvidence.PermissionRevoked -> evidence.error
+            is SafContainmentEvidence.Unknown -> when (val reason = evidence.reason) {
+                is TransferStorageError.PermissionRevoked -> reason
+                else -> TransferStorageError.ContainmentUnknown("parent_unknown")
+            }
+
+            is SafContainmentEvidence.Outside ->
+                TransferStorageError.ContainmentUnknown("parent_outside_grant")
+
+            is SafContainmentEvidence.Malformed ->
+                TransferStorageError.ContainmentUnknown("parent_malformed")
+        }
     }
 
     // -- Recoverable overwrite ----------------------------------------------

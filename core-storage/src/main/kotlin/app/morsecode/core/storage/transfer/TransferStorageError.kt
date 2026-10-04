@@ -158,6 +158,15 @@ public sealed class TransferStorageError(
         override fun safeMessage(): String = "The transfer cannot continue ($reason)"
     }
 
+    /** The destination could not be proven to lie inside the selected tree. */
+    public data class ContainmentUnknown(
+        /** Short machine-readable reason; never a URI or provider message. */
+        public val reason: String,
+        override val diagnostic: String? = null,
+    ) : TransferStorageError(TransferStorageErrorCategory.STATE) {
+        override fun safeMessage(): String = "The destination could not be verified"
+    }
+
     /** The provider cannot do this, on this device, ever. */
     public data class Unsupported(
         /** Short machine-readable capability, e.g. `seekable_stream`. */

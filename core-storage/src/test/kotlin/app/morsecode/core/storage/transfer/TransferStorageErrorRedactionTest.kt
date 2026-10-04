@@ -36,6 +36,7 @@ class TransferStorageErrorRedactionTest {
         TransferStorageError.ProviderFailure("document_provider", secretProviderText),
         TransferStorageError.InsufficientSpace(1L, 0L, secretPath),
         TransferStorageError.StateConflict("partial_longer_than_checkpoint", secretPath),
+        TransferStorageError.ContainmentUnknown("parent_not_proven", secretPath),
         TransferStorageError.Unsupported("seekable_stream", secretPath),
         TransferStorageError.Cancelled,
         TransferStorageError.IntegrityMismatch("digest", secretPath),
@@ -116,6 +117,7 @@ class TransferStorageErrorRedactionTest {
         assertFalse(TransferStorageError.isRetryable(TransferStorageError.IntegrityMismatch("digest")))
         assertFalse(TransferStorageError.isRetryable(TransferStorageError.Unsupported("seekable_stream")))
         assertFalse(TransferStorageError.isRetryable(TransferStorageError.StateConflict("stale")))
+        assertFalse(TransferStorageError.isRetryable(TransferStorageError.ContainmentUnknown("unknown")))
         // Out of space is never fixed by trying again immediately.
         assertFalse(TransferStorageError.isRetryable(TransferStorageError.InsufficientSpace(2L, 1L)))
     }
