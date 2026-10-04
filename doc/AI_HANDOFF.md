@@ -38,31 +38,36 @@ A and B are complete and approved. Work only on Part C, then stop; do not begin 
 a migration/adapter, cleanup service, restoration coordinator beyond SAF reconciliation,
 LAN, Nearby, FGS, notifications, UI, Media3 or WebShare. Room schema remains version 1.
 
-The last pushed SHA at the start of this continuation is
-`93c6d3959a18c184687b1ce35a48d2f815e353c7`, matching `origin/arena/01a0f97d-morsec`;
-its exact-head Android CI run `37218808121` was green. This checkout's local branch
-metadata currently points to grafted `ed7e841e0c3ccb867e76aaaad3953dcedd9f2098`
-while the remote ref is `93c6d39`; do not assume ancestry or tree equivalence, and do
-not rewrite/merge history or force-push to repair that mismatch. The working source tree contains the Part A/B/C files and all earlier
-untracked rescue artifacts, which must be preserved. This worktree then gained
-uncommitted changes to `SafDocumentIdentity.kt`, `SafDestination.kt`,
-`SafCommitCoordinator.kt`, `DestinationVerifier.kt`, `DocumentsContractSafGateway.kt`,
-`SafCommitOrderTest.kt`, `SafCommitReconciliationTest.kt`, `SafDeletionReconciliationTest.kt`,
-`RecordingSafGateway.kt`, `FakeSafProvider.kt`, `LogRedactor.kt` and its tests, ADR-0003,
-architecture, and this handoff. Those changes are **not yet tested** by Gradle: the focused task
-`./gradlew :core-storage:testDebugUnitTest --tests
-'app.morsecode.core.storage.transfer.SafCommitReconciliationTest'` stopped before Gradle
-started because no Java runtime is installed. The read-only Node verifiers did pass:
-references/hygiene 31/31, token parity 195/195, protocol limits 21/21, Room schema 9/9
-(version 1, 29,767 bytes). These are not substitutes for Kotlin compilation or the SAF
-suite. Do not report the code edits as green or push them without first reviewing the
-diff and then waiting for CI on the exact pushed SHA. The local changes are also
-preserved as `MORSEC_OFFLINE_PATCH/unverified-part-c-followup.patch`, generated against
-and dry-run checked on the fetched `93c6d3959a18c184687b1ce35a48d2f815e353c7` snapshot;
-this is a safety copy, not a commit, and the existing green bundle was not refreshed.
+The accepted starting SHA was
+`93c6d3959a18c184687b1ce35a48d2f815e353c7`; the earlier green CI run was `37218808121`.
+The first follow-up commit, `8db2a6e19b09b2b758eae6cb48fcfc37e2438f1c`, was pushed
+directly to `arena/01a0f97d-morsec` and matched the remote after push. Exact-SHA Android
+CI run `37234748228` found five distinct test defects (reported in both Debug and
+Release): two deletion tests invoked `delete()` a second time from an assertion message,
+and three redactor tests exposed an opaque-blob regex that consumed field labels and
+app stack frames. These were corrected in focused commit
+`2963893ef94a4798bda569948d1dc5f5681c8d65`.
 
-The current code intent is to keep provider URI/id pairs and rename evidence on the
-commit record, expose exact-identity cleanup retry for a delivered record, and separate
+CI run `37235364969` for code SHA
+`2963893ef94a4798bda569948d1dc5f5681c8d65` is green. GitHub Actions reports 2,343
+tests, 0 failed, 0 skipped in 127 reports; `core-storage` reports 1,140 passed, 0
+failed in 60 reports. Milestone hygiene and all read-only verifiers passed. Lint had
+0 errors and 45 warnings in 7 reports. The debug APK was 18.80 MiB and the
+instrumentation APK was 1.10 MiB. The Room schema export was version 1, 9 tables,
+29,767 bytes; no v2 schema was added. The workflow's Room export step is read-only,
+and its generated-wrapper commit step was skipped. The final delivery report records
+the exact pushed SHA/run; any later metadata-only commit still requires exact-SHA CI.
+
+The follow-up patch is preserved at
+`MORSEC_OFFLINE_PATCH/unverified-part-c-followup.patch`, against the accepted base,
+and was checked by a single application to a temporary clean-base export. Keep all
+earlier rescue artifacts. The local sandbox has no Java runtime, so the requested
+Gradle commands stop before Gradle starts; CI is the source of compile/test/lint/APK
+evidence. Part C remains limited to SAF destination behavior and review; no Room v2,
+LAN, Nearby, FGS, notifications, UI, Media3 or WebShare work was started.
+
+The implementation keeps provider URI/id pairs and rename evidence on the commit
+record, exposes exact-identity cleanup retry for a delivered record, and separates
 `stagingReleased` from delivery. Every commit hashes staging in a bounded fresh pass
 through exact EOF, even without a caller-supplied expected digest; a supplied digest is
 compared with that pass, and the transient staged SHA-256 is required to match a fresh
@@ -70,25 +75,25 @@ provider read through exact EOF before publication. A locally calculated digest 
 the provider copy matches staging; without a sender-provided expected digest or equivalent
 trusted verification, it does not prove sender authenticity. A bounded one-byte probe
 rejects trailing provider data even when size metadata is absent. Cleanup retry validates
-stored grant/tree context and a cleanup-authorizing state, and provider deletion queries
-the exact identity before and after the request. Digest bytes, content URIs, private
-paths, and control characters are redacted from diagnostic strings/log-safe text. No
-final Part C acceptance report exists yet.
+stored grant/tree context and a cleanup-authorizing state; provider deletion queries the
+exact stored identity before and after the request. Digest bytes, content URIs, private
+paths, control characters, opaque IDs, and peer-visible stack traces are redacted.
 
-**Part C acceptance remains open until verified on one exact SHA:** production factory
-uses the real gateway with no fake fallback; ordered failure-safe copy/flush/close/fresh
-read/verify; temp-plus-rename recovery; visible-final-copy only under explicit policy and
-never as an implicit downgrade; RENAME/SKIP/ASK/OVERWRITE behavior; recoverable overwrite
-without delete-first; rename-reconciliation cases with stored-identity evidence;
-cleanup-pending states and exact-identity retries; reconciliation, storage-full and
-grant-revocation matrices; descriptor ownership and close-failure proof; bounded virtual
-large-file tests above 4 GiB; production-gateway coordinator success/failure flow; ADR,
-architecture, compatibility and state/reconciliation tables. §18 must pass on the final
-SHA. §19 must report the exact SHA, CI/test/lint/APK evidence, provider limitations, and
-confirm Room v2 was not started.
+The requested Part C SAF follow-up passed exact-SHA CI on code commit
+`2963893ef94a4798bda569948d1dc5f5681c8d65` (run `37235364969`, evidence above).
+Coverage includes the production gateway with registered provider fakes, bounded copy,
+flush/close/fresh-read/verify ordering, temp-plus-rename recovery, explicit visible-final-
+copy policy, RENAME/SKIP/ASK/OVERWRITE, recoverable overwrite without delete-first,
+rename reconciliation, exact-identity cleanup retries, storage-full and grant-revocation
+handling, descriptor closure, and virtual >4-GiB accounting. This does not authorize
+starting the next milestone or any excluded subsystem: stop this follow-up for review.
+The final response records the exact pushed branch SHA and CI URL for the final commit.
 
-Rescue bundles and patches are based on the previous green SHA. Refresh them only after
-an exact-head green run; never label the current untested edits green.
+The offline follow-up patch is regenerated from accepted base `93c6d3959a18c184687b1ce35a48d2f815e353c7`,
+checked by applying it once to a clean temporary export, and preserved at
+`MORSEC_OFFLINE_PATCH/unverified-part-c-followup.patch`. Older bundles remain untouched.
+Keep Part C scope limited to SAF destination behavior and tests; do not start Room v2,
+LAN, Nearby, FGS, notifications, UI, Media3, WebShare, or unrelated coordinators.
 
 ## Historical gate — 2026-10-03: SAF destination gateway, two platform-safety corrections
 
