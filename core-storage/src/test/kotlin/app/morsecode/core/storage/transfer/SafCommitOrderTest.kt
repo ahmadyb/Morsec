@@ -2,6 +2,7 @@ package app.morsecode.core.storage.transfer
 
 import app.morsecode.core.model.DuplicatePolicy
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -234,6 +235,40 @@ class SafCommitOrderTest {
             gateway.openedHandles,
             gateway.closedHandles,
         )
+    }
+
+    @Test
+    fun `a write descriptor close failure is surfaced and prevents verification`() {
+        val gateway = RecordingSafGateway()
+        gateway.closeFailureOn = { operation ->
+            if (operation == RecordingSafGateway.OP_CLOSE_WRITE) IOException("close failed") else null
+        }
+
+        val (outcome, order) = record(gateway = gateway)
+
+        val failed = outcome as SafCommitOutcome.Failed
+        assertEquals(TransferStorageError.Io("close"), failed.error)
+        assertTrue("the fresh read must not open after a write close failure", !order.contains("openRead:"))
+        assertTrue("the document must not be renamed", !order.contains("rename:"))
+        assertTrue("staging must be retained", !order.contains("staging:delete"))
+        assertEquals(gateway.openedHandles, gateway.closedHandles)
+    }
+
+    @Test
+    fun `a verification descriptor close failure is surfaced and prevents rename`() {
+        val gateway = RecordingSafGateway()
+        gateway.closeFailureOn = { operation ->
+            if (operation == RecordingSafGateway.OP_CLOSE_READ) IOException("close failed") else null
+        }
+
+        val (outcome, order) = record(gateway = gateway)
+
+        val failed = outcome as SafCommitOutcome.Failed
+        assertEquals(TransferStorageError.Io("close"), failed.error)
+        assertTrue("verification did open a fresh read owner", order.contains("openRead:"))
+        assertTrue("the document must not be renamed", !order.contains("rename:"))
+        assertTrue("staging must be retained", !order.contains("staging:delete"))
+        assertEquals(gateway.openedHandles, gateway.closedHandles)
     }
 
     @Test

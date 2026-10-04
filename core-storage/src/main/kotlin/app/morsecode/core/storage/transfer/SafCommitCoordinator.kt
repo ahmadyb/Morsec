@@ -223,16 +223,17 @@ public interface SafDocumentGateway {
 public sealed class SafHandle : Closeable {
 
     /**
-     * How many times this handle has actually closed its primary resource.
+     * How many times this handle attempted to close its primary resource.
      *
-     * It counts closes, not calls to [close]: a handle closed twice reports 1,
-     * because counting attempts would make "closed exactly once" unverifiable
-     * and would tell a caller that a descriptor released once was released
-     * twice. [OwnedFileDescriptor] counts the same way.
+     * Incremented before the stream close: if it throws, the platform may still
+     * have released the descriptor, so retrying can close a reused descriptor
+     * number. A count of one means one close was attempted, not that release was
+     * confirmed; the thrown close error is surfaced by the coordinator.
      */
     public var closeCount: Int = 0
         protected set
 
+    /** True until a close attempt has begun; false does not prove release succeeded. */
     public val isOpen: Boolean get() = closeCount == 0
 }
 
@@ -269,13 +270,16 @@ public class SafWriteHandle internal constructor(
         descriptor?.fileDescriptor?.sync()
         FlushDurability.FlushAttemptedGuaranteeUnknown
     } catch (e: Exception) {
-        FlushDurability.FlushFailed(TransferStorageError.Io("sync"))
+        FlushDurability.FlushFailed(StorageFailureClassifier.classifyOrProviderFailure(e, "flush"))
     }
 
     override fun close() {
         if (closeCount > 0) return
+        // Do not retry a failed close: the descriptor may have been released
+        // before the stream reported its error, and a second close could act on
+        // a reused descriptor number. The caller catches and surfaces this one.
         closeCount++
-        runCatching { stream.close() }
+        stream.close()
     }
 }
 
@@ -313,8 +317,11 @@ public class SafReadHandle internal constructor(
 
     override fun close() {
         if (closeCount > 0) return
+        // Closing is attempted exactly once. If the stream reports failure the
+        // coordinator must hear it and stop; silently swallowing it would let a
+        // commit advance with an owner whose release was not confirmed.
         closeCount++
-        runCatching { stream.close() }
+        stream.close()
     }
 }
 
@@ -415,7 +422,11 @@ public object SafCopyStreamer {
                 }
                 val remaining = totalBytes - copied
                 val chunk = minOf(remaining, buffer.size.toLong()).toInt()
-                val count = read.read(buffer, 0, chunk)
+                val count = try {
+                    read.read(buffer, 0, chunk)
+                } catch (e: Exception) {
+                    return SafCopyOutcome.Failed(mapCopyFailure(e, "read"), copied)
+                }
                 when {
                     count < 0 -> return SafCopyOutcome.Failed(
                         TransferStorageError.StateConflict("staging_shrank"),
@@ -433,22 +444,27 @@ public object SafCopyStreamer {
 
                     else -> {
                         zeroSteps = 0
-                        write.write(buffer, 0, count)
+                        try {
+                            write.write(buffer, 0, count)
+                        } catch (e: Exception) {
+                            return SafCopyOutcome.Failed(mapCopyFailure(e, "write"), copied)
+                        }
                         copied += count
                     }
                 }
             }
             return SafCopyOutcome.Copied(copied)
         } catch (e: Exception) {
-            return SafCopyOutcome.Failed(mapCopyFailure(e), copied)
+            return SafCopyOutcome.Failed(mapCopyFailure(e, "write"), copied)
         }
     }
 
-    private fun mapCopyFailure(error: Exception): TransferStorageError = when (error) {
-        is SecurityException -> TransferStorageError.PermissionRevoked("write")
-        is java.io.FileNotFoundException -> TransferStorageError.NotFound("staged_copy")
-        is java.io.IOException -> TransferStorageError.Io("copy")
-        else -> TransferStorageError.ProviderFailure("document_provider")
+    private fun mapCopyFailure(error: Exception, access: String): TransferStorageError {
+        if (error is java.io.FileNotFoundException) {
+            return TransferStorageError.NotFound("staged_copy")
+        }
+        return StorageFailureClassifier.classify(error, "copy", access)
+            ?: TransferStorageError.ProviderFailure("document_provider")
     }
 }
 
@@ -817,14 +833,17 @@ public class SafCommitCoordinator(
         // rename is a provider operation; it has to be shown to have produced the
         // bytes that were verified, not assumed to have.
         val verified = verifyProviderCopy(finalUri, record)
-        if (verified is VerifyResult.Failed) {
+        verified.closeError?.let {
+            return reconcileKnown(current, it, listOf(backupUri, finalUri).distinct())
+        }
+        if (verified.outcome is VerifyResult.Failed) {
             return reconcileKnown(
                 current,
-                verified.error,
+                verified.outcome.error,
                 listOf(backupUri, finalUri).distinct(),
             )
         }
-        if (verified is VerifyResult.Mismatched) {
+        if (verified.outcome is VerifyResult.Mismatched) {
             return reconcileKnown(
                 current,
                 TransferStorageError.IntegrityMismatch("digest"),
@@ -931,6 +950,9 @@ public class SafCommitCoordinator(
         // that was written to.
         current = current.copy(state = SafCommitState.COPY_STARTED)
         val phase = runCopy(current, created.documentUri)
+        phase.closeError?.let {
+            return VerifiedTemporary.Stopped(onCopyFailed(current, it, created.documentUri))
+        }
         if (phase.outcome is SafCopyOutcome.Failed) {
             return VerifiedTemporary.Stopped(
                 onCopyFailed(current, phase.outcome.error, created.documentUri),
@@ -956,21 +978,17 @@ public class SafCommitCoordinator(
         }
         current = current.copy(state = SafCommitState.PROVIDER_FLUSH_COMPLETED)
 
-        // Checked after the flush and before any verification: descriptors that
-        // did not close mean the bytes are not known to have left the process,
-        // so there is nothing here that a fresh read could trust.
-        phase.closeError?.let {
-            return VerifiedTemporary.Stopped(onCopyFailed(current, it, created.documentUri))
-        }
-
         current = current.copy(state = SafCommitState.PROVIDER_VERIFICATION_STARTED)
         val verified = verifyProviderCopy(created.documentUri, record)
-        if (verified is VerifyResult.Failed) {
+        verified.closeError?.let {
+            return VerifiedTemporary.Stopped(onCopyFailed(current, it, created.documentUri))
+        }
+        if (verified.outcome is VerifyResult.Failed) {
             return VerifiedTemporary.Stopped(
-                onCopyFailed(current, verified.error, created.documentUri),
+                onCopyFailed(current, verified.outcome.error, created.documentUri),
             )
         }
-        if (verified is VerifyResult.Mismatched) {
+        if (verified.outcome is VerifyResult.Mismatched) {
             return VerifiedTemporary.Stopped(
                 onCopyFailed(
                     current,
@@ -1069,6 +1087,7 @@ public class SafCommitCoordinator(
 
         current = current.copy(state = SafCommitState.COPY_STARTED)
         val phase = runCopy(current, created.documentUri)
+        phase.closeError?.let { return onCopyFailed(current, it, created.documentUri) }
         if (phase.outcome is SafCopyOutcome.Failed) {
             return onCopyFailed(current, phase.outcome.error, created.documentUri)
         }
@@ -1088,17 +1107,13 @@ public class SafCommitCoordinator(
         }
         current = current.copy(state = SafCommitState.PROVIDER_FLUSH_COMPLETED)
 
-        // Checked after the flush and before any verification: descriptors that
-        // did not close mean the bytes are not known to have left the process,
-        // so there is nothing here that a fresh read could trust.
-        phase.closeError?.let { return onCopyFailed(current, it, created.documentUri) }
-
         current = current.copy(state = SafCommitState.PROVIDER_VERIFICATION_STARTED)
         val verified = verifyProviderCopy(created.documentUri, record)
-        if (verified is VerifyResult.Failed) {
-            return onCopyFailed(current, verified.error, created.documentUri)
+        verified.closeError?.let { return onCopyFailed(current, it, created.documentUri) }
+        if (verified.outcome is VerifyResult.Failed) {
+            return onCopyFailed(current, verified.outcome.error, created.documentUri)
         }
-        if (verified is VerifyResult.Mismatched) {
+        if (verified.outcome is VerifyResult.Mismatched) {
             return onCopyFailed(
                 current,
                 TransferStorageError.IntegrityMismatch("digest"),
@@ -1122,32 +1137,36 @@ public class SafCommitCoordinator(
      */
     private fun runCopy(record: SafCommitRecord, targetUri: String): SafCopyPhase {
         val staged = when (val opened = staging.open(record.partialId)) {
-            is SafOpen.Opened -> opened.handle as? SafReadHandle
-                ?: return unflushed(
+            is SafOpen.Opened -> opened.handle as? SafReadHandle ?: run {
+                val closeError = closeHandle(opened.handle, "read")
+                return unflushed(
                     SafCopyOutcome.Failed(
                         TransferStorageError.ProviderFailure("document_provider"),
                         0L,
                     ),
+                    closeError,
                 )
+            }
 
             is SafOpen.Refused -> return unflushed(SafCopyOutcome.Failed(opened.error, 0L))
         }
 
         val target = when (val opened = gateway.openWrite(targetUri)) {
-            is SafOpen.Opened -> opened.handle as? SafWriteHandle
-                ?: run {
-                    staged.close()
-                    return unflushed(
-                        SafCopyOutcome.Failed(
-                            TransferStorageError.ProviderFailure("document_provider"),
-                            0L,
-                        ),
-                    )
-                }
+            is SafOpen.Opened -> opened.handle as? SafWriteHandle ?: run {
+                val unexpectedClose = closeHandle(opened.handle, "write")
+                val stagedClose = closeHandle(staged, "read")
+                return unflushed(
+                    SafCopyOutcome.Failed(
+                        TransferStorageError.ProviderFailure("document_provider"),
+                        0L,
+                    ),
+                    unexpectedClose ?: stagedClose,
+                )
+            }
 
             is SafOpen.Refused -> {
-                staged.close()
-                return unflushed(SafCopyOutcome.Failed(opened.error, 0L))
+                val closeError = closeHandle(staged, "read")
+                return unflushed(SafCopyOutcome.Failed(opened.error, 0L), closeError)
             }
         }
 
@@ -1199,17 +1218,25 @@ public class SafCommitCoordinator(
     ): TransferStorageError? {
         val targetFailure = runCatching { target.close() }.exceptionOrNull()
         val stagedFailure = runCatching { staged.close() }.exceptionOrNull()
-        val first = targetFailure ?: stagedFailure ?: return null
-        return if (first is SecurityException) {
-            TransferStorageError.PermissionRevoked("write")
-        } else {
-            TransferStorageError.Io("close")
+        val targetError = targetFailure?.let {
+            StorageFailureClassifier.classifyOrProviderFailure(it, "close", "write")
         }
+        val stagedError = stagedFailure?.let {
+            StorageFailureClassifier.classifyOrProviderFailure(it, "close", "read")
+        }
+        return targetError ?: stagedError
     }
 
+    private fun closeHandle(handle: SafHandle, access: String): TransferStorageError? =
+        runCatching { handle.close() }.exceptionOrNull()?.let {
+            StorageFailureClassifier.classifyOrProviderFailure(it, "close", access)
+        }
+
     /** A copy that never got as far as writing, so nothing was flushed. */
-    private fun unflushed(outcome: SafCopyOutcome): SafCopyPhase =
-        SafCopyPhase(outcome, FlushDurability.FlushUnsupported)
+    private fun unflushed(
+        outcome: SafCopyOutcome,
+        closeError: TransferStorageError? = null,
+    ): SafCopyPhase = SafCopyPhase(outcome, FlushDurability.FlushUnsupported, closeError)
 
     /**
      * Verifies what the provider is actually holding.
@@ -1219,44 +1246,73 @@ public class SafCommitCoordinator(
      * because a digest taken from the stream that was written to would only
      * prove what was handed over, not what landed.
      */
-    private fun verifyProviderCopy(documentUri: String, record: SafCommitRecord): VerifyResult {
+    /**
+     * The outcome of a verification pass, and whether the read owner let go.
+     *
+     * The close is reported rather than swallowed for the same reason the copy's
+     * is: `runCatching { handle.close() }` hides both a leak and the fact that
+     * the last thing to touch the descriptor did not succeed. A verification
+     * whose reader would not close has not finished cleanly, and the commit must
+     * not advance as though it had.
+     */
+    private data class VerifyPhase(
+        val outcome: VerifyResult,
+        val closeError: TransferStorageError? = null,
+    )
+
+    private fun verifyProviderCopy(documentUri: String, record: SafCommitRecord): VerifyPhase {
         when (val looked = gateway.query(documentUri)) {
-            is SafLookup.Absent -> return VerifyResult.Failed(
-                TransferStorageError.NotFound("staged_copy"),
+            is SafLookup.Absent -> return VerifyPhase(
+                VerifyResult.Failed(TransferStorageError.NotFound("staged_copy")),
             )
 
-            is SafLookup.Failed -> return VerifyResult.Failed(looked.error)
+            is SafLookup.Failed -> return VerifyPhase(VerifyResult.Failed(looked.error))
             is SafLookup.Found -> {
                 val size = looked.document.sizeBytes
                 // A null size means the provider did not say, which is not the
                 // same as agreeing; the digest pass below is what settles it.
                 if (size != null && size != record.expectedSizeBytes) {
-                    return VerifyResult.Failed(
-                        TransferStorageError.IntegrityMismatch("length"),
+                    return VerifyPhase(
+                        VerifyResult.Failed(TransferStorageError.IntegrityMismatch("length")),
                     )
                 }
             }
         }
 
         val handle = when (val opened = gateway.openRead(documentUri)) {
-            is SafOpen.Opened -> opened.handle as? SafReadHandle
-                ?: return VerifyResult.Failed(
-                    TransferStorageError.ProviderFailure("document_provider"),
+            is SafOpen.Opened -> opened.handle as? SafReadHandle ?: run {
+                val closeError = closeHandle(opened.handle, "read")
+                return VerifyPhase(
+                    VerifyResult.Failed(
+                        TransferStorageError.ProviderFailure("document_provider"),
+                    ),
+                    closeError,
                 )
+            }
 
-            is SafOpen.Refused -> return VerifyResult.Failed(opened.error)
+            is SafOpen.Refused -> return VerifyPhase(VerifyResult.Failed(opened.error))
         }
 
-        return try {
-            DestinationVerifier.verify(
+        var outcome: VerifyResult? = null
+        var closeError: TransferStorageError? = null
+        try {
+            outcome = DestinationVerifier.verify(
                 source = handle.verificationSource(),
                 totalBytes = record.expectedSizeBytes,
                 expected = record.expectedDigest,
                 buffer = ByteArray(copyBufferBytes),
             )
+        } catch (error: Exception) {
+            outcome = VerifyResult.Failed(
+                StorageFailureClassifier.classifyOrProviderFailure(error, "verify", "read"),
+            )
         } finally {
-            runCatching { handle.close() }
+            closeError = closeHandle(handle, "read")
         }
+        return VerifyPhase(
+            outcome ?: VerifyResult.Failed(TransferStorageError.ProviderFailure("verification")),
+            closeError,
+        )
     }
 
     /**

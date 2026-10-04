@@ -52,8 +52,12 @@ internal object StorageFailureClassifier {
      * unrecognised failure means instead of being handed a plausible-looking
      * answer it did not earn.
      */
-    fun classify(error: Throwable, operation: String): TransferStorageError? = when {
-        isRevocation(error) -> TransferStorageError.PermissionRevoked("write")
+    fun classify(
+        error: Throwable,
+        operation: String,
+        access: String = if (operation.contains("read", ignoreCase = true)) "read" else "write",
+    ): TransferStorageError? = when {
+        isRevocation(error) -> TransferStorageError.PermissionRevoked(access)
         isStorageFull(error) -> TransferStorageError.StorageFull(operation)
         error is IOException -> TransferStorageError.Io(operation)
         else -> null
@@ -63,7 +67,8 @@ internal object StorageFailureClassifier {
     fun classifyOrProviderFailure(
         error: Throwable,
         operation: String,
-    ): TransferStorageError = classify(error, operation)
+        access: String = if (operation.contains("read", ignoreCase = true)) "read" else "write",
+    ): TransferStorageError = classify(error, operation, access)
         ?: TransferStorageError.ProviderFailure("document_provider")
 
     private inline fun walk(error: Throwable, matches: (Throwable) -> Boolean): Boolean {

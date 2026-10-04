@@ -2,6 +2,7 @@ package app.morsecode.core.storage.transfer
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -12,6 +13,15 @@ import java.io.OutputStream
  * provider. A fake that faithfully reproduced one provider's behaviour would
  * tell us about that provider; what has to be true of every provider is the
  * sequence: authorize, create, copy, flush, close, query, reopen, verify, rename.
+ *
+ * Two deliberate choices shape it.
+ *
+ * It turns a failure into a typed result rather than throwing, because that is
+ * what the real gateway does. A fake that threw would be testing a path the
+ * production code never takes: the coordinator does not catch, on the
+ * understanding that the gateway already did. Exercising a throw here would be
+ * exercising a crash, and would say nothing about the classification that
+ * actually decides SecurityException from a full medium.
  *
  * Closes are recorded from the stream rather than from the handle. The handle is
  * the owner and its close is final, so the only seam a test can observe is the
@@ -27,7 +37,7 @@ internal class RecordingSafGateway(
     private val contents: MutableMap<String, ByteArray> = mutableMapOf(),
     /** Whether a rename hands back a new uri, the same one, or nothing. */
     var renameReturns: RenameReturn = RenameReturn.SAME,
-    /** Set to make the next N queries fail with this error. */
+    /** Set to make every query fail with this error. */
     var queryFailure: TransferStorageError? = null,
     /** Set to make a rename fail. */
     var renameFailure: TransferStorageError? = null,
@@ -37,7 +47,47 @@ internal class RecordingSafGateway(
     var openFailure: TransferStorageError? = null,
     /** What a delete-and-reconcile observes. */
     var deletionObserved: SafDeletion = SafDeletion.ConfirmedAbsent(),
+
+    /**
+     * Throws from the named operation, so a test can put a failure at one point
+     * in the sequence.
+     *
+     * Named rather than positional because the interesting failures are the late
+     * ones: storage filling up during the copy and the grant being revoked
+     * between two calls are different events landing on different operations, and
+     * a flag that made everything fail at once could not tell them apart. The
+     * throw is then classified into a typed result, exactly as the gateway would.
+     */
+    var throwOn: ((String) -> Throwable?)? = null,
+
+    /** A rename that copies rather than moves, leaving both identities behind. */
+    var renameKeepsOriginal: Boolean = false,
+
+    /** A rename whose returned identity does not resolve. */
+    var renameDropsReturned: Boolean = false,
+
+    /** Injects a close error after the fake stream has released its backing buffer. */
+    var closeFailureOn: ((String) -> Throwable?)? = null,
 ) : SafDocumentGateway {
+
+    /** The operations that can be made to fail, for a test that walks them. */
+    companion object {
+        const val OP_FIND_CHILD = "findChild"
+        const val OP_CREATE = "create"
+        const val OP_RENAME = "rename"
+        const val OP_QUERY = "query"
+        const val OP_OPEN_WRITE = "openWrite"
+        const val OP_OPEN_READ = "openRead"
+        const val OP_DELETE = "deleteAndReconcile"
+        const val OP_STREAM_READ = "streamRead"
+        const val OP_STREAM_WRITE = "streamWrite"
+        const val OP_FLUSH = "flush"
+        const val OP_CLOSE_WRITE = "closeWrite"
+        const val OP_CLOSE_READ = "closeRead"
+
+        /** A throw with this message classifies as a full medium. */
+        fun storageFull(): IOException = IOException("write failed: ENOSPC (No space left on device)")
+    }
 
     /** Every operation, in the order it happened. */
     val calls: MutableList<String> = mutableListOf()
@@ -61,19 +111,6 @@ internal class RecordingSafGateway(
     /** Display name by uri. Defaults to the last path segment. */
     private val names: MutableMap<String, String> = mutableMapOf()
 
-    /**
-     * Puts a document under [displayName] so that a duplicate is actually found.
-     *
-     * Without an explicit name a seeded uri's name is its id, and a lookup by
-     * the final name finds nothing -- which silently turns every duplicate test
-     * into a first-write test.
-     */
-    fun addNamed(uri: String, displayName: String) {
-        names[uri] = displayName
-        existing += uri
-        contents.putIfAbsent(uri, ByteArray(0))
-    }
-
     /** The uri a create returned most recently. */
     var lastCreatedUri: String? = null
         private set
@@ -83,25 +120,63 @@ internal class RecordingSafGateway(
     /** Which identity a rename hands back. */
     enum class RenameReturn { SAME, NEW, NULL }
 
-    // -- Recording ----------------------------------------------------------
+    /**
+     * Puts a document under [displayName] so a duplicate is actually found.
+     *
+     * Without an explicit name a seeded uri's name is its id, and a lookup by the
+     * final name finds nothing -- which silently turns every duplicate test into
+     * a first-write test.
+     */
+    fun addNamed(uri: String, displayName: String) {
+        names[uri] = displayName
+        existing += uri
+        contents.putIfAbsent(uri, ByteArray(0))
+    }
+
+    // -- Recording and failure injection -------------------------------------
 
     private fun record(call: String) {
         calls += call
     }
 
-    /** The index of [call] in the recorded order, or -1. */
-    fun indexOf(call: String): Int = calls.indexOf(call)
+    private fun fail(op: String) {
+        throwOn?.invoke(op)?.let { throw it }
+    }
 
+    private fun failClose(op: String) {
+        closeFailureOn?.invoke(op)?.let { throw it }
+    }
+
+    /** Classifies a throw the way the gateway would, so the outcome is typed. */
+    private fun mapError(error: Throwable): TransferStorageError =
+        StorageFailureClassifier.classifyOrProviderFailure(error, "provider")
+
+    private inline fun <T> guarded(
+        op: String,
+        orElse: (TransferStorageError) -> T,
+        block: () -> T,
+    ): T = try {
+        fail(op)
+        block()
+    } catch (e: Exception) {
+        orElse(mapError(e))
+    }
+
+    /** The index of [call] in the recorded order, or -1. */
     fun indexOfFirst(predicate: (String) -> Boolean): Int = calls.indexOfFirst(predicate)
 
     fun countOf(prefix: String): Int = calls.count { it.startsWith(prefix) }
 
+    // -- SafDocumentGateway --------------------------------------------------
+
     override fun findChild(parentUri: String, displayName: String): SafLookup {
         record("findChild:$parentUri:$displayName")
-        queryFailure?.let { return SafLookup.Failed(it) }
-        val hit = existing.firstOrNull { nameOf(it) == displayName }
-            ?: return SafLookup.Absent
-        return SafLookup.Found(info(hit))
+        return guarded(OP_FIND_CHILD, { SafLookup.Failed(it) }) {
+            queryFailure?.let { return SafLookup.Failed(it) }
+            val hit = existing.firstOrNull { nameOf(it) == displayName }
+                ?: return SafLookup.Absent
+            SafLookup.Found(info(hit))
+        }
     }
 
     override fun create(
@@ -110,44 +185,53 @@ internal class RecordingSafGateway(
         displayName: String,
     ): SafCreate {
         record("create:$parentUri:$displayName")
-        createFailure?.let { return SafCreate.Failed(it) }
-        val id = "doc-${nextDocumentId++}"
-        val uri = "$parentUri/document/$id"
-        existing += uri
-        contents[uri] = ByteArray(0)
-        written[uri] = ByteArray(0)
-        lastCreatedUri = uri
-        return SafCreate.Created(uri, id, displayName)
+        return guarded(OP_CREATE, { SafCreate.Failed(it) }) {
+            createFailure?.let { return SafCreate.Failed(it) }
+            val id = "doc-${nextDocumentId++}"
+            val uri = "$parentUri/document/$id"
+            existing += uri
+            names[uri] = displayName
+            contents[uri] = ByteArray(0)
+            written[uri] = ByteArray(0)
+            lastCreatedUri = uri
+            SafCreate.Created(uri, id, displayName)
+        }
     }
 
     override fun rename(documentUri: String, displayName: String): SafRename {
         record("rename:$documentUri:$displayName")
-        renameFailure?.let { return SafRename.Failed(it) }
-        val newUri = when (renameReturns) {
-            RenameReturn.SAME -> documentUri
-            RenameReturn.NEW -> {
-                val id = "doc-${nextDocumentId++}"
-                val parent = documentUri.substringBefore("/document/")
-                val uri = "$parent/document/$id"
-                // A rename that copies rather than moves leaves both behind.
-                contents[uri] = contents[documentUri] ?: ByteArray(0)
-                written[uri] = written[documentUri] ?: ByteArray(0)
-                existing += uri
-                uri
-            }
+        return guarded(OP_RENAME, { SafRename.Failed(it) }) {
+            renameFailure?.let { return SafRename.Failed(it) }
+            val newUri = when (renameReturns) {
+                RenameReturn.SAME -> documentUri
+                RenameReturn.NEW -> {
+                    val id = "doc-${nextDocumentId++}"
+                    val parent = documentUri.substringBefore("/document/")
+                    val uri = "$parent/document/$id"
+                    contents[uri] = contents[documentUri] ?: ByteArray(0)
+                    written[uri] = written[documentUri] ?: ByteArray(0)
+                    uri
+                }
 
-            RenameReturn.NULL -> null
+                RenameReturn.NULL -> null
+            }
+            if (newUri == null || newUri == documentUri) {
+                names[documentUri] = displayName
+            } else {
+                names[newUri] = displayName
+                if (!renameDropsReturned) existing += newUri
+                if (!renameKeepsOriginal) existing -= documentUri
+            }
+            SafRename.Renamed(newUri)
         }
-        if (newUri != null && newUri != documentUri) {
-            existing -= documentUri
-        }
-        return SafRename.Renamed(newUri)
     }
 
     override fun delete(documentUri: String): SafDelete {
         record("delete:$documentUri")
-        existing -= documentUri
-        return SafDelete.Deleted
+        return guarded(OP_DELETE, { SafDelete.Failed(it) }) {
+            existing -= documentUri
+            SafDelete.Deleted
+        }
     }
 
     override fun deleteAndReconcile(
@@ -156,34 +240,47 @@ internal class RecordingSafGateway(
         grant: SafTreeGrant?,
     ): SafDeletion {
         record("deleteAndReconcile:$documentUri:$expectedDocumentId")
-        if (deletionObserved is SafDeletion.ConfirmedAbsent) existing -= documentUri
-        return deletionObserved
+        return try {
+            fail(OP_DELETE)
+            if (deletionObserved is SafDeletion.ConfirmedAbsent) existing -= documentUri
+            deletionObserved
+        } catch (error: Exception) {
+            when (val mapped = mapError(error)) {
+                is TransferStorageError.PermissionRevoked -> SafDeletion.PermissionRevoked(mapped)
+                else -> SafDeletion.QueryUnknown(mapped::class.simpleName.orEmpty())
+            }
+        }
     }
 
     override fun query(documentUri: String): SafLookup {
         record("query:$documentUri")
-        queryFailure?.let { return SafLookup.Failed(it) }
-        if (documentUri !in existing) return SafLookup.Absent
-        return SafLookup.Found(info(documentUri))
+        return guarded(OP_QUERY, { SafLookup.Failed(it) }) {
+            queryFailure?.let { return SafLookup.Failed(it) }
+            if (documentUri !in existing) return SafLookup.Absent
+            SafLookup.Found(info(documentUri))
+        }
     }
 
     override fun openWrite(documentUri: String): SafOpen {
         record("openWrite:$documentUri")
-        openFailure?.let { return SafOpen.Refused(it) }
-        openedHandles++
-        val sink = RecordingOutputStream(documentUri) { bytes ->
-            written[documentUri] = bytes
+        return guarded(OP_OPEN_WRITE, { SafOpen.Refused(it) }) {
+            openFailure?.let { return SafOpen.Refused(it) }
+            openedHandles++
+            val sink = RecordingOutputStream(documentUri) { bytes ->
+                written[documentUri] = bytes
+            }
+            SafOpen.Opened(SafWriteHandle(null, sink))
         }
-        return SafOpen.Opened(SafWriteHandle(null, sink))
     }
 
     override fun openRead(documentUri: String): SafOpen {
         record("openRead:$documentUri")
-        openFailure?.let { return SafOpen.Refused(it) }
-        openedHandles++
-        val bytes = written[documentUri] ?: contents[documentUri] ?: ByteArray(0)
-        val source = RecordingInputStream(documentUri, bytes)
-        return SafOpen.Opened(SafReadHandle(source))
+        return guarded(OP_OPEN_READ, { SafOpen.Refused(it) }) {
+            openFailure?.let { return SafOpen.Refused(it) }
+            openedHandles++
+            val bytes = written[documentUri] ?: contents[documentUri] ?: ByteArray(0)
+            SafOpen.Opened(SafReadHandle(RecordingInputStream(documentUri, bytes)))
+        }
     }
 
     // -- Helpers ------------------------------------------------------------
@@ -198,8 +295,7 @@ internal class RecordingSafGateway(
         isDirectory = false,
     )
 
-    private fun nameOf(uri: String): String =
-        names[uri] ?: uri.substringAfterLast('/')
+    private fun nameOf(uri: String): String = names[uri] ?: uri.substringAfterLast('/')
 
     private inner class RecordingOutputStream(
         private val uri: String,
@@ -208,15 +304,18 @@ internal class RecordingSafGateway(
         private val sink = ByteArrayOutputStream()
 
         override fun write(b: Int) {
+            fail(OP_STREAM_WRITE)
             sink.write(b)
         }
 
         override fun write(b: ByteArray, off: Int, len: Int) {
+            fail(OP_STREAM_WRITE)
             sink.write(b, off, len)
         }
 
         override fun flush() {
             record("flush:$uri")
+            fail(OP_FLUSH)
             sink.flush()
         }
 
@@ -225,6 +324,7 @@ internal class RecordingSafGateway(
             closedHandles++
             onClose(sink.toByteArray())
             sink.close()
+            failClose(OP_CLOSE_WRITE)
         }
     }
 
@@ -234,14 +334,21 @@ internal class RecordingSafGateway(
     ) : InputStream() {
         private val source = ByteArrayInputStream(bytes)
 
-        override fun read(): Int = source.read()
+        override fun read(): Int {
+            fail(OP_STREAM_READ)
+            return source.read()
+        }
 
-        override fun read(b: ByteArray, off: Int, len: Int): Int = source.read(b, off, len)
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            fail(OP_STREAM_READ)
+            return source.read(b, off, len)
+        }
 
         override fun close() {
             record("closeRead:$uri")
             closedHandles++
             source.close()
+            failClose(OP_CLOSE_READ)
         }
     }
 }
