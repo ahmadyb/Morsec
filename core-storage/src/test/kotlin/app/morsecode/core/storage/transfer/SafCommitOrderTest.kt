@@ -118,7 +118,8 @@ class SafCommitOrderTest {
 
     @Test
     fun `a successful commit runs the sequence in the documented order`() {
-        val (outcome, order) = record()
+        val gateway = RecordingSafGateway()
+        val (outcome, order) = record(gateway = gateway)
         assertTrue(outcome is SafCommitOutcome.Committed)
 
         // A live grant is checked immediately before each provider phase.
@@ -137,6 +138,14 @@ class SafCommitOrderTest {
         // Verification is the last thing before publication.
         assertTrue(order.after("openRead:", "closeRead:"))
         assertTrue(order.after("closeRead:", "rename:"))
+        // The renamed identity is reopened and verified again before staging
+        // can be released; the first read proved the temp, not the final name.
+        val finalRename = gateway.calls.indexOfLast { it.startsWith("rename:") }
+        val finalRead = gateway.calls.indexOfLast { it.startsWith("openRead:") }
+        val finalReadClose = gateway.calls.indexOfLast { it.startsWith("closeRead:") }
+        val stagingDelete = gateway.calls.indexOfFirst { it == "staging:delete" }
+        assertTrue("final verification follows rename", finalRename < finalRead)
+        assertTrue("final read owner closes before staging release", finalReadClose < stagingDelete)
         // Staging is released only after the rename is settled.
         assertTrue(order.after("query:", "staging:delete"))
     }

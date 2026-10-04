@@ -189,8 +189,8 @@ class SafCommitReconciliationTest {
 
         val outcome = commit(gateway, parentOverride = "$parentDocumentId/opaque-child")
 
-        val failed = outcome as SafCommitOutcome.Failed
-        assertTrue(failed.error is TransferStorageError.ContainmentUnknown)
+        val pending = outcome as SafCommitOutcome.ReconciliationRequired
+        assertTrue(pending.error is TransferStorageError.ContainmentUnknown)
         assertEquals(0, gateway.countOf("findChild:"))
         assertEquals(0, gateway.countOf("create:"))
     }
