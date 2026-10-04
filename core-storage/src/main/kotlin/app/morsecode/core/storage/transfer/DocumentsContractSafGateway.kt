@@ -1,10 +1,8 @@
 package app.morsecode.core.storage.transfer
 
-import android.annotation.SuppressLint
 import android.content.ContentResolver
 import android.database.Cursor
 import android.net.Uri
-import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import androidx.core.net.toUri
@@ -48,12 +46,21 @@ public sealed interface SafChildNames {
  * Implements both provider seams: [SafDocumentGateway] for document lifecycle
  * and [SafContainmentProver] for the descendant questions containment asks.
  *
- * [sdkInt] is injectable so the API-level guards can be exercised directly
- * rather than by configuring a Robolectric SDK per test.
+ * The API tier is injected rather than an SDK integer, so that a test can
+ * supply a fake tier but cannot talk the gateway into calling a method the
+ * running device does not have. See [SafPlatformOperations].
  */
 public class DocumentsContractSafGateway(
     private val resolver: ContentResolver,
-    private val sdkInt: Int = Build.VERSION.SDK_INT,
+    /**
+     * The platform tier the gateway asks.
+     *
+     * Defaults to the tier selected from the real Build.VERSION.SDK_INT. It is
+     * a parameter so tests can inject a fake, but a fake replaces the whole
+     * tier rather than the number that selects one, so a test cannot direct
+     * production code at a call the running device does not have.
+     */
+    private val operations: SafPlatformOperations = SafPlatformOperations.create(),
 ) : SafDocumentGateway, SafContainmentProver {
 
     // -----------------------------------------------------------------------
@@ -111,53 +118,23 @@ public class DocumentsContractSafGateway(
     // Containment — the platform's own descendant questions
     // -----------------------------------------------------------------------
 
-    /**
-     * Suppressed because the guard is on [sdkInt], not on
-     * `Build.VERSION.SDK_INT`, and lint can only analyse the latter. The guard
-     * is real and is what makes [sdkInt] injectable: the API-level behaviour
-     * is exercised directly by the tests below rather than by configuring a
-     * Robolectric SDK per case.
-     */
-    @SuppressLint("NewApi")
     override fun isChildDocument(
         parentDocumentUri: Uri,
         childDocumentUri: Uri,
-    ): SafChildAnswer {
-        // isChildDocument is API 29. Below it the platform cannot ask, and
-        // "cannot ask" is not "no".
-        if (sdkInt < 29) return SafChildAnswer.Indeterminate
-        return try {
-            val isChild = DocumentsContract.isChildDocument(resolver, parentDocumentUri, childDocumentUri)
-            SafChildAnswer.Answered(isChild)
-        } catch (e: SecurityException) {
-            SafChildAnswer.Revoked
-        } catch (e: Exception) {
-            SafChildAnswer.Indeterminate
-        }
-    }
+    ): SafChildAnswer = operations.isChildDocument(resolver, parentDocumentUri, childDocumentUri)
 
-    /** Guarded on [sdkInt]; see [isChildDocument] for why this is suppressed. */
-    @SuppressLint("NewApi")
-    override fun documentPath(documentUri: Uri): SafPathAnswer {
-        // findDocumentPath is API 26.
-        if (sdkInt < 26) return SafPathAnswer.Indeterminate
-        return try {
-            val path = DocumentsContract.findDocumentPath(resolver, documentUri)
-                ?: return SafPathAnswer.Indeterminate
-            val segments = path.path
-            if (segments.isNullOrEmpty()) {
-                SafPathAnswer.Indeterminate
-            } else {
-                // getRootId is documented to return null here; passed through
-                // as-is so the resolver can skip the comparison when it is.
-                SafPathAnswer.Resolved(rootId = path.rootId, segments = segments)
-            }
-        } catch (e: SecurityException) {
-            SafPathAnswer.Revoked
-        } catch (e: Exception) {
-            SafPathAnswer.Indeterminate
-        }
-    }
+    override fun documentPath(documentUri: Uri): SafPathAnswer =
+        operations.documentPath(resolver, documentUri)
+
+    /**
+     * Whether this device's tier can ask the provider anything about
+     * containment, and which tier it is.
+     *
+     * Exposed because a caller that knows the tier can skip asking: below API
+     * 26 the answer is always indeterminate, and asking anyway costs a round
+     * trip to a provider that will not be questioned.
+     */
+    public val containmentTier: SafContainmentTier get() = operations.tier
 
     // -----------------------------------------------------------------------
     // Queries
@@ -418,6 +395,92 @@ public class DocumentsContractSafGateway(
             SafDelete.Absent
         } catch (e: Exception) {
             SafDelete.Failed(mapFailure(e, "delete"))
+        }
+    }
+
+    /**
+     * Deletes an exact stored identity and then proves it is gone.
+     *
+     * The boolean from [DocumentsContract.deleteDocument] is recorded and then
+     * ignored. It is not the provider answering "is it gone" -- measured on a
+     * real provider round trip, it reports success whether or not anything was
+     * removed -- so letting it decide would close cleanup against a claim
+     * nobody verified. What decides is the follow-up query on the same stored
+     * URI: only a query that completed and returned no row proves absence.
+     *
+     * [grant] is optional. When supplied it is re-checked first, because a
+     * grant can be revoked between the decision to clean up and the cleanup.
+     * When it is null the caller is asserting it has already authorized, and
+     * the gateway will still classify a revocation it meets on the way.
+     */
+    public fun deleteAndReconcile(
+        documentUri: String,
+        expectedDocumentId: String,
+        grant: SafTreeGrant? = null,
+    ): SafDeletion {
+        val uri = documentUri.toUri()
+
+        // 1. Authorize. A cleanup that outlives its grant is not a cleanup, it
+        // is a SecurityException waiting to be misread as a missing document.
+        if (grant != null) {
+            val observedAuthority = uri.authority
+            if (observedAuthority != grant.authority) {
+                return SafDeletion.IdentityMismatch(
+                    expectedDocumentId = expectedDocumentId,
+                    observedDocumentId = observedAuthority ?: "",
+                    observedDisplayName = null,
+                )
+            }
+            if (!hasPersistedGrant(grant.treeUri, write = true)) {
+                return SafDeletion.PermissionRevoked(
+                    TransferStorageError.PermissionRevoked("write"),
+                )
+            }
+        }
+
+        // 2. Request deletion. A throw here is a failed request, not an
+        // absence: nothing has been observed about the document yet.
+        val deleteReported = try {
+            DocumentsContract.deleteDocument(resolver, uri)
+        } catch (e: SecurityException) {
+            return SafDeletion.PermissionRevoked(
+                TransferStorageError.PermissionRevoked("write"),
+            )
+        } catch (e: Exception) {
+            return SafDeletion.DeleteRequestFailed(mapFailure(e, "delete"))
+        }
+
+        // 3 and 4. Query the exact stored identity, then classify what was
+        // observed. The delete result is carried as a diagnostic only.
+        return when (val looked = queryInternal(uri)) {
+            // A query that completed and found no row is the only proof.
+            is SafLookup.Absent -> SafDeletion.ConfirmedAbsent(deleteReported = deleteReported)
+
+            is SafLookup.Found -> {
+                val observedId = looked.document.documentId
+                if (observedId == expectedDocumentId) {
+                    SafDeletion.StillPresent(
+                        document = looked.document,
+                        deleteReported = deleteReported,
+                    )
+                } else {
+                    SafDeletion.IdentityMismatch(
+                        expectedDocumentId = expectedDocumentId,
+                        observedDocumentId = observedId,
+                        observedDisplayName = looked.document.displayName,
+                    )
+                }
+            }
+
+            is SafLookup.Failed -> when (val error = looked.error) {
+                is TransferStorageError.PermissionRevoked ->
+                    SafDeletion.PermissionRevoked(error, deleteReported = deleteReported)
+
+                else -> SafDeletion.QueryUnknown(
+                    diagnostic = "follow-up query did not complete",
+                    deleteReported = deleteReported,
+                )
+            }
         }
     }
 

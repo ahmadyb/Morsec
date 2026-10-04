@@ -1,16 +1,9 @@
 package app.morsecode.core.storage.transfer
 
-import android.content.ContentProvider
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ProviderInfo
-import android.database.Cursor
-import android.database.MatrixCursor
 import android.net.Uri
-import android.os.Build
-import android.os.Bundle
-import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
@@ -24,7 +17,6 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.io.File
 
 /*
  * Tests for the production gateway, not for a stand-in.
@@ -39,22 +31,6 @@ import java.io.File
  * whether the gateway asks the platform the right questions. That distinction
  * is the point of this file.
  */
-/**
- * The columns the fake provider answers with.
- *
- * Deliberately the same set the gateway projects, so that a column the gateway
- * asks for is a column the provider actually populates and a "missing column"
- * can only come from the provider declining, not from the two halves of the
- * test disagreeing about the schema.
- */
-private val TEST_COLUMNS = arrayOf(
-    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-    DocumentsContract.Document.COLUMN_SIZE,
-    DocumentsContract.Document.COLUMN_MIME_TYPE,
-    DocumentsContract.Document.COLUMN_FLAGS,
-)
-
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class DocumentsContractSafGatewayTest {
@@ -84,7 +60,7 @@ class DocumentsContractSafGatewayTest {
             treeUri,
             Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
         )
-        gateway = DocumentsContractSafGateway(resolver = context.contentResolver, sdkInt = 34)
+        gateway = DocumentsContractSafGateway(resolver = context.contentResolver)
     }
 
     private fun uriFor(documentId: String): Uri =
@@ -309,7 +285,7 @@ class DocumentsContractSafGatewayTest {
 
     @Test
     fun `delete leaves the document in place when the provider affected no rows`() {
-        provider.noOpOnDelete = true
+        provider.deleteBehaviour = DeleteBehaviour.NO_OP
         val created = gateway.create(uriFor(rootId).toString(), "video/mp4", "temp.part") as SafCreate.Created
         gateway.delete(created.documentUri)
 
@@ -407,43 +383,6 @@ class DocumentsContractSafGatewayTest {
     }
 
     // -----------------------------------------------------------------------
-    // API-level guards
-    // -----------------------------------------------------------------------
-
-    @Test
-    fun `isChildDocument is not asked below API 29`() {
-        val old = DocumentsContractSafGateway(
-            resolver = ApplicationProvider.getApplicationContext<Context>().contentResolver,
-            sdkInt = 28,
-        )
-        // "Cannot ask" is reported as indeterminate, not as "not a child".
-        assertEquals(SafChildAnswer.Indeterminate, old.isChildDocument(uriFor(rootId), uriFor("$rootId/x")))
-        assertEquals(0, provider.callCount("android:isChildDocument"))
-    }
-
-    @Test
-    fun `findDocumentPath is not asked below API 26`() {
-        val old = DocumentsContractSafGateway(
-            resolver = ApplicationProvider.getApplicationContext<Context>().contentResolver,
-            sdkInt = 25,
-        )
-        assertEquals(SafPathAnswer.Indeterminate, old.documentPath(uriFor("$rootId/x")))
-        assertEquals(0, provider.callCount("android:findDocumentPath"))
-    }
-
-    @Test
-    fun `isChildDocument is asked at API 29 and above`() {
-        val modern = DocumentsContractSafGateway(
-            resolver = ApplicationProvider.getApplicationContext<Context>().contentResolver,
-            sdkInt = Build.VERSION_CODES.Q,
-        )
-        provider.addDocument("$rootId/2026", "2026")
-        val answer = modern.isChildDocument(uriFor(rootId), uriFor("$rootId/2026"))
-        assertTrue("got $answer", answer is SafChildAnswer.Answered)
-        assertEquals(1, provider.callCount("android:isChildDocument"))
-    }
-
-    // -----------------------------------------------------------------------
     // Storage-full mapping
     // -----------------------------------------------------------------------
 
@@ -459,234 +398,4 @@ class DocumentsContractSafGatewayTest {
         assertFalse(storageFull.safeMessage().contains("ENOSPC"))
     }
 
-    // -----------------------------------------------------------------------
-    // A real provider, driven through a real ContentResolver
-    // -----------------------------------------------------------------------
-
-    class FakeSafProvider : ContentProvider() {
-
-        private data class Doc(
-            val id: String,
-            var name: String,
-            val mime: String,
-            val size: Long?,
-            val flags: Int?,
-        )
-
-        private val documents = LinkedHashMap<String, Doc>()
-        private val contents = LinkedHashMap<String, File>()
-        private val calls = LinkedHashMap<String, Int>()
-        private lateinit var storageDir: File
-
-        /**
-         * The tree every document URI this provider hands out is built from.
-         *
-         * It has to be the authority the provider is *registered* under. A
-         * provider that invents its own authority in the Uri it returns has
-         * described a document no ContentResolver can find, and every later
-         * operation on that Uri -- open, query, rename, delete -- resolves to
-         * nothing. That failure looks like a gateway bug and is not one.
-         */
-        private lateinit var treeBaseUri: Uri
-
-        var nullCursor = false
-        var throwOnQuery = false
-        var throwSecurityOnQuery = false
-        var nullOnCreate = false
-        var nullOnRename = false
-        var nullOnOpen = false
-        var throwSecurityOnCall = false
-        var throwSecurityOnOpen = false
-        var noOpOnDelete = false
-
-        /** What the provider answered to the last delete, null if never asked. */
-        var lastDeleteRemoved: Boolean? = null
-        var renameOnCreate = false
-        var failOpenWith: RuntimeException? = null
-        private val malformed = mutableSetOf<String>()
-
-        fun reset(rootDocumentId: String, treeUri: Uri) {
-            treeBaseUri = treeUri
-            documents.clear(); contents.clear(); calls.clear(); malformed.clear()
-            nullCursor = false; throwOnQuery = false; throwSecurityOnQuery = false
-            nullOnCreate = false; nullOnRename = false; nullOnOpen = false
-            throwSecurityOnCall = false; throwSecurityOnOpen = false
-            noOpOnDelete = false; renameOnCreate = false; failOpenWith = null
-            lastDeleteRemoved = null
-            storageDir = File(context!!.filesDir, "fake-saf").apply { mkdirs() }
-            documents[rootDocumentId] = Doc(
-                rootDocumentId,
-                "Download",
-                DocumentsContract.Document.MIME_TYPE_DIR,
-                null,
-                DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE,
-            )
-        }
-
-        fun addDocument(id: String, name: String, mime: String = "video/mp4", size: Long? = 0L, flags: Int? = null) {
-            documents[id] = Doc(id, name, mime, size, flags)
-        }
-
-        /** Whether the provider still has a document, by id. */
-        fun contains(documentId: String): Boolean = documentId in documents
-
-        fun addMalformedRow(id: String) {
-            documents[id] = Doc(id, "", "", null, null)
-            malformed += id
-        }
-
-        fun callCount(method: String): Int = calls[method] ?: 0
-
-        private fun bump(method: String) {
-            calls[method] = (calls[method] ?: 0) + 1
-        }
-
-        override fun onCreate(): Boolean = true
-
-        override fun query(
-            uri: Uri,
-            projection: Array<out String>?,
-            selection: String?,
-            selectionArgs: Array<out String>?,
-            sortOrder: String?,
-        ): Cursor? {
-            if (throwSecurityOnQuery) throw SecurityException("revoked")
-            if (throwOnQuery) throw RuntimeException("provider crashed")
-            if (nullCursor) return null
-
-            val id = DocumentsContract.getDocumentId(uri)
-            val doc = documents[id] ?: return MatrixCursor(TEST_COLUMNS)
-
-            val cursor = MatrixCursor(TEST_COLUMNS)
-            cursor.newRow().apply {
-                add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, doc.id)
-                if (doc.id !in malformed) {
-                    add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, doc.name)
-                }
-                if (doc.size != null) add(DocumentsContract.Document.COLUMN_SIZE, doc.size)
-                add(DocumentsContract.Document.COLUMN_MIME_TYPE, doc.mime)
-                if (doc.flags != null) add(DocumentsContract.Document.COLUMN_FLAGS, doc.flags)
-            }
-            return cursor
-        }
-
-        override fun getType(uri: Uri): String =
-            documents[DocumentsContract.getDocumentId(uri)]?.mime ?: "vnd.android.cursor.item/vnd.android.document"
-
-        override fun insert(uri: Uri, values: ContentValues?): Uri? = null
-        override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
-        override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
-
-        override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
-            if (throwSecurityOnOpen) throw SecurityException("revoked")
-            failOpenWith?.let { throw it }
-            if (nullOnOpen) return null
-            val id = DocumentsContract.getDocumentId(uri)
-            val file = contents.getOrPut(id) { File(storageDir, id.hashCode().toString()).apply { createNewFile() } }
-            return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE)
-        }
-
-        /**
-         * The document URI the platform handed us, under whichever key it used.
-         *
-         * DocumentsContract has written the target of a call() under both the
-         * `uri` and `document_id` keys depending on the method and the release.
-         * A fake that hardcoded one would quietly read null, then "succeed" at
-         * nothing, and the test would fail for a reason that has nothing to do
-         * with the gateway. Trying each documented key keeps the fake honest
-         * about what it was actually asked to do.
-         */
-        @Suppress("DEPRECATION")
-        private fun Bundle.uriOrNull(vararg keys: String): Uri? {
-            for (key in keys) {
-                val value = getParcelable<Uri>(key)
-                if (value != null) return value
-            }
-            return null
-        }
-
-        /**
-         * The result bundle for a call that produced a document.
-         *
-         * Written under both keys for the same reason as [uriOrNull]: whichever
-         * one the platform reads, the identity it gets back is the one this
-         * provider decided on.
-         */
-        private fun documentResult(id: String): Bundle = Bundle().apply {
-            val uri = uriForId(id)
-            putParcelable("uri", uri)
-            putParcelable(DocumentsContract.Document.COLUMN_DOCUMENT_ID, uri)
-        }
-
-        override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
-            bump(method)
-            if (throwSecurityOnCall) throw SecurityException("revoked")
-            val bundle = extras ?: return null
-
-            return when (method) {
-                "android:createDocument" -> {
-                    if (nullOnCreate) return null
-                    val parent = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                        ?: return null
-                    var name = bundle.getString(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                        ?: return null
-                    if (renameOnCreate) name = name.replace(".mp4", " (1).mp4")
-                    val mime = bundle.getString(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                        ?: "video/mp4"
-                    val id = "${DocumentsContract.getDocumentId(parent)}/$name"
-                    documents[id] = Doc(id, name, mime, 0L, 0)
-                    documentResult(id)
-                }
-
-                "android:renameDocument" -> {
-                    if (nullOnRename) return null
-                    val target = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                        ?: return null
-                    val name = bundle.getString(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                        ?: return null
-                    val oldId = DocumentsContract.getDocumentId(target)
-                    val doc = documents.remove(oldId) ?: return null
-                    val newId = "${oldId.substringBeforeLast('/')}/$name"
-                    documents[newId] = doc.copy(id = newId, name = name)
-                    contents.remove(oldId)?.let { contents[newId] = it }
-                    documentResult(newId)
-                }
-
-                "android:deleteDocument" -> {
-                    val target = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                    val id = target?.let { DocumentsContract.getDocumentId(it) }
-                    // Existence is checked without removing: a provider that
-                    // affects no row has not deleted anything, and its documents
-                    // must still be there afterwards.
-                    val existed = id != null && documents.containsKey(id)
-                    val removed = existed && !noOpOnDelete
-                    if (removed) {
-                        documents.remove(id)
-                        contents.remove(id)
-                    }
-                    lastDeleteRemoved = removed
-                    Bundle().apply { putBoolean("result", removed) }
-                }
-
-                "android:isChildDocument" -> {
-                    val parent = bundle.uriOrNull("uri", DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                        ?: return Bundle().apply { putBoolean("result", false) }
-                    val child = bundle.uriOrNull("android.content.extra.TARGET_URI")
-                        ?: return Bundle().apply { putBoolean("result", false) }
-                    val parentId = DocumentsContract.getDocumentId(parent)
-                    val childId = DocumentsContract.getDocumentId(child)
-                    Bundle().apply {
-                        putBoolean("result", childId == parentId || childId.startsWith("$parentId/"))
-                    }
-                }
-
-                "android:findDocumentPath" -> Bundle()
-
-                else -> null
-            }
-        }
-
-        private fun uriForId(id: String): Uri =
-            DocumentsContract.buildDocumentUriUsingTree(treeBaseUri, id)
-    }
 }

@@ -89,6 +89,83 @@ public sealed interface SafDelete {
     public data class Failed(public val error: TransferStorageError) : SafDelete
 }
 
+/*
+ * Deletion, settled by observation rather than by the request.
+ *
+ * The rule this encodes is that a delete request is not proof of absence.
+ * DocumentsContract.deleteDocument returns a boolean, and that boolean is not
+ * the provider's answer to "is it gone" -- on the path this was measured on it
+ * reports success whether or not the provider removed anything. Treating it as
+ * proof closes cleanup against a fact nobody established, and the thing left
+ * behind is an unverified partial under a name the user will see.
+ *
+ * So the request is issued and then the exact stored identity is queried, and
+ * the observed state is what classifies the outcome. Only a query that ran and
+ * returned no row proves absence. Everything else keeps the deletion open:
+ * still-present, unknown, revoked and mismatched all leave cleanup pending
+ * rather than complete, because each is a state in which the document may still
+ * exist and therefore must not be reported as gone.
+ *
+ * [deleteReported] is kept on several cases purely as a diagnostic. It is never
+ * read to decide an outcome, which is the point: it is the number that turned
+ * out not to be trustworthy, retained so a log can say what the platform
+ * claimed while the outcome says what was observed.
+ */
+
+/** What a delete request plus a follow-up query established. */
+public sealed interface SafDeletion {
+
+    /** Whether this outcome leaves cleanup still to do. */
+    public val cleanupComplete: Boolean get() = this is ConfirmedAbsent
+
+    /**
+     * A follow-up query ran and returned no row for the exact stored identity.
+     *
+     * The only outcome that means the document is gone.
+     */
+    public data class ConfirmedAbsent(
+        public val deleteReported: Boolean? = null,
+    ) : SafDeletion
+
+    /** The exact identity still resolves. Cleanup stays pending. */
+    public data class StillPresent(
+        public val document: SafDocumentInfo,
+        public val deleteReported: Boolean? = null,
+    ) : SafDeletion
+
+    /** Presence and absence are both unproven. Reconciliation is required. */
+    public data class QueryUnknown(
+        public val diagnostic: String,
+        public val deleteReported: Boolean? = null,
+    ) : SafDeletion
+
+    /** The grant went away before absence could be proved. */
+    public data class PermissionRevoked(
+        public val error: TransferStorageError.PermissionRevoked,
+        public val deleteReported: Boolean? = null,
+    ) : SafDeletion
+
+    /**
+     * The stored URI now resolves to a different document.
+     *
+     * Most often a same-name replacement: the name survived the delete and
+     * something else now answers to the identity. Nothing is deleted and
+     * nothing is assumed, because acting here would be acting against a
+     * document this app did not create.
+     */
+    public data class IdentityMismatch(
+        public val expectedDocumentId: String,
+        public val observedDocumentId: String,
+        public val observedDisplayName: String? = null,
+    ) : SafDeletion
+
+    /** The delete request itself threw or could not be issued. */
+    public data class DeleteRequestFailed(
+        public val error: TransferStorageError,
+        public val deleteReported: Boolean? = null,
+    ) : SafDeletion
+}
+
 /** The answer to "open this document". */
 public sealed interface SafOpen {
     public data class Opened(public val handle: SafHandle) : SafOpen
