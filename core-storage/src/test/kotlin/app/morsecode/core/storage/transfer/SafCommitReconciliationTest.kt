@@ -522,9 +522,14 @@ class SafCommitReconciliationTest {
         val outcome = commit(gateway, policy = DuplicatePolicy.RENAME)
 
         assertTrue(outcome is SafCommitOutcome.Committed)
+        val requestedTemporaryName = "movie (2).mp4.p-1.morsec-part"
         assertTrue(
             "the raced candidate must be skipped, not overwritten",
-            gateway.calls.any { it.startsWith("create:") && it.endsWith(":movie (2).mp4") },
+            gateway.calls.any { it.startsWith("create:") && it.endsWith(":$requestedTemporaryName") },
+        )
+        assertFalse(
+            "the candidate that raced into existence must not be selected",
+            gateway.calls.any { it.startsWith("create:") && it.endsWith(":movie (1).mp4.p-1.morsec-part") },
         )
         assertTrue("the raced document remains", "$treeUri/document/raced-collision" in gateway.existing)
     }
