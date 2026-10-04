@@ -48,7 +48,7 @@ class SafCommitCoordinatorFactoryTest {
         )
     }
 
-    @Config(sdk = [36])
+    @Config(sdk = [34])
     @Test
     fun `the tier comes from the device, not from the caller`() {
         val gateway = coordinator().gateway as DocumentsContractSafGateway

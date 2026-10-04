@@ -5,6 +5,9 @@ import java.io.ByteArrayInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /*
  * The commit sequence, in order.
@@ -29,6 +32,8 @@ import org.junit.Test
  * is the sequence.
  */
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class SafCommitOrderTest {
 
     private val treeUri =
@@ -234,8 +239,7 @@ class SafCommitOrderTest {
     @Test
     fun `an overwrite that cannot replace safely does not touch the existing document`() {
         val gateway = RecordingSafGateway()
-        // Seed an existing document under the final name.
-        gateway.existing += "$treeUri/document/seed"
+        gateway.addNamed("$treeUri/document/seed", "movie.mp4")
         val (outcome, _) = record(
             policy = DuplicatePolicy.OVERWRITE,
             strategy = SafCommitStrategy.VISIBLE_FINAL_COPY,

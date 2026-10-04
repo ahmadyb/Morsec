@@ -58,6 +58,22 @@ internal class RecordingSafGateway(
     /** Documents that exist, by uri. */
     val existing: MutableSet<String> = contents.keys.toMutableSet()
 
+    /** Display name by uri. Defaults to the last path segment. */
+    private val names: MutableMap<String, String> = mutableMapOf()
+
+    /**
+     * Puts a document under [displayName] so that a duplicate is actually found.
+     *
+     * Without an explicit name a seeded uri's name is its id, and a lookup by
+     * the final name finds nothing -- which silently turns every duplicate test
+     * into a first-write test.
+     */
+    fun addNamed(uri: String, displayName: String) {
+        names[uri] = displayName
+        existing += uri
+        contents.putIfAbsent(uri, ByteArray(0))
+    }
+
     /** The uri a create returned most recently. */
     var lastCreatedUri: String? = null
         private set
@@ -183,7 +199,7 @@ internal class RecordingSafGateway(
     )
 
     private fun nameOf(uri: String): String =
-        written[uri]?.let { "written" } ?: contents[uri]?.let { "seeded" } ?: uri.substringAfterLast('/')
+        names[uri] ?: uri.substringAfterLast('/')
 
     private inner class RecordingOutputStream(
         private val uri: String,
