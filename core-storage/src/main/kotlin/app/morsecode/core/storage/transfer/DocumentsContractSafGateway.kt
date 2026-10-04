@@ -413,10 +413,10 @@ public class DocumentsContractSafGateway(
      * When it is null the caller is asserting it has already authorized, and
      * the gateway will still classify a revocation it meets on the way.
      */
-    public fun deleteAndReconcile(
+    override fun deleteAndReconcile(
         documentUri: String,
         expectedDocumentId: String,
-        grant: SafTreeGrant? = null,
+        grant: SafTreeGrant?,
     ): SafDeletion {
         val uri = documentUri.toUri()
 
