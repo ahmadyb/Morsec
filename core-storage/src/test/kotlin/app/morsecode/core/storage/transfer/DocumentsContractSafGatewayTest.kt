@@ -118,6 +118,25 @@ class DocumentsContractSafGatewayTest {
         assertFalse(gateway.hasPersistedGrant(other, write = true))
     }
 
+    @Test
+    fun `grant authorization re-reads persisted permissions for each phase`() {
+        val approved = requireNotNull(grant())
+        assertNull(gateway.recheckPersistedGrant(approved, SafContainmentOperation.RECONCILE))
+        assertNull(gateway.recheckPersistedGrant(approved, SafContainmentOperation.CREATE_DESTINATION))
+
+        ApplicationProvider.getApplicationContext<Context>().contentResolver
+            .releasePersistableUriPermission(treeUri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+        assertNull(
+            "read-only reconciliation remains authorized",
+            gateway.recheckPersistedGrant(approved, SafContainmentOperation.RECONCILE),
+        )
+        assertEquals(
+            TransferStorageError.PermissionRevoked("write"),
+            gateway.recheckPersistedGrant(approved, SafContainmentOperation.CREATE_DESTINATION),
+        )
+    }
+
     // -----------------------------------------------------------------------
     // Query model
     // -----------------------------------------------------------------------

@@ -114,6 +114,36 @@ public class DocumentsContractSafGateway(
         )
     }
 
+    /**
+     * Revalidates the approved grant at the operation boundary.
+     *
+     * A [SafTreeGrant] can outlive the permission it described. The current
+     * persisted-permission list is consulted for every provider phase; a
+     * missing write permission is not interpreted as a missing document.
+     */
+    override fun recheckPersistedGrant(
+        grant: SafTreeGrant,
+        operation: SafContainmentOperation,
+    ): TransferStorageError? {
+        if (grant.authority != grant.treeUri.authority ||
+            SafContainment.treeDocumentIdOf(grant.treeUri) != grant.rootDocumentId
+        ) {
+            return TransferStorageError.StateConflict("grant_context_mismatch")
+        }
+
+        val needsWrite = operation == SafContainmentOperation.CREATE_DESTINATION ||
+            operation == SafContainmentOperation.OPEN_WRITE ||
+            operation == SafContainmentOperation.RENAME ||
+            operation == SafContainmentOperation.DELETE_TEMPORARY
+        if (needsWrite && !grant.writable) {
+            return TransferStorageError.PermissionRevoked("write")
+        }
+        if (!hasPersistedGrant(grant.treeUri, write = needsWrite)) {
+            return TransferStorageError.PermissionRevoked(if (needsWrite) "write" else "read")
+        }
+        return null
+    }
+
     // -----------------------------------------------------------------------
     // Containment — the platform's own descendant questions
     // -----------------------------------------------------------------------
@@ -419,21 +449,36 @@ public class DocumentsContractSafGateway(
         grant: SafTreeGrant?,
     ): SafDeletion {
         val uri = documentUri.toUri()
+        val uriDocumentId = SafContainment.documentIdOf(uri)
+            ?: return SafDeletion.DeleteRequestFailed(
+                TransferStorageError.Unsupported("saf_document_uri"),
+            )
+        if (uriDocumentId != expectedDocumentId) {
+            return SafDeletion.IdentityMismatch(
+                expectedDocumentId = expectedDocumentId,
+                observedDocumentId = uriDocumentId,
+            )
+        }
 
         // 1. Authorize. A cleanup that outlives its grant is not a cleanup, it
         // is a SecurityException waiting to be misread as a missing document.
         if (grant != null) {
+            when (val authorization = recheckPersistedGrant(
+                grant,
+                SafContainmentOperation.DELETE_TEMPORARY,
+            )) {
+                is TransferStorageError.PermissionRevoked ->
+                    return SafDeletion.PermissionRevoked(authorization)
+
+                null -> Unit
+                else -> return SafDeletion.DeleteRequestFailed(authorization)
+            }
             val observedAuthority = uri.authority
             if (observedAuthority != grant.authority) {
                 return SafDeletion.IdentityMismatch(
                     expectedDocumentId = expectedDocumentId,
-                    observedDocumentId = observedAuthority ?: "",
+                    observedDocumentId = SafContainment.documentIdOf(uri) ?: "",
                     observedDisplayName = null,
-                )
-            }
-            if (!hasPersistedGrant(grant.treeUri, write = true)) {
-                return SafDeletion.PermissionRevoked(
-                    TransferStorageError.PermissionRevoked("write"),
                 )
             }
         }

@@ -1,5 +1,6 @@
 package app.morsecode.core.storage.transfer
 
+import android.net.Uri
 import app.morsecode.core.model.DuplicatePolicy
 import java.io.ByteArrayInputStream
 import java.io.IOException
@@ -42,6 +43,14 @@ class SafCommitOrderTest {
 
     private val parentDocumentId = "primary:Download"
 
+    private val grant = SafTreeGrant(
+        grantId = "g-1",
+        treeUri = Uri.parse(treeUri),
+        rootDocumentId = parentDocumentId,
+        authority = requireNotNull(Uri.parse(treeUri).authority),
+        writable = true,
+    )
+
     private val bytes = "morsec".toByteArray()
 
     private fun record(
@@ -69,6 +78,7 @@ class SafCommitOrderTest {
                 strategy = strategy,
                 duplicatePolicy = policy,
             ),
+            grant,
         )
         return outcome to log
     }
@@ -110,6 +120,13 @@ class SafCommitOrderTest {
     fun `a successful commit runs the sequence in the documented order`() {
         val (outcome, order) = record()
         assertTrue(outcome is SafCommitOutcome.Committed)
+
+        // A live grant is checked immediately before each provider phase.
+        assertTrue(order.after("authorize:reconcile", "findChild:"))
+        assertTrue(order.after("authorize:create_destination", "create:"))
+        assertTrue(order.after("authorize:open_write", "openWrite:"))
+        assertTrue(order.after("authorize:verify", "openRead:"))
+        assertTrue(order.after("authorize:rename", "rename:"))
 
         // Copy and flush precede the close that releases the bytes.
         assertTrue(order.after("openWrite:", "flush:"))
@@ -202,6 +219,7 @@ class SafCommitOrderTest {
                 expectedFinalName = "movie.mp4",
                 expectedSizeBytes = bytes.size.toLong() + 1,
             ),
+            grant,
         )
         assertTrue(outcome is SafCommitOutcome.Failed)
         assertTrue(!gateway.calls.any { it.startsWith("rename:") })

@@ -181,6 +181,20 @@ public sealed interface SafOpen {
  * behind them.
  */
 public interface SafDocumentGateway {
+    /**
+     * Re-checks the persisted grant immediately before a provider operation.
+     *
+     * The grant object is a snapshot; it is not authority to assume a permission
+     * still exists. Production checks ContentResolver.persistedUriPermissions
+     * on each call. The coordinator asks before listing, creating, opening,
+     * verifying, renaming and deleting, so a revocation is never mistaken for a
+     * missing document or a successful operation.
+     */
+    public fun recheckPersistedGrant(
+        grant: SafTreeGrant,
+        operation: SafContainmentOperation,
+    ): TransferStorageError?
+
     public fun findChild(parentUri: String, displayName: String): SafLookup
     public fun create(parentUri: String, mimeType: String, displayName: String): SafCreate
     public fun rename(documentUri: String, displayName: String): SafRename
@@ -505,15 +519,21 @@ public object SafDuplicateNaming {
         displayName: String,
         isTaken: (String) -> SafLookup,
     ): SafNameChoice {
-        if (!isTaken(displayName).isTaken()) return SafNameChoice.Chosen(displayName)
+        when (val first = isTaken(displayName)) {
+            is SafLookup.Found -> Unit
+            SafLookup.Absent -> return SafNameChoice.Chosen(displayName)
+            is SafLookup.Failed -> return SafNameChoice.Unavailable(first.error)
+        }
         for (index in 1..MAX_RENAME_ATTEMPTS) {
             val candidate = withSuffix(displayName, index)
-            if (!isTaken(candidate).isTaken()) return SafNameChoice.Chosen(candidate)
+            when (val looked = isTaken(candidate)) {
+                is SafLookup.Found -> Unit
+                SafLookup.Absent -> return SafNameChoice.Chosen(candidate)
+                is SafLookup.Failed -> return SafNameChoice.Unavailable(looked.error)
+            }
         }
         return SafNameChoice.Exhausted(displayName)
     }
-
-    private fun SafLookup.isTaken(): Boolean = this is SafLookup.Found
 }
 
 /** What [SafDuplicateNaming.firstFree] decided. */
@@ -522,6 +542,9 @@ public sealed interface SafNameChoice {
 
     /** Every plausible name was taken. A rename cannot proceed. */
     public data class Exhausted(public val displayName: String) : SafNameChoice
+
+    /** A collision query failed; failure is not evidence that the name is free. */
+    public data class Unavailable(public val error: TransferStorageError) : SafNameChoice
 }
 
 // ---------------------------------------------------------------------------
@@ -666,8 +689,14 @@ public class SafCommitCoordinator(
      * The caller passes the record rather than letting the coordinator look it
      * up so that the state it writes back is the same record the caller
      * persists, and there is no second source of truth for "where are we".
+     * [grant] is the approved tree grant; its persisted permission is re-read
+     * before each provider operation rather than trusted from this snapshot.
      */
-    public fun commit(record: SafCommitRecord): SafCommitOutcome {
+    public fun commit(record: SafCommitRecord, grant: SafTreeGrant): SafCommitOutcome {
+        authorizationError(record, grant, SafContainmentOperation.RECONCILE)?.let {
+            return route(record, it, created = null)
+        }
+
         val stagedLength = staging.length(record.partialId)
             ?: return fail(record, TransferStorageError.NotFound("staged_copy"))
 
@@ -680,14 +709,17 @@ public class SafCommitCoordinator(
             )
         }
 
+        authorizationError(record, grant, SafContainmentOperation.RECONCILE)?.let {
+            return route(record, it, created = null)
+        }
         val existing = gateway.findChild(record.uriForTree(record.parentDocumentId), record.expectedFinalName)
-        val finalName = when (val choice = applyDuplicatePolicy(record, existing)) {
+        val finalName = when (val choice = applyDuplicatePolicy(record, existing, grant)) {
             is SafNameDecision.Use -> choice.displayName
 
             // Overwrite is not a naming decision. The final name is already
             // taken, and replacing is a different sequence rather than a
             // different name, so it leaves before anything is resolved.
-            is SafNameDecision.Overwrite -> return commitOverwrite(record, choice.existingUri)
+            is SafNameDecision.Overwrite -> return commitOverwrite(record, choice.existingUri, grant)
 
             is SafNameDecision.Skip -> return SafCommitOutcome.Skipped(record, choice.existingUri)
             is SafNameDecision.Ask -> return SafCommitOutcome.PendingUserDecision(
@@ -706,9 +738,37 @@ public class SafCommitCoordinator(
         )
 
         return when (record.strategy) {
-            SafCommitStrategy.TEMP_THEN_RENAME -> commitTempThenRename(resolved)
-            SafCommitStrategy.VISIBLE_FINAL_COPY -> commitVisibleFinalCopy(resolved)
+            SafCommitStrategy.TEMP_THEN_RENAME -> commitTempThenRename(resolved, grant)
+            SafCommitStrategy.VISIBLE_FINAL_COPY -> commitVisibleFinalCopy(resolved, grant)
         }
+    }
+
+    /**
+     * The record and grant must describe the same selected tree. Then ask the
+     * gateway for a live permission check; a snapshot's writable bit is not a
+     * substitute for consulting the platform again.
+     */
+    private fun authorizationError(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+        operation: SafContainmentOperation,
+    ): TransferStorageError? {
+        if (grant.treeUri.toString() != record.treeUri ||
+            grant.rootDocumentId != record.rootDocumentId ||
+            grant.authority != grant.treeUri.authority
+        ) {
+            return TransferStorageError.StateConflict("grant_context_mismatch")
+        }
+        val needsWrite = operation in setOf(
+            SafContainmentOperation.CREATE_DESTINATION,
+            SafContainmentOperation.OPEN_WRITE,
+            SafContainmentOperation.RENAME,
+            SafContainmentOperation.DELETE_TEMPORARY,
+        )
+        if (needsWrite && !grant.writable) {
+            return TransferStorageError.PermissionRevoked("write")
+        }
+        return gateway.recheckPersistedGrant(grant, operation)
     }
 
     // -- Recoverable overwrite ----------------------------------------------
@@ -730,9 +790,10 @@ public class SafCommitCoordinator(
     private fun commitSafeOverwrite(
         record: SafCommitRecord,
         existingUri: String,
+        grant: SafTreeGrant,
     ): SafCommitOutcome {
         val tempName = temporaryDocumentName(record.expectedFinalName, record.partialId)
-        val provisional = when (val produced = produceVerifiedTemporary(record, tempName)) {
+        val provisional = when (val produced = produceVerifiedTemporary(record, tempName, grant)) {
             is VerifiedTemporary.Stopped -> return produced.outcome
             is VerifiedTemporary.Ready -> produced
         }
@@ -745,6 +806,9 @@ public class SafCommitCoordinator(
         // 5. Resolve the existing final again. The first lookup was before the
         // copy and the destination may have changed underneath it; acting on the
         // earlier answer is how an overwrite replaces the wrong document.
+        authorizationError(current, grant, SafContainmentOperation.RECONCILE)?.let {
+            return reconcile(current, it)
+        }
         val existing = when (val looked = gateway.query(existingUri)) {
             is SafLookup.Found -> looked.document
             SafLookup.Absent -> return reconcile(
@@ -758,13 +822,25 @@ public class SafCommitCoordinator(
         // 6. Move the existing document aside rather than deleting it. This is
         // the last point at which nothing has been given up.
         val backupName = backupDocumentName(record.expectedFinalName, record.partialId)
+        authorizationError(current, grant, SafContainmentOperation.RENAME)?.let {
+            return route(current, it, replacement.documentUri)
+        }
         val moved = when (val result = gateway.rename(existing.documentUri, backupName)) {
             is SafRename.Renamed -> result
-            is SafRename.Failed -> return onOverwriteUnsupported(
-                current,
-                existing.documentUri,
-                "backup_rename_unsupported",
-            )
+            is SafRename.Failed -> {
+                if (result.error is TransferStorageError.Unsupported) {
+                    return onOverwriteUnsupported(
+                        current,
+                        existing.documentUri,
+                        "backup_rename_unsupported",
+                    )
+                }
+                return reconcileKnown(
+                    current,
+                    result.error,
+                    listOf(existing.documentUri, replacement.documentUri).distinct(),
+                )
+            }
         }
         current = current.copy(state = SafCommitState.BACKUP_CREATED)
 
@@ -775,6 +851,8 @@ public class SafCommitCoordinator(
             existing.documentUri,
             existing.documentId,
             moved.documentUri,
+            current,
+            grant,
         )) {
             is RenameSettlement.Unknown -> return reconcileKnown(
                 current,
@@ -798,6 +876,13 @@ public class SafCommitCoordinator(
             )
 
         // 8. Promote the replacement to the final name.
+        authorizationError(current, grant, SafContainmentOperation.RENAME)?.let {
+            return reconcileKnown(
+                current,
+                it,
+                listOf(backupUri, replacement.documentUri, existing.documentUri).distinct(),
+            )
+        }
         val promoted = when (val result = gateway.rename(replacement.documentUri, record.expectedFinalName)) {
             is SafRename.Renamed -> result
             is SafRename.Failed -> return reconcileKnown(
@@ -813,6 +898,8 @@ public class SafCommitCoordinator(
             replacement.documentUri,
             replacement.documentId,
             promoted.documentUri,
+            current,
+            grant,
         )) {
             is RenameSettlement.Unknown -> return reconcileKnown(
                 current,
@@ -832,7 +919,7 @@ public class SafCommitCoordinator(
         // 10. Verify the document under its final name, not the temporary's. A
         // rename is a provider operation; it has to be shown to have produced the
         // bytes that were verified, not assumed to have.
-        val verified = verifyProviderCopy(finalUri, record)
+        val verified = verifyProviderCopy(finalUri, record, grant)
         verified.closeError?.let {
             return reconcileKnown(current, it, listOf(backupUri, finalUri).distinct())
         }
@@ -862,7 +949,17 @@ public class SafCommitCoordinator(
         // 12. Deleted by the identity the provider issued for the backup, never
         // by filename: a name resolves to whatever holds it now, which after two
         // renames is not something this commit should be guessing at.
-        val deletion = gateway.deleteAndReconcile(backupUri, backupId)
+        authorizationError(current, grant, SafContainmentOperation.DELETE_TEMPORARY)?.let {
+            return when (it) {
+                is TransferStorageError.PermissionRevoked -> finish(
+                    current,
+                    finalUri,
+                    setOf(SafCleanupPending.BACKUP),
+                )
+                else -> reconcileKnown(current, it, listOf(backupUri, finalUri).distinct())
+            }
+        }
+        val deletion = gateway.deleteAndReconcile(backupUri, backupId, grant)
 
         // 13. Absence is settled by the follow-up query, never by the delete
         // request's own answer.
@@ -930,8 +1027,12 @@ public class SafCommitCoordinator(
     private fun produceVerifiedTemporary(
         record: SafCommitRecord,
         tempName: String,
+        grant: SafTreeGrant,
     ): VerifiedTemporary {
         val parentUri = record.uriForTree(record.parentDocumentId)
+        authorizationError(record, grant, SafContainmentOperation.CREATE_DESTINATION)?.let {
+            return VerifiedTemporary.Stopped(route(record, it, created = null))
+        }
 
         val created = when (val result = gateway.create(parentUri, "application/octet-stream", tempName)) {
             is SafCreate.Created -> result
@@ -949,7 +1050,7 @@ public class SafCommitCoordinator(
         // come from a descriptor the provider is holding, not from the stream
         // that was written to.
         current = current.copy(state = SafCommitState.COPY_STARTED)
-        val phase = runCopy(current, created.documentUri)
+        val phase = runCopy(current, created.documentUri, grant)
         phase.closeError?.let {
             return VerifiedTemporary.Stopped(onCopyFailed(current, it, created.documentUri))
         }
@@ -979,7 +1080,7 @@ public class SafCommitCoordinator(
         current = current.copy(state = SafCommitState.PROVIDER_FLUSH_COMPLETED)
 
         current = current.copy(state = SafCommitState.PROVIDER_VERIFICATION_STARTED)
-        val verified = verifyProviderCopy(created.documentUri, record)
+        val verified = verifyProviderCopy(created.documentUri, record, grant)
         verified.closeError?.let {
             return VerifiedTemporary.Stopped(onCopyFailed(current, it, created.documentUri))
         }
@@ -1002,9 +1103,9 @@ public class SafCommitCoordinator(
         return VerifiedTemporary.Ready(current, created)
     }
 
-    private fun commitTempThenRename(record: SafCommitRecord): SafCommitOutcome {
+    private fun commitTempThenRename(record: SafCommitRecord, grant: SafTreeGrant): SafCommitOutcome {
         val tempName = temporaryDocumentName(record.expectedFinalName, record.partialId)
-        val provisional = when (val produced = produceVerifiedTemporary(record, tempName)) {
+        val provisional = when (val produced = produceVerifiedTemporary(record, tempName, grant)) {
             is VerifiedTemporary.Stopped -> return produced.outcome
             is VerifiedTemporary.Ready -> produced
         }
@@ -1015,6 +1116,9 @@ public class SafCommitCoordinator(
         // answerable: RENAMED with no final document means the rename did not
         // happen, whatever the provider claimed.
         current = current.copy(state = SafCommitState.RENAME_STARTED)
+        authorizationError(current, grant, SafContainmentOperation.RENAME)?.let {
+            return route(current, it, created.documentUri)
+        }
         val renamed = when (
             val result = gateway.rename(created.documentUri, record.expectedFinalName)
         ) {
@@ -1027,7 +1131,13 @@ public class SafCommitCoordinator(
         // nothing. Which of those it was decides what exists now, so it is
         // settled by querying both -- never by preferring the old URI because
         // it is the one already to hand.
-        when (val settled = settleRename(created.documentUri, created.documentId, renamed.documentUri)) {
+        when (val settled = settleRename(
+            created.documentUri,
+            created.documentId,
+            renamed.documentUri,
+            current,
+            grant,
+        )) {
             is RenameSettlement.Unknown -> return onRenameUnresolved(current, settled, created.documentUri)
 
             is RenameSettlement.Settled -> {
@@ -1060,7 +1170,7 @@ public class SafCommitCoordinator(
      * accepted only when [allowVisibleFinalCopy] is set, and the outcome is
      * reported so the caller can say so.
      */
-    private fun commitVisibleFinalCopy(record: SafCommitRecord): SafCommitOutcome {
+    private fun commitVisibleFinalCopy(record: SafCommitRecord, grant: SafTreeGrant): SafCommitOutcome {
         if (!allowVisibleFinalCopy) {
             return fail(
                 record,
@@ -1069,6 +1179,9 @@ public class SafCommitCoordinator(
         }
 
         val parentUri = record.uriForTree(record.parentDocumentId)
+        authorizationError(record, grant, SafContainmentOperation.CREATE_DESTINATION)?.let {
+            return route(record, it, created = null)
+        }
         val created = when (
             val result = gateway.create(
                 parentUri,
@@ -1086,7 +1199,7 @@ public class SafCommitCoordinator(
         )
 
         current = current.copy(state = SafCommitState.COPY_STARTED)
-        val phase = runCopy(current, created.documentUri)
+        val phase = runCopy(current, created.documentUri, grant)
         phase.closeError?.let { return onCopyFailed(current, it, created.documentUri) }
         if (phase.outcome is SafCopyOutcome.Failed) {
             return onCopyFailed(current, phase.outcome.error, created.documentUri)
@@ -1108,7 +1221,7 @@ public class SafCommitCoordinator(
         current = current.copy(state = SafCommitState.PROVIDER_FLUSH_COMPLETED)
 
         current = current.copy(state = SafCommitState.PROVIDER_VERIFICATION_STARTED)
-        val verified = verifyProviderCopy(created.documentUri, record)
+        val verified = verifyProviderCopy(created.documentUri, record, grant)
         verified.closeError?.let { return onCopyFailed(current, it, created.documentUri) }
         if (verified.outcome is VerifyResult.Failed) {
             return onCopyFailed(current, verified.outcome.error, created.documentUri)
@@ -1135,7 +1248,7 @@ public class SafCommitCoordinator(
      * Both handles are owned here and closed here, exactly once, on every
      * outcome -- including the one where the target refuses to open.
      */
-    private fun runCopy(record: SafCommitRecord, targetUri: String): SafCopyPhase {
+    private fun runCopy(record: SafCommitRecord, targetUri: String, grant: SafTreeGrant): SafCopyPhase {
         val staged = when (val opened = staging.open(record.partialId)) {
             is SafOpen.Opened -> opened.handle as? SafReadHandle ?: run {
                 val closeError = closeHandle(opened.handle, "read")
@@ -1151,6 +1264,10 @@ public class SafCommitCoordinator(
             is SafOpen.Refused -> return unflushed(SafCopyOutcome.Failed(opened.error, 0L))
         }
 
+        authorizationError(record, grant, SafContainmentOperation.OPEN_WRITE)?.let {
+            val closeError = closeHandle(staged, "read")
+            return unflushed(SafCopyOutcome.Failed(it, 0L), closeError)
+        }
         val target = when (val opened = gateway.openWrite(targetUri)) {
             is SafOpen.Opened -> opened.handle as? SafWriteHandle ?: run {
                 val unexpectedClose = closeHandle(opened.handle, "write")
@@ -1260,7 +1377,14 @@ public class SafCommitCoordinator(
         val closeError: TransferStorageError? = null,
     )
 
-    private fun verifyProviderCopy(documentUri: String, record: SafCommitRecord): VerifyPhase {
+    private fun verifyProviderCopy(
+        documentUri: String,
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+    ): VerifyPhase {
+        authorizationError(record, grant, SafContainmentOperation.VERIFY)?.let {
+            return VerifyPhase(VerifyResult.Failed(it))
+        }
         when (val looked = gateway.query(documentUri)) {
             is SafLookup.Absent -> return VerifyPhase(
                 VerifyResult.Failed(TransferStorageError.NotFound("staged_copy")),
@@ -1279,6 +1403,9 @@ public class SafCommitCoordinator(
             }
         }
 
+        authorizationError(record, grant, SafContainmentOperation.VERIFY)?.let {
+            return VerifyPhase(VerifyResult.Failed(it))
+        }
         val handle = when (val opened = gateway.openRead(documentUri)) {
             is SafOpen.Opened -> opened.handle as? SafReadHandle ?: run {
                 val closeError = closeHandle(opened.handle, "read")
@@ -1378,6 +1505,8 @@ public class SafCommitCoordinator(
         beforeUri: String,
         beforeId: String,
         returnedUri: String?,
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
     ): RenameSettlement {
         val known = listOfNotNull(beforeUri, returnedUri).distinct()
 
@@ -1392,6 +1521,9 @@ public class SafCommitCoordinator(
             )
         }
 
+        authorizationError(record, grant, SafContainmentOperation.RECONCILE)?.let {
+            return RenameSettlement.Unknown(it, known)
+        }
         val originalResolves = when (val looked = gateway.query(beforeUri)) {
             is SafLookup.Found -> true
             SafLookup.Absent -> false
@@ -1402,10 +1534,15 @@ public class SafCommitCoordinator(
             returnedUri == null -> false
             // The same identity came back; there is nothing separate to ask.
             returnedUri == beforeUri -> originalResolves
-            else -> when (val looked = gateway.query(returnedUri)) {
+            else -> {
+                authorizationError(record, grant, SafContainmentOperation.RECONCILE)?.let {
+                    return RenameSettlement.Unknown(it, known)
+                }
+                when (val looked = gateway.query(returnedUri)) {
                 is SafLookup.Found -> true
                 SafLookup.Absent -> false
                 is SafLookup.Failed -> return RenameSettlement.Unknown(looked.error, known)
+                }
             }
         }
 
@@ -1504,10 +1641,11 @@ public class SafCommitCoordinator(
     private fun commitOverwrite(
         record: SafCommitRecord,
         existingUri: String,
+        grant: SafTreeGrant,
     ): SafCommitOutcome {
         val resolved = record.copy(state = SafCommitState.DESTINATION_RESOLVED)
         return when (record.strategy) {
-            SafCommitStrategy.TEMP_THEN_RENAME -> commitSafeOverwrite(resolved, existingUri)
+            SafCommitStrategy.TEMP_THEN_RENAME -> commitSafeOverwrite(resolved, existingUri, grant)
 
             SafCommitStrategy.VISIBLE_FINAL_COPY -> SafCommitOutcome.SafeOverwriteUnsupported(
                 record = resolved,
@@ -1549,6 +1687,7 @@ public class SafCommitCoordinator(
     private fun applyDuplicatePolicy(
         record: SafCommitRecord,
         existing: SafLookup,
+        grant: SafTreeGrant,
     ): SafNameDecision = when (existing) {
         is SafLookup.Failed -> SafNameDecision.Unavailable(existing.error)
 
@@ -1557,13 +1696,19 @@ public class SafCommitCoordinator(
         is SafLookup.Found -> when (record.duplicatePolicy) {
             DuplicatePolicy.RENAME -> {
                 val choice = SafDuplicateNaming.firstFree(record.expectedFinalName) { name ->
-                    gateway.findChild(record.uriForTree(record.parentDocumentId), name)
+                    val authError = authorizationError(record, grant, SafContainmentOperation.RECONCILE)
+                    if (authError != null) {
+                        SafLookup.Failed(authError)
+                    } else {
+                        gateway.findChild(record.uriForTree(record.parentDocumentId), name)
+                    }
                 }
                 when (choice) {
                     is SafNameChoice.Chosen -> SafNameDecision.Use(choice.displayName)
                     is SafNameChoice.Exhausted -> SafNameDecision.Refused(
                         TransferStorageError.StateConflict("duplicate_name_exhausted"),
                     )
+                    is SafNameChoice.Unavailable -> SafNameDecision.Unavailable(choice.error)
                 }
             }
 

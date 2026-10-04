@@ -293,6 +293,17 @@ class SafDeletionReconciliationTest {
     }
 
     @Test
+    fun `a stored id that does not match the requested uri is rejected before delete`() {
+        val target = created()
+        val differentUri = uriFor("$rootId/a-different-document").toString()
+
+        val outcome = gateway.deleteAndReconcile(differentUri, target.documentId)
+
+        assertTrue("got $outcome", outcome is SafDeletion.IdentityMismatch)
+        assertEquals(0, provider.callCount("android:deleteDocument"))
+    }
+
+    @Test
     fun `a delete whose uri belongs to another authority is a mismatch, not a delete`() {
         val target = created()
         val grant = gateway.resolveGrant("g-1", treeUri.toString(), authority)!!

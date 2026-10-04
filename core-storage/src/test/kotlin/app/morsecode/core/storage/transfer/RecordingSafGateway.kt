@@ -68,6 +68,9 @@ internal class RecordingSafGateway(
 
     /** Injects a close error after the fake stream has released its backing buffer. */
     var closeFailureOn: ((String) -> Throwable?)? = null,
+
+    /** Injects a live-grant failure at a named SAF operation. */
+    var grantFailureOn: ((SafContainmentOperation) -> TransferStorageError?)? = null,
 ) : SafDocumentGateway {
 
     /** The operations that can be made to fail, for a test that walks them. */
@@ -169,6 +172,14 @@ internal class RecordingSafGateway(
 
     // -- SafDocumentGateway --------------------------------------------------
 
+    override fun recheckPersistedGrant(
+        grant: SafTreeGrant,
+        operation: SafContainmentOperation,
+    ): TransferStorageError? {
+        record("authorize:${operation.id}")
+        return grantFailureOn?.invoke(operation)
+    }
+
     override fun findChild(parentUri: String, displayName: String): SafLookup {
         record("findChild:$parentUri:$displayName")
         return guarded(OP_FIND_CHILD, { SafLookup.Failed(it) }) {
@@ -240,6 +251,25 @@ internal class RecordingSafGateway(
         grant: SafTreeGrant?,
     ): SafDeletion {
         record("deleteAndReconcile:$documentUri:$expectedDocumentId")
+        val uriDocumentId = SafContainment.documentIdOf(android.net.Uri.parse(documentUri))
+        if (uriDocumentId == null) {
+            return SafDeletion.DeleteRequestFailed(TransferStorageError.Unsupported("saf_document_uri"))
+        }
+        if (uriDocumentId != expectedDocumentId) {
+            return SafDeletion.IdentityMismatch(expectedDocumentId, uriDocumentId)
+        }
+        if (grant != null) {
+            when (val authorization = recheckPersistedGrant(
+                grant,
+                SafContainmentOperation.DELETE_TEMPORARY,
+            )) {
+                is TransferStorageError.PermissionRevoked ->
+                    return SafDeletion.PermissionRevoked(authorization)
+
+                null -> Unit
+                else -> return SafDeletion.DeleteRequestFailed(authorization)
+            }
+        }
         return try {
             fail(OP_DELETE)
             if (deletionObserved is SafDeletion.ConfirmedAbsent) existing -= documentUri

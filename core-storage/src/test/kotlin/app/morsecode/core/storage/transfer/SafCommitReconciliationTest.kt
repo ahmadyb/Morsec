@@ -1,5 +1,6 @@
 package app.morsecode.core.storage.transfer
 
+import android.net.Uri
 import app.morsecode.core.model.DuplicatePolicy
 import app.morsecode.core.transfer.identity.TransferId
 import java.io.ByteArrayInputStream
@@ -35,6 +36,14 @@ class SafCommitReconciliationTest {
 
     private val parentDocumentId = "primary:Download"
 
+    private val grant = SafTreeGrant(
+        grantId = "g-1",
+        treeUri = Uri.parse(treeUri),
+        rootDocumentId = parentDocumentId,
+        authority = requireNotNull(Uri.parse(treeUri).authority),
+        writable = true,
+    )
+
     private val payload = "morsec-payload".toByteArray()
 
     private fun commit(
@@ -62,6 +71,7 @@ class SafCommitReconciliationTest {
                 strategy = strategy,
                 duplicatePolicy = policy,
             ),
+            grant,
         )
     }
 
@@ -170,6 +180,90 @@ class SafCommitReconciliationTest {
             "a SecurityException must never be downgraded to Missing",
             outcome.error is TransferStorageError.PermissionRevoked,
         )
+    }
+
+    @Test
+    fun `a grant revoked before destination lookup is typed and performs no provider lookup`() {
+        val gateway = RecordingSafGateway()
+        gateway.grantFailureOn = { operation ->
+            if (operation == SafContainmentOperation.RECONCILE) {
+                TransferStorageError.PermissionRevoked("read")
+            } else {
+                null
+            }
+        }
+
+        val outcome = commit(gateway)
+
+        assertTrue(outcome is SafCommitOutcome.ReconciliationRequired)
+        assertTrue(
+            (outcome as SafCommitOutcome.ReconciliationRequired).error is
+                TransferStorageError.PermissionRevoked,
+        )
+        assertEquals(0, gateway.countOf("findChild:"))
+    }
+
+    @Test
+    fun `a grant revoked before opening for write closes staging and prevents the owner opening`() {
+        val gateway = RecordingSafGateway()
+        gateway.grantFailureOn = { operation ->
+            if (operation == SafContainmentOperation.OPEN_WRITE) {
+                TransferStorageError.PermissionRevoked("write")
+            } else {
+                null
+            }
+        }
+
+        val outcome = commit(gateway)
+
+        assertTrue(outcome is SafCommitOutcome.ReconciliationRequired)
+        assertTrue(
+            (outcome as SafCommitOutcome.ReconciliationRequired).error is
+                TransferStorageError.PermissionRevoked,
+        )
+        assertEquals(0, gateway.countOf("openWrite:"))
+        assertEquals(0, gateway.liveHandles)
+        assertEquals(0, gateway.countOf("rename:"))
+    }
+
+    @Test
+    fun `grant revocation between provider size query and fresh read prevents verification`() {
+        val gateway = RecordingSafGateway()
+        var verifyChecks = 0
+        gateway.grantFailureOn = { operation ->
+            if (operation == SafContainmentOperation.VERIFY && ++verifyChecks == 2) {
+                TransferStorageError.PermissionRevoked("read")
+            } else {
+                null
+            }
+        }
+
+        val outcome = commit(gateway)
+
+        val pending = outcome as SafCommitOutcome.ReconciliationRequired
+        assertTrue(pending.error is TransferStorageError.PermissionRevoked)
+        assertEquals("the second check is immediately before openRead", 2, verifyChecks)
+        assertEquals(0, gateway.countOf("openRead:"))
+        assertEquals(0, gateway.countOf("rename:"))
+    }
+
+    @Test
+    fun `a collision query failure is not treated as a free rename candidate`() {
+        val gateway = RecordingSafGateway()
+        gateway.addNamed("$treeUri/document/seed", "movie.mp4")
+        var lookups = 0
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_FIND_CHILD && ++lookups == 2) {
+                IllegalStateException("collision list unavailable")
+            } else {
+                null
+            }
+        }
+
+        val outcome = commit(gateway, policy = DuplicatePolicy.RENAME)
+
+        assertTrue(outcome is SafCommitOutcome.ReconciliationRequired)
+        assertEquals(0, gateway.countOf("create:"))
     }
 
     // -- Duplicate policies --------------------------------------------------
