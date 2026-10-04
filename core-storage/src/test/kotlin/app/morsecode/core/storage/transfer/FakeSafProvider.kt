@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
+import java.io.File
 
 /*
  * A real ContentProvider, driven through a real ContentResolver.
@@ -56,9 +57,9 @@ internal val TEST_COLUMNS = arrayOf(
  * itself. The gateway is required to settle deletion by observation, so it has
  * to be shown both directions of the lie.
  */
-internal enum class DeleteBehaviour(
-    internal val removes: Boolean,
-    internal val reportsSuccess: Boolean,
+enum class DeleteBehaviour(
+    val removes: Boolean,
+    val reportsSuccess: Boolean,
 ) {
     /** Removes the document and says so. */
     HONEST(removes = true, reportsSuccess = true),
