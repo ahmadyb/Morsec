@@ -90,9 +90,14 @@ class SafDeletionReconciliationTest {
         val outcome = delete(target)
 
         assertTrue("got $outcome", outcome is SafDeletion.StillPresent)
-        // The platform said yes. The document is still there. The observation
-        // wins, and cleanup stays open.
-        assertEquals(true, (outcome as SafDeletion.StillPresent).deleteReported)
+        // The provider claimed success and the document is still there. The
+        // observation wins, and cleanup stays open.
+        assertEquals(
+            "the provider must have claimed success",
+            true,
+            provider.lastDeleteRemoved,
+        )
+        assertTrue("the document it claimed to delete is still there", provider.contains(target.documentId))
         assertFalse("cleanup must not be closed while the document resolves", outcome.cleanupComplete)
     }
 
@@ -103,15 +108,23 @@ class SafDeletionReconciliationTest {
 
         val outcome = delete(target)
 
-        // The case that proves the boolean is not the answer: the provider
-        // reported false and the document is gone, so absence is confirmed and
-        // the reported value is carried as a diagnostic only.
-        assertTrue("got $outcome", outcome is SafDeletion.ConfirmedAbsent)
+        // The case that proves the boolean is not the answer. The provider
+        // reported failure, yet the document is gone, so absence is confirmed
+        // by observation alone and the request's own return value is carried
+        // as a diagnostic that nothing reads.
+        //
+        // That return value is not asserted here on purpose. This run
+        // established that DocumentsContract.deleteDocument does not relay the
+        // provider's answer -- it reported success while the provider reported
+        // failure -- which is the whole reason absence is proved by query. A
+        // test that pinned its value would be pinning the platform's
+        // unreliability rather than the gateway's behaviour.
         assertEquals(
-            "the reported false must be retained, not acted on",
+            "the provider must have reported failure",
             false,
-            (outcome as SafDeletion.ConfirmedAbsent).deleteReported,
+            provider.lastDeleteRemoved,
         )
+        assertTrue("got $outcome", outcome is SafDeletion.ConfirmedAbsent)
         assertTrue(outcome.cleanupComplete)
     }
 
