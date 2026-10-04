@@ -155,8 +155,10 @@ class SafDeletionReconciliationTest {
         provider.nullCursorOnQueryNumber = 3
 
         // A provider that declines to answer has not said the document is gone,
-        // so this is unknown rather than absent.
-        assertTrue("got ${delete(target)}", delete(target) is SafDeletion.QueryUnknown)
+        // so this is unknown rather than absent. Evaluate deletion exactly once:
+        // the assertion message must not issue a second stateful provider call.
+        val outcome = delete(target)
+        assertTrue("got $outcome", outcome is SafDeletion.QueryUnknown)
     }
 
     @Test
@@ -164,7 +166,8 @@ class SafDeletionReconciliationTest {
         val target = created()
         provider.throwOnQueryNumber = 3
 
-        assertTrue("got ${delete(target)}", delete(target) is SafDeletion.QueryUnknown)
+        val outcome = delete(target)
+        assertTrue("got $outcome", outcome is SafDeletion.QueryUnknown)
     }
 
     // -----------------------------------------------------------------------

@@ -70,7 +70,9 @@ public object LogRedactor {
     private val contentUris = Regex("""(?i)\bcontent://[^\s<>"']+""")
 
     /** Long opaque blobs, including digest bytes, are not log-safe. */
-    private val opaqueBlobs = Regex("""(?<![\w])[A-Za-z0-9_+=./:-]{40,}(?![\w])""")
+    private val opaqueBlobs = Regex(
+        """(?<![\w])(?:[A-Za-z0-9_+-]{40,}|[A-Za-z0-9_+-]{24,}(?:[/=][A-Za-z0-9_+-]{1,})+(?:=*)?)(?![\w])""",
+    )
 
     /** Keep shared/exported logs free of terminal and control characters. */
     private val controlCharacters = Regex("""\p{Cc}""")
