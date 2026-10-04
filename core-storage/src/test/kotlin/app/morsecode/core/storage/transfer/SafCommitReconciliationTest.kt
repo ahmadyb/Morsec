@@ -460,6 +460,94 @@ class SafCommitReconciliationTest {
     // -- Ownership ------------------------------------------------------------
 
     @Test
+    fun `visible final copy is refused unless policy explicitly allows it`() {
+        val gateway = RecordingSafGateway()
+
+        val outcome = commit(
+            gateway,
+            strategy = SafCommitStrategy.VISIBLE_FINAL_COPY,
+            allowVisibleFinalCopy = false,
+        )
+
+        val failed = outcome as SafCommitOutcome.Failed
+        assertEquals(
+            TransferStorageError.Unsupported("saf_visible_final_copy"),
+            failed.error,
+        )
+        assertEquals(0, gateway.countOf("create:"))
+        assertEquals(0, gateway.countOf("rename:"))
+    }
+
+    @Test
+    fun `an explicitly allowed visible final copy reports delivery without renaming`() {
+        val gateway = RecordingSafGateway()
+
+        val outcome = commit(
+            gateway,
+            strategy = SafCommitStrategy.VISIBLE_FINAL_COPY,
+            allowVisibleFinalCopy = true,
+        )
+
+        assertTrue("verified final copy should commit", outcome is SafCommitOutcome.Committed)
+        assertTrue(gateway.calls.any { it.startsWith("create:") && it.endsWith(":movie.mp4") })
+        assertEquals(0, gateway.countOf("rename:"))
+    }
+
+    @Test
+    fun `a temp rename refusal never silently downgrades to visible final copy`() {
+        val gateway = RecordingSafGateway(
+            renameFailure = TransferStorageError.Unsupported("saf_rename"),
+        )
+
+        val outcome = commit(gateway, strategy = SafCommitStrategy.TEMP_THEN_RENAME)
+
+        assertFalse(outcome.isDelivered)
+        assertEquals("only the temporary document was created", 1, gateway.countOf("create:"))
+        assertEquals(1, gateway.countOf("rename:"))
+        assertTrue(gateway.calls.single { it.startsWith("create:") }.endsWith(".morsec-part"))
+    }
+
+    @Test
+    fun `rename policy rechecks every candidate after a collision appears`() {
+        val gateway = RecordingSafGateway()
+        gateway.addNamed("$treeUri/document/seed", "movie.mp4")
+        var lookups = 0
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_FIND_CHILD && ++lookups == 2) {
+                gateway.addNamed("$treeUri/document/raced-collision", "movie (1).mp4")
+            }
+            null
+        }
+
+        val outcome = commit(gateway, policy = DuplicatePolicy.RENAME)
+
+        assertTrue(outcome is SafCommitOutcome.Committed)
+        assertTrue(
+            "the raced candidate must be skipped, not overwritten",
+            gateway.calls.any { it.startsWith("create:") && it.endsWith(":movie (2).mp4") },
+        )
+        assertTrue("the raced document remains", "$treeUri/document/raced-collision" in gateway.existing)
+    }
+
+    @Test
+    fun `overwrite stops if the selected target disappears before it is rechecked`() {
+        val gateway = RecordingSafGateway()
+        val existingUri = "$treeUri/document/seed"
+        gateway.addNamed(existingUri, "movie.mp4")
+        gateway.throwOn = { operation ->
+            if (operation == RecordingSafGateway.OP_CREATE) gateway.existing.remove(existingUri)
+            null
+        }
+
+        val outcome = commit(gateway, policy = DuplicatePolicy.OVERWRITE)
+
+        assertTrue(outcome is SafCommitOutcome.ReconciliationRequired)
+        assertEquals("no backup move or deletion is safe after the race", 0, gateway.countOf("rename:$existingUri:"))
+        assertEquals(0, gateway.countOf("deleteAndReconcile:"))
+        assertFalse(outcome.isDelivered)
+    }
+
+    @Test
     fun `a commit that stops for reconciliation still closes every handle`() {
         val gateway = RecordingSafGateway(
             renameReturns = RecordingSafGateway.RenameReturn.NEW,

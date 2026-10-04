@@ -88,6 +88,7 @@ class FakeSafProvider : ContentProvider() {
         val mime: String,
         val size: Long?,
         val flags: Int?,
+        val parentId: String?,
     )
 
     private val documents = LinkedHashMap<String, Doc>()
@@ -141,19 +142,32 @@ class FakeSafProvider : ContentProvider() {
             DocumentsContract.Document.MIME_TYPE_DIR,
             null,
             DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE,
+            null,
         )
     }
 
-    fun addDocument(id: String, name: String, mime: String = "video/mp4", size: Long? = 0L, flags: Int? = null) {
-        documents[id] = Doc(id, name, mime, size, flags)
+    fun addDocument(
+        id: String,
+        name: String,
+        mime: String = "video/mp4",
+        size: Long? = 0L,
+        flags: Int? = null,
+        parentId: String? = inferParentId(id),
+    ) {
+        documents[id] = Doc(id, name, mime, size, flags, parentId)
     }
 
     /** Whether the provider still has a document, by id. */
     fun contains(documentId: String): Boolean = documentId in documents
 
     fun addMalformedRow(id: String) {
-        documents[id] = Doc(id, "", "", null, null)
+        documents[id] = Doc(id, "", "", null, null, inferParentId(id))
         malformed += id
+    }
+
+    private fun inferParentId(id: String): String? {
+        val separator = id.lastIndexOf('/')
+        return if (separator > 0) id.substring(0, separator) else null
     }
 
     fun callCount(method: String): Int = calls[method] ?: 0
@@ -175,6 +189,23 @@ class FakeSafProvider : ContentProvider() {
         if (throwOnQuery) throw RuntimeException("provider crashed")
         if (nullCursor) return null
 
+        val childrenParentId = childrenParentId(uri)
+        if (childrenParentId != null) {
+            val childCursor = MatrixCursor(TEST_COLUMNS)
+            documents.values
+                .filter { it.parentId == childrenParentId }
+                .forEach { doc ->
+                    childCursor.newRow().apply {
+                        add(COLUMN_ID, doc.id)
+                        add(COLUMN_NAME, if (doc.id in malformed) null else doc.name)
+                        add(COLUMN_SIZE, observedSize(doc))
+                        add(COLUMN_MIME, doc.mime)
+                        add(COLUMN_FLAGS, doc.flags)
+                    }
+                }
+            return childCursor
+        }
+
         val id = DocumentsContract.getDocumentId(uri)
         val doc = documents[id] ?: return MatrixCursor(TEST_COLUMNS)
 
@@ -182,19 +213,28 @@ class FakeSafProvider : ContentProvider() {
         cursor.newRow().apply {
             // Every column is written exactly once, in projection order.
             // Omitting one is how this double models a provider that declines
-            // to answer it, and a null value is how it models SQL NULL.
+            // to answer, and a null value is how it models SQL NULL.
             //
             // [queryDocumentIdOverride] answers with a different identity than
             // the one requested, which is what a same-name replacement looks
             // like from the caller's side.
             add(COLUMN_ID, queryDocumentIdOverride ?: doc.id)
             add(COLUMN_NAME, if (doc.id in malformed) null else doc.name)
-            add(COLUMN_SIZE, doc.size)
+            add(COLUMN_SIZE, observedSize(doc))
             add(COLUMN_MIME, doc.mime)
             add(COLUMN_FLAGS, doc.flags)
         }
         return cursor
     }
+
+    private fun childrenParentId(uri: Uri): String? {
+        val segments = uri.pathSegments
+        if (segments.lastOrNull() != "children") return null
+        return segments.getOrNull(segments.lastIndex - 1)
+    }
+
+    private fun observedSize(document: Doc): Long? =
+        contents[document.id]?.length() ?: document.size
 
     override fun getType(uri: Uri): String =
         documents[DocumentsContract.getDocumentId(uri)]?.mime ?: "vnd.android.cursor.item/vnd.android.document"
@@ -259,8 +299,9 @@ class FakeSafProvider : ContentProvider() {
                 if (renameOnCreate) name = name.replace(".mp4", " (1).mp4")
                 val mime = bundle.getString(DocumentsContract.Document.COLUMN_MIME_TYPE)
                     ?: "video/mp4"
-                val id = "${DocumentsContract.getDocumentId(parent)}/$name"
-                documents[id] = Doc(id, name, mime, 0L, 0)
+                val parentId = DocumentsContract.getDocumentId(parent)
+                val id = "$parentId/$name"
+                documents[id] = Doc(id, name, mime, 0L, 0, parentId)
                 documentResult(id)
             }
 
@@ -309,7 +350,7 @@ class FakeSafProvider : ContentProvider() {
                 val parentId = DocumentsContract.getDocumentId(parent)
                 val childId = DocumentsContract.getDocumentId(child)
                 Bundle().apply {
-                    putBoolean("result", childId == parentId || childId.startsWith("$parentId/"))
+                    putBoolean("result", isSameOrDescendant(parentId, childId))
                 }
             }
 
@@ -317,6 +358,18 @@ class FakeSafProvider : ContentProvider() {
 
             else -> null
         }
+    }
+
+    private fun isSameOrDescendant(parentId: String, childId: String): Boolean {
+        if (parentId == childId) return true
+        var cursor = documents[childId]
+        val visited = HashSet<String>()
+        while (cursor != null && visited.add(cursor.id)) {
+            val nextParentId = cursor.parentId ?: return false
+            if (nextParentId == parentId) return true
+            cursor = documents[nextParentId]
+        }
+        return false
     }
 
     private fun uriForId(id: String): Uri =

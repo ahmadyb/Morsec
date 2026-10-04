@@ -211,6 +211,46 @@ class DocumentsContractSafGatewayTest {
     }
 
     @Test
+    fun `findChild uses the provider child listing for opaque document ids`() {
+        provider.addDocument(
+            id = "opaque-id-42",
+            name = "holiday.mp4",
+            parentId = rootId,
+        )
+
+        val looked = gateway.findChild(uriFor(rootId).toString(), "holiday.mp4")
+        val found = looked as? SafLookup.Found ?: error("got $looked")
+
+        assertEquals("opaque-id-42", found.document.documentId)
+        assertEquals("holiday.mp4", found.document.displayName)
+        assertEquals(uriFor("opaque-id-42").toString(), found.document.documentUri)
+    }
+
+    @Test
+    fun `findChild refuses duplicate display names instead of choosing one`() {
+        provider.addDocument("opaque-id-1", "holiday.mp4", parentId = rootId)
+        provider.addDocument("opaque-id-2", "holiday.mp4", parentId = rootId)
+
+        val looked = gateway.findChild(uriFor(rootId).toString(), "holiday.mp4")
+        val failed = looked as? SafLookup.Failed ?: error("got $looked")
+
+        assertEquals(
+            TransferStorageError.StateConflict("duplicate_name_ambiguous"),
+            failed.error,
+        )
+    }
+
+    @Test
+    fun `a failed child listing is not treated as an empty directory`() {
+        provider.nullCursor = true
+
+        val looked = gateway.findChild(uriFor(rootId).toString(), "holiday.mp4")
+
+        assertTrue("got $looked", looked is SafLookup.Failed)
+        assertFalse(looked is SafLookup.Absent)
+    }
+
+    @Test
     fun `flags are read for capability detection`() {
         provider.addDocument(
             "$rootId/2026",

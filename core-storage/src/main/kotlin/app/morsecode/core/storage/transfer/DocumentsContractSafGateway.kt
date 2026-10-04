@@ -34,6 +34,12 @@ import java.io.IOException
  */
 
 /** The outcome of asking a provider for a directory's children. */
+public sealed interface SafChildDocuments {
+    public data class Listed(public val documents: List<SafDocumentInfo>) : SafChildDocuments
+    public data class Failed(public val error: TransferStorageError) : SafChildDocuments
+}
+
+/** A name-only view of a successful child listing. */
 public sealed interface SafChildNames {
     public data class Listed(public val names: Set<String>) : SafChildNames
     public data class Failed(public val error: TransferStorageError) : SafChildNames
@@ -172,64 +178,106 @@ public class DocumentsContractSafGateway(
 
     override fun query(documentUri: String): SafLookup = queryInternal(documentUri.toUri())
 
-    override fun findChild(parentUri: String, displayName: String): SafLookup {
-        val childUri = SafContainment.documentUriUsingTree(
-            parentUri.toUri(),
-            // The child id is the parent id plus the name, which is how a tree
-            // document URI addresses a descendant. Providers that address
-            // children differently simply will not find it, and "not found" is
-            // the correct answer for a collision check either way.
-            childIdOf(parentUri, displayName),
-        ) ?: return SafLookup.Failed(
-            TransferStorageError.Unsupported("saf_document_uri"),
-        )
-        return queryInternal(childUri)
-    }
+    override fun findChild(parentUri: String, displayName: String): SafLookup =
+        when (val listed = childDocuments(parentUri)) {
+            is SafChildDocuments.Failed -> SafLookup.Failed(listed.error)
+            is SafChildDocuments.Listed -> {
+                val matches = listed.documents.filter { it.displayName == displayName }
+                when (matches.size) {
+                    0 -> SafLookup.Absent
+                    1 -> SafLookup.Found(matches.single())
+                    else -> SafLookup.Failed(
+                        TransferStorageError.StateConflict("duplicate_name_ambiguous"),
+                    )
+                }
+            }
+        }
 
-    /** The display names of a directory's children, for collision detection. */
-    public fun childNames(parentUri: String): SafChildNames {
+    /** Lists direct children using the provider's child-document contract. */
+    public fun childDocuments(parentUri: String): SafChildDocuments {
         val parent = parentUri.toUri()
+        val parentId = SafContainment.documentIdOf(parent)
+            ?: return SafChildDocuments.Failed(TransferStorageError.Unsupported("saf_document_uri"))
         val childrenUri = try {
-            DocumentsContract.buildChildDocumentsUriUsingTree(
-                parent,
-                SafContainment.documentIdOf(parent) ?: return SafChildNames.Failed(
-                    TransferStorageError.Unsupported("saf_document_uri"),
-                ),
-            )
+            DocumentsContract.buildChildDocumentsUriUsingTree(parent, parentId)
+        } catch (e: SecurityException) {
+            return SafChildDocuments.Failed(TransferStorageError.PermissionRevoked("read"))
         } catch (e: Exception) {
-            return SafChildNames.Failed(TransferStorageError.ProviderFailure("document_provider"))
+            return SafChildDocuments.Failed(TransferStorageError.ProviderFailure("document_provider"))
         }
 
         val cursor = try {
-            resolver.query(
-                childrenUri,
-                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-                null,
-                null,
-                null,
-            )
+            resolver.query(childrenUri, QUERY_COLUMNS, null, null, null)
         } catch (e: SecurityException) {
-            return SafChildNames.Failed(TransferStorageError.PermissionRevoked("read"))
+            return SafChildDocuments.Failed(TransferStorageError.PermissionRevoked("read"))
         } catch (e: Exception) {
-            return SafChildNames.Failed(TransferStorageError.ProviderFailure("document_provider"))
-        }
-
-        // A null cursor is the provider failing to answer, not an empty folder.
-            ?: return SafChildNames.Failed(TransferStorageError.ProviderFailure("document_provider"))
+            return SafChildDocuments.Failed(TransferStorageError.ProviderFailure("document_provider"))
+        } ?: return SafChildDocuments.Failed(TransferStorageError.ProviderFailure("document_provider"))
 
         return cursor.use { c ->
-            val names = HashSet<String>()
-            val index = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-            if (index < 0) return@use SafChildNames.Failed(
-                TransferStorageError.ProviderFailure("document_provider"),
-            )
-            while (c.moveToNext()) {
-                val name = c.getString(index)
-                if (!name.isNullOrEmpty()) names += name
+            val idIndex = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameIndex = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            if (idIndex < 0 || nameIndex < 0) {
+                return@use SafChildDocuments.Failed(
+                    TransferStorageError.ProviderFailure("document_provider"),
+                )
             }
-            SafChildNames.Listed(names)
+
+            val documents = ArrayList<SafDocumentInfo>()
+            while (c.moveToNext()) {
+                val documentId = c.getString(idIndex)
+                val displayName = c.getString(nameIndex)
+                if (documentId.isNullOrBlank() || displayName.isNullOrBlank()) {
+                    return@use SafChildDocuments.Failed(
+                        TransferStorageError.ProviderFailure(
+                            "document_provider",
+                            diagnostic = "child row is missing its identity or name",
+                        ),
+                    )
+                }
+                if (SafDocumentIdRules.validate(documentId) !is SafDocumentIdCheck.Valid) {
+                    return@use SafChildDocuments.Failed(
+                        TransferStorageError.ProviderFailure(
+                            "document_provider",
+                            diagnostic = "child row has a malformed document id",
+                        ),
+                    )
+                }
+                val childUri = SafContainment.documentUriUsingTree(parent, documentId)
+                    ?: return@use SafChildDocuments.Failed(
+                        TransferStorageError.Unsupported("saf_document_uri"),
+                    )
+                if (childUri.authority != parent.authority ||
+                    SafContainment.documentIdOf(childUri) != documentId
+                ) {
+                    return@use SafChildDocuments.Failed(
+                        TransferStorageError.ContainmentUnknown("listed_child_identity_mismatch"),
+                    )
+                }
+
+                val mimeType = c.stringOrNull(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                documents += SafDocumentInfo(
+                    documentUri = childUri.toString(),
+                    documentId = documentId,
+                    displayName = displayName,
+                    sizeBytes = c.longOrNull(DocumentsContract.Document.COLUMN_SIZE),
+                    mimeType = mimeType,
+                    flags = c.intOrNull(DocumentsContract.Document.COLUMN_FLAGS),
+                    isDirectory = mimeType == DocumentsContract.Document.MIME_TYPE_DIR,
+                )
+            }
+            SafChildDocuments.Listed(documents)
         }
     }
+
+    /** The display names of a directory's children, for collision detection. */
+    public fun childNames(parentUri: String): SafChildNames =
+        when (val listed = childDocuments(parentUri)) {
+            is SafChildDocuments.Failed -> SafChildNames.Failed(listed.error)
+            is SafChildDocuments.Listed -> SafChildNames.Listed(
+                listed.documents.mapTo(LinkedHashSet()) { it.displayName },
+            )
+        }
 
     /** The capabilities a directory advertises, from its own flags column. */
     public fun capabilitiesOf(parentUri: String): SafProviderCapabilities {
@@ -565,16 +613,3 @@ public class DocumentsContractSafGateway(
         )
     }
 }
-
-/**
- * The document id a child of [parentUri] named [displayName] would have.
- *
- * A tree document URI addresses descendants as `parent-id/name`, so a collision
- * check is an ordinary query on the id rather than a scan of the directory.
- */
-private fun childIdOf(parentUri: String, displayName: String): String {
-    val parentId = SafContainment.documentIdOf(parentUri.toUri()) ?: return displayName
-    return if (parentId.isEmpty()) displayName else "$parentId/$displayName"
-}
-
-
