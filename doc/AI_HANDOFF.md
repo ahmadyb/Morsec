@@ -43,6 +43,97 @@ history, or overwrite newer work.
 
 ---
 
+## Session state — 2026-10-03: the SAF destination gateway, two platform-safety corrections
+
+Branch `arena/01a0f97d-morsec`. Part B of the transfer storage group. `TRANSFER_ENGINE`
+is still gated at milestone 5 and `CURRENT_MILESTONE` is still 2.
+
+Two corrections to `DocumentsContractSafGateway`, made before it is wired to
+`SafCommitCoordinator`. Both were requested after the gateway itself went green, and
+both change what production code is allowed to trust.
+
+### Deletion is settled by observation, not by the request
+
+`DocumentsContract.deleteDocument` returns a boolean that is **not** the provider's
+answer to "is it gone". Measured against a real `ContentProvider` driven through a real
+`ContentResolver`: a provider that kept the document and answered *false* was reported by
+the platform as a success, and a provider that removed the document and answered *false*
+was also reported as a success. The boolean carries no information about absence.
+
+`deleteAndReconcile` therefore issues the request, queries the exact stored identity
+again, and classifies what it observed:
+
+| Outcome | Meaning | Cleanup |
+| --- | --- | --- |
+| `ConfirmedAbsent` | a query completed and returned no row | complete |
+| `StillPresent` | the exact identity still resolves | pending |
+| `QueryUnknown` | presence and absence both unproven | reconciliation required |
+| `PermissionRevoked` | the grant went before absence was proved | pending |
+| `IdentityMismatch` | the URI resolves to a different document | nothing deleted, nothing assumed |
+| `DeleteRequestFailed` | the request threw or could not be issued | not complete |
+
+The request's boolean is retained as `deleteReported` and is never read to decide an
+outcome. It is kept so a log can record what the platform claimed while the outcome
+records what was observed.
+
+### The API tier is a type, selected from the real SDK
+
+`isChildDocument` is API 29 and `findDocumentPath` is API 26. The first design held an
+injected `sdkInt` integer with an `if` in front of each versioned call. That integer is
+not the device, so anything able to construct the gateway could point production code at
+a symbol the running device does not have — and the failure for that is a linkage error
+at the call site, which no typed error mapping downstream can catch.
+
+The tier is now a type: `SafPlatformOperations`, with `SafApi23Operations` (grant-scoped
+containment only), `SafApi26Operations` (adds `findDocumentPath`) and
+`SafApi29Operations` (adds `isChildDocument`). Each contains only the calls its own
+minimum supports and is annotated `@RequiresApi(26)` / `@RequiresApi(29)`.
+`SafPlatformOperations.create()` branches on `Build.VERSION.SDK_INT` and takes no SDK
+argument. Tests inject a fake, which replaces a tier rather than choosing one by number.
+
+**Both `SuppressLint("NewApi")` annotations are gone.** They existed only because lint
+cannot analyse a guard on an arbitrary integer; guarding on `Build.VERSION.SDK_INT` is a
+guard lint can see. `grep -rn SuppressLint core-storage/src/main/.../transfer/` now
+returns nothing.
+
+### Commits and CI
+
+| Commit | What | CI |
+| --- | --- | --- |
+| `512bec7` | deletion by observation, tier from the real SDK, provider extracted | — |
+| `2c536c0` | deletion and tier tests | red — see below |
+| `3fffb21` | fix: import `File`, widen `DeleteBehaviour` | red — see below |
+| `b101728` | fix: assert the provider's answer, not the platform's | **green, run 37184344527** |
+
+Both red runs are worth remembering:
+
+- `2c536c0` — extracting `FakeSafProvider` out of the test that owned it lost two
+  things that used to come for free: the `java.io.File` import, and the ability for
+  `DeleteBehaviour` to stay `internal` (a public class cannot expose an internal type
+  from a public property).
+- `3fffb21` — a test asserted that `deleteAndReconcile` retained the *false* the provider
+  reported. The gateway retained *true*, because the platform does not relay the
+  provider's answer at all. The provider said failure, the platform said success, and
+  the document was gone. That is the strongest evidence yet for proving absence by
+  query, so the test now asserts the provider's own answer and leaves the platform's
+  return value alone — pinning it would be pinning the platform's unreliability rather
+  than the gateway's behaviour.
+
+### Gate at `b101728`
+
+2187 tests, 0 failed, 0 skipped. core-storage 990 in 52 reports. Lint 0 errors, 45
+warnings. `app-debug.apk` 18.78 MiB, `app-debug-androidTest.apk` 1.10 MiB. Room schema
+`1.json` unchanged.
+
+### Next in this group
+
+Wire the real gateway into `SafCommitCoordinator`; prove
+open/copy/flush/close/reopen/verify ordering; temp-plus-rename; the explicit
+visible-copy fallback; duplicate policies; recoverable safe overwrite; rename identity
+reconciliation; cleanup-pending behaviour; the storage-full and grant-revocation
+matrices; above-4-GiB virtual evidence. Room schema version 2 does not start until the
+whole SAF destination gate is green and approved.
+
 ## Session state — 2026-10-03: the transfer storage slice is COMPLETE and green
 
 The Android storage and durable-persistence group, part one. Branch

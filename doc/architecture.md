@@ -222,15 +222,33 @@ death, live here:
 The direction is one-way: `core-storage` and `core-data` depend on `core-transfer`;
 `core-transfer` depends on neither and gains no Android, `Uri`, Room or stream type.
 
-Nine decisions govern the parts where a plausible default silently loses data — Room
+Eleven decisions govern the parts where a plausible default silently loses data — Room
 schema bootstrap without bot commits, session ownership with **no** foreign key,
 durability as an explicit capability rather than an assumed `fsync`, app-private staging
 as the SAF default, single-owner descriptors, a bounded non-seekable zero-progress
-policy, virtual rather than physical large-file tests, the clock in `:core-data`, and
-migration tests that execute rather than merely compile. They are recorded with their
-reasoning in
+policy, virtual rather than physical large-file tests, the clock in `:core-data`,
+migration tests that execute rather than merely compile, **deletion settled by
+observation rather than by the request**, and **the SAF API tier as a type selected from
+the real SDK**. They are recorded with their reasoning in
 [`decisions/ADR-0003-transfer-storage-and-durable-persistence.md`](decisions/ADR-0003-transfer-storage-and-durable-persistence.md);
 this section is the map, not the argument.
+
+### The SAF destination gateway
+
+`DocumentsContractSafGateway` is the only class in `:core-storage` that talks to a
+`ContentResolver`. Everything above it — the commit coordinator, the containment
+resolver, the identity policy — works against narrow interfaces, so the whole commit
+sequence stays deterministically testable. That boundary is worth keeping strictly: the
+moment a caller reaches past the gateway for a query, the reasoning about descriptors,
+grants and typed failures stops being testable.
+
+Three properties it holds:
+
+- **A failed answer is never an absent one.** A null cursor, a thrown query and a missing
+  row are three facts with three recoveries. Collapsing them is how a transient provider
+  fault gets read as "the file was never created".
+- **Deletion is proved, not assumed.** See Decision 11.
+- **The API tier is a type, not a number.** See Decision 12.
 
 ## Dependency injection
 

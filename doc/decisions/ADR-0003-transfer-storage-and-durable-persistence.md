@@ -351,6 +351,63 @@ JVM tests with fakes; only the provider implementations need Robolectric.
 
 ---
 
+## Decision 11 — Deletion is settled by observation, not by the request
+
+A delete request is not proof of absence. `DocumentsContract.deleteDocument` returns a
+boolean, and that boolean is not the provider answering "is it gone". Measured against a
+real `ContentProvider` driven through a real `ContentResolver`, it reports success
+whether or not the provider removed anything.
+
+So `SafDeletion` is decided by a follow-up query on the exact stored identity:
+
+| Outcome | Meaning | Cleanup |
+|---|---|---|
+| `ConfirmedAbsent` | A query completed and returned no row | complete |
+| `StillPresent` | The exact identity still resolves | pending |
+| `QueryUnknown` | Presence and absence are both unproven | reconciliation required |
+| `PermissionRevoked` | The grant went before absence was proved | pending |
+| `IdentityMismatch` | The URI resolves to a different document | nothing deleted, nothing assumed |
+| `DeleteRequestFailed` | The request itself threw or could not be issued | not complete |
+
+Only `ConfirmedAbsent` closes cleanup. The boolean from the request is carried on
+several outcomes as `deleteReported` and is never read to decide one — it is retained
+so a log can record what the platform claimed while the outcome records what was
+observed.
+
+The reason to insist on this is what an unverified delete costs: the file left behind is
+a partial under a name the user will see, and the record says it was cleaned up.
+
+## Decision 12 — The SAF API tier is a type, selected from the real SDK
+
+`isChildDocument` is API 29 and `findDocumentPath` is API 26. Below those levels the
+symbols do not exist, and the difference between "the provider said no" and "this device
+cannot ask" is the whole of it: the first is containment evidence, the second is none.
+
+The first shape of this was one class holding an injected `sdkInt` integer with an `if`
+in front of each versioned call. That is unsafe in a way that is easy to miss. The
+integer is not the device, so anything able to construct the object — a test, a future
+caller, a refactor threading the wrong value — could direct production code at a symbol
+the running device does not have. The failure is a linkage error at the call site, which
+no typed error mapping downstream can catch. It also forced two `SuppressLint("NewApi")`
+annotations, because lint can only analyse a guard on `Build.VERSION.SDK_INT`.
+
+The tier is now a type:
+
+- `SafPlatformOperations` — the interface, with `SafApi23Operations` (grant-scoped
+  containment only), `SafApi26Operations` (adds `findDocumentPath`) and
+  `SafApi29Operations` (adds `isChildDocument`).
+- Each implementation contains only calls its own minimum API supports and is annotated
+  `@RequiresApi(26)` / `@RequiresApi(29)`.
+- `SafPlatformOperations.create()` branches on `Build.VERSION.SDK_INT` directly. It takes
+  no SDK argument, so the guard is the real one and lint can see it.
+
+The wrong tier is no longer a value that can be passed; it is a type that is not
+reachable. Tests inject a fake implementation, which is safe in a way the integer was
+not: a fake can decide what to answer, but it cannot make production code reference a
+symbol the device lacks.
+
+Both `NewApi` suppressions are gone as a consequence.
+
 ## Consequences
 
 - `core-transfer` gains exactly one thing: the `RestorationDecision` vocabulary in
