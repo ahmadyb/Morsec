@@ -161,9 +161,13 @@ class SafCommitOrderTest {
         // Copy and flush precede the close that releases the bytes.
         assertTrue("copy precedes flush", order.after("openWrite:", "flush:"))
         assertTrue("flush precedes write-owner close", order.after("flush:", "closeWrite:"))
-        // Destination is queried before it is reopened for verification.
-        assertTrue("writer closes before provider observation", order.after("closeWrite:", "query:"))
-        assertTrue("provider observation precedes verification reader", order.after("query:", "openRead:"))
+        // A pre-open identity observation is allowed, but the copy must be closed
+        // before the post-write provider observation and fresh verification reader.
+        val writeClose = gateway.calls.indexOfFirst { it.startsWith("closeWrite:") }
+        val postWriteObservation = gateway.calls.indexOfFirstFrom(writeClose + 1) { it.startsWith("query:") }
+        val verificationReader = gateway.calls.indexOfFirstFrom(postWriteObservation + 1) { it.startsWith("openRead:") }
+        assertTrue("writer closes before provider verification observation", writeClose >= 0 && postWriteObservation > writeClose)
+        assertTrue("provider observation precedes verification reader", postWriteObservation >= 0 && verificationReader > postWriteObservation)
         // Verification is the last thing before publication.
         assertTrue("verification reader closes", order.after("openRead:", "closeRead:"))
         assertTrue("verification finishes before publication rename", order.after("closeRead:", "rename:"))
