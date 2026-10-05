@@ -112,10 +112,12 @@ public object DestinationVerifier {
         buffer: ByteArray = ByteArray(VERIFY_BUFFER_BYTES),
         maxZeroProgressSteps: Int = MAX_ZERO_PROGRESS_STEPS,
         newDigester: () -> ChunkDigester = { Sha256Digester() },
+        isCancelled: () -> Boolean = { false },
     ): VerifyResult {
         require(totalBytes >= 0L) { "totalBytes must not be negative, was $totalBytes" }
         require(buffer.isNotEmpty()) { "buffer must not be empty" }
         require(maxZeroProgressSteps >= 1) { "maxZeroProgressSteps must be at least 1" }
+        if (isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
 
         val digester = newDigester()
 
@@ -124,6 +126,7 @@ public object DestinationVerifier {
         val capacity = buffer.size
 
         while (offset < totalBytes) {
+            if (isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
             val remaining = totalBytes - offset
             val toRead = if (remaining < capacity.toLong()) remaining.toInt() else capacity
             val count = source.read(offset, buffer, 0, toRead)
@@ -172,6 +175,7 @@ public object DestinationVerifier {
             )
         }
 
+        if (isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
         val observed = digester.digest()
         return when {
             expected == null -> VerifyResult.VerifiedWithoutExpected(observed, offset)

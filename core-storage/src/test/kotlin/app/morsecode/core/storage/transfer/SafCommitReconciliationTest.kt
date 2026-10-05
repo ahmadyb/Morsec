@@ -481,19 +481,26 @@ class SafCommitReconciliationTest {
     }
 
     @Test
-    fun `a rename that copies rather than moves preserves both identities`() {
+    fun `a verified renamed copy is delivered while its exact retained temporary is cleaned`() {
         val gateway = RecordingSafGateway(
             renameReturns = RecordingSafGateway.RenameReturn.NEW,
             renameKeepsOriginal = true,
         )
         val outcome = commit(gateway)
-        val pending = outcome as SafCommitOutcome.ReconciliationRequired
+        val committed = outcome as SafCommitOutcome.Committed
+        val temporary = requireNotNull(committed.record.temporaryIdentity)
+        val final = requireNotNull(committed.record.finalIdentity)
+
+        assertTrue(temporary != final)
+        assertTrue(committed.record.stagingReleased)
+        assertTrue(committed.cleanupComplete)
+        assertEquals(1, gateway.countOf("deleteAndReconcile:${temporary.documentUri}:"))
+        assertFalse(temporary.documentUri in gateway.existing)
+        assertTrue(final.documentUri in gateway.existing)
         assertEquals(
-            "both identities must survive for the next pass to disambiguate",
-            2,
-            pending.knownUris.size,
+            SafRenameReconciliation.AMBIGUOUS_BOTH_RESOLVE,
+            committed.record.renameHistory.single().reconciliation,
         )
-        assertFalse(outcome.isDelivered)
     }
 
     @Test

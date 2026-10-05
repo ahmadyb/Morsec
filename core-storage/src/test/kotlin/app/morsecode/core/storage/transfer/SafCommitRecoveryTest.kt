@@ -69,6 +69,20 @@ class SafCommitRecoveryTest {
         duplicatePolicy = policy,
     )
 
+    private fun finalRenameEvidence(
+        record: SafCommitRecord,
+        source: SafStoredDocumentIdentity,
+        final: SafStoredDocumentIdentity,
+        sequence: Int = 0,
+    ) = SafRenameEvidence(
+        before = source,
+        returned = final,
+        reconciliation = SafRenameReconciliation.RESOLVED_TO_RETURNED,
+        scope = SafRenameScope.fromRecord(record, grant),
+        phase = SafRenamePhase.FINAL_PROMOTION,
+        sequence = sequence,
+    )
+
     private class Staging(private val bytes: ByteArray) : SafStaging {
         var deleted: Boolean = false
             private set
@@ -677,7 +691,8 @@ class SafCommitRecoveryTest {
             val gateway = RecordingSafGateway()
             val staging = Staging(payload)
             val journal = InMemorySafCommitJournal()
-            val source = record()
+            val overwrite = cleanupType == SafCleanupPending.BACKUP
+            val source = record(if (overwrite) DuplicatePolicy.OVERWRITE else DuplicatePolicy.RENAME)
             val finalUri = documentUri("cleanup-final-$index")
             gateway.addNamed(finalUri, "movie.mp4")
             gateway.written[finalUri] = payload
@@ -693,17 +708,54 @@ class SafCommitRecoveryTest {
             gateway.written[providerUri] = byteArrayOf(1, 2, 3)
             assertTrue(staging.delete(partialId))
             val providerIdentity = SafStoredDocumentIdentity(providerUri, providerId)
+            val replacementIdentity = if (cleanupType == SafCleanupPending.PROVIDER_TEMPORARY) {
+                providerIdentity
+            } else {
+                SafStoredDocumentIdentity(documentUri("cleanup-replacement-$index"), "cleanup-replacement-$index")
+            }
+            val existingIdentity = if (overwrite) {
+                SafStoredDocumentIdentity(documentUri("cleanup-existing-$index"), "cleanup-existing-$index")
+            } else {
+                null
+            }
+            val renameHistory = buildList {
+                if (existingIdentity != null) {
+                    add(
+                        SafRenameEvidence(
+                            before = existingIdentity,
+                            returned = providerIdentity,
+                            reconciliation = SafRenameReconciliation.RESOLVED_TO_RETURNED,
+                            scope = SafRenameScope.fromRecord(source, grant),
+                            phase = SafRenamePhase.BACKUP_RENAME,
+                            sequence = 0,
+                        ),
+                    )
+                }
+                add(
+                    SafRenameEvidence(
+                        before = replacementIdentity,
+                        returned = finalIdentity,
+                        reconciliation = SafRenameReconciliation.RESOLVED_TO_RETURNED,
+                        scope = SafRenameScope.fromRecord(source, grant),
+                        phase = SafRenamePhase.FINAL_PROMOTION,
+                        sequence = if (existingIdentity == null) 0 else 1,
+                    ),
+                )
+            }
             val pendingRecord = source.copy(
                 state = when (cleanupType) {
                     SafCleanupPending.PROVIDER_TEMPORARY -> SafCommitState.PROVIDER_TEMPORARY_CLEANUP_PENDING
                     SafCleanupPending.BACKUP -> SafCommitState.BACKUP_CLEANUP_PENDING
                     SafCleanupPending.STAGING -> error("not used in provider cleanup cases")
                 },
-                temporaryUri = providerUri.takeIf { cleanupType == SafCleanupPending.PROVIDER_TEMPORARY },
-                temporaryIdentity = providerIdentity.takeIf { cleanupType == SafCleanupPending.PROVIDER_TEMPORARY },
+                temporaryUri = replacementIdentity.documentUri,
+                temporaryIdentity = replacementIdentity,
                 finalUri = finalUri,
                 finalIdentity = finalIdentity,
+                existingIdentity = existingIdentity,
                 backupIdentity = providerIdentity.takeIf { cleanupType == SafCleanupPending.BACKUP },
+                renameHistory = renameHistory,
+                verifiedDigest = Sha256Accumulator().apply { update(payload) }.digest(),
                 pendingCleanup = setOf(cleanupType),
                 copiedBytes = payload.size.toLong(),
                 stagingReleased = true,
@@ -729,11 +781,18 @@ class SafCommitRecoveryTest {
         val intentJournal = InMemorySafCommitJournal()
         val intentFinal = documentUri("staging-intent-final")
         intentGateway.addNamed(intentFinal, "movie.mp4")
+        intentGateway.written[intentFinal] = payload
         val intentIdentity = SafStoredDocumentIdentity(intentFinal, "staging-intent-final")
-        val intentRecord = record().copy(
+        val intentTemporary = SafStoredDocumentIdentity(documentUri("staging-intent-temp"), "staging-intent-temp")
+        val intentSource = record()
+        val intentRecord = intentSource.copy(
             state = SafCommitState.STAGING_CLEANUP_PENDING,
+            temporaryUri = intentTemporary.documentUri,
+            temporaryIdentity = intentTemporary,
             finalUri = intentFinal,
             finalIdentity = intentIdentity,
+            renameHistory = listOf(finalRenameEvidence(intentSource, intentTemporary, intentIdentity)),
+            verifiedDigest = requireNotNull(intentSource.expectedDigest),
             pendingCleanup = setOf(SafCleanupPending.STAGING),
             copiedBytes = payload.size.toLong(),
         )
@@ -757,11 +816,19 @@ class SafCommitRecoveryTest {
         val observedJournal = InMemorySafCommitJournal()
         val observedFinal = documentUri("staging-observed-final")
         observedGateway.addNamed(observedFinal, "movie.mp4")
+        observedGateway.written[observedFinal] = payload
         assertTrue(observedStaging.delete(partialId))
-        val observedRecord = record().copy(
+        val observedSource = record()
+        val observedTemporary = SafStoredDocumentIdentity(documentUri("staging-observed-temp"), "staging-observed-temp")
+        val observedIdentity = SafStoredDocumentIdentity(observedFinal, "staging-observed-final")
+        val observedRecord = observedSource.copy(
             state = SafCommitState.STAGING_CLEANUP_PENDING,
+            temporaryUri = observedTemporary.documentUri,
+            temporaryIdentity = observedTemporary,
             finalUri = observedFinal,
-            finalIdentity = SafStoredDocumentIdentity(observedFinal, "staging-observed-final"),
+            finalIdentity = observedIdentity,
+            renameHistory = listOf(finalRenameEvidence(observedSource, observedTemporary, observedIdentity)),
+            verifiedDigest = requireNotNull(observedSource.expectedDigest),
             copiedBytes = payload.size.toLong(),
             stagingReleased = true,
         )

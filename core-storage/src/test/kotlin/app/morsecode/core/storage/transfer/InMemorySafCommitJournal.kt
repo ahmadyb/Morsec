@@ -11,6 +11,7 @@ internal class InMemorySafCommitJournal(
         private set
     var rejectOnSaveAttempt: Int? = null
     var rejectNextPhase: SafCommitCheckpointPhase? = null
+    var afterSave: ((SafCommitCheckpoint) -> Unit)? = null
 
     override fun load(commitId: PartialIdentity): SafCommitCheckpoint? = checkpoints[commitId]
 
@@ -25,6 +26,7 @@ internal class InMemorySafCommitJournal(
         }
         checkpoints[checkpoint.commitId] = checkpoint
         writes += checkpoint
+        afterSave?.invoke(checkpoint)
         return true
     }
 }

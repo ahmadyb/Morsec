@@ -402,10 +402,16 @@ public data class SafCommitRecord(
 
     /** True only after app-private staging deletion returned successfully. */
     public val stagingReleased: Boolean = false,
+
+    /** Digest of the verified staged bytes, retained as cleanup authority across recovery. */
+    public val verifiedDigest: Sha256Digest? = null,
 ) {
     init {
         require(expectedSizeBytes >= 0L) {
             "expectedSizeBytes must not be negative, was $expectedSizeBytes"
+        }
+        require(verifiedDigest == null || expectedDigest == null || verifiedDigest == expectedDigest) {
+            "verified digest must agree with a supplied expected digest"
         }
         SafFilenamePolicy.requireOriginalName(expectedFinalName)
         require(grantId == null || grantId.isNotBlank()) { "grantId must not be blank when present" }

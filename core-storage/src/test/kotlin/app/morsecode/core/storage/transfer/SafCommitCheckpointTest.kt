@@ -73,7 +73,11 @@ class SafCommitCheckpointTest {
     @Test
     fun `checkpoint diagnostic string does not expose names uris ids or digest material`() {
         val digest = Sha256Accumulator().apply { update("distinct-checkpoint-digest".toByteArray()) }.digest()
-        val checkpoint = SafCommitCheckpoint.fromRecord(record().copy(expectedDigest = digest), grant)
+        val checkpoint = SafCommitCheckpoint.fromRecord(
+            record().copy(expectedDigest = digest, verifiedDigest = digest),
+            grant,
+        )
+        assertEquals(digest, checkpoint.verifiedDigest)
         val diagnostic = checkpoint.toString() + checkpoint.approvedTree.toString()
         listOf(
             "private-name",

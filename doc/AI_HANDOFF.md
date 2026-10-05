@@ -9,56 +9,71 @@ GitHub repository:
 https://github.com/ahmadyb/Morsec
 
 Working branch for this Arena session:
-arena/01a0f97d-morsec
+arena/01a10ca1-morsec
 
-Upstream baseline branch:
-arena/01a0e98a-morsec
+Accepted parent SHA:
+`7fab62ffd6387855bd3fb80c03683dd93c496a36`. This session is fixed to
+`arena/01a10ca1-morsec`; do not switch branches, modify the prior Arena branch, or
+push anywhere else. Preserve the live worktree and untracked files. Never reset,
+rewrite history, or use `git clean` without explicit review.
 
-Last confirmed pushed code commit at the start of the current Part C work:
-93c6d3959a18c184687b1ce35a48d2f815e353c7
-
-The session branch was created from baseline SHA
-`ed7e841e0c3ccb867e76aaaad3953dcedd9f2098`. Do not switch branches or push to
-the baseline. Trust `git ls-remote origin refs/heads/arena/01a0f97d-morsec` for
-the session head; query `arena/01a0e98a-morsec` separately.
-
-Before continuing, inspect the current worktree and compare local HEAD with the
-session branch's `git ls-remote` SHA. Preserve surviving uncommitted and untracked
-work. Never switch branches, reset, rewrite history, or overwrite newer work.
-
-Older session notes below may name a prior Arena branch and prior heads; those
-are historical records, not branch instructions. The authoritative active scope
-and latest status are in the Part C state at the top of this handoff.
+Older session notes below name a prior Arena branch and prior heads; they are
+historical records, not branch instructions. The authoritative active scope and
+latest status are in the current section below.
 
 ---
 
-## Current authoritative state — 2026-10-05: SAF checkpoint/recovery WIP
+## Current authoritative state — 2026-10-05: SAF destination closure pending exact-SHA CI
 
-Continue only the assigned SAF destination, checkpoint, rename-history, recovery, and related
-test/documentation work on `arena/01a0f97d-morsec`. Room schema remains version 1; Room v2,
-migrations/adapters, LAN/Nearby, services, UI, Media3, WebShare, and unrelated coordinator work
-remain unstarted.
+Complete only the SAF destination closure pass on `arena/01a10ca1-morsec`. Keep
+`CURRENT_MILESTONE = 2`; `TRANSFER_ENGINE` stays gated until milestone 5. Do not start
+Room v2/schema migration, a Room transfer adapter, LAN/Nearby/Wi-Fi Direct, foreground
+service, notifications, wake locks, transfer-screen integration, Media3, WebShare, or
+any later-milestone work. Room remains schema version 1.
 
-The remote session branch and local `HEAD` were reconciled at
-`5f222a4cf465a8aef1a266de22a21666d15aa0ef` after proving that all 387 remote-tracked paths
-were present in the worktree (378 byte-identical, nine SAF paths intentionally different,
-none missing). The earlier metadata/index reset did not alter worktree contents. Rescue patch,
-manifest, source/test copies, metadata, and checksum are preserved under
-`MORSEC_OFFLINE_PATCH/current-saf-recovery/`; do not stage those artifacts.
+The closure changes are prepared against accepted parent
+`7fab62ffd6387855bd3fb80c03683dd93c496a36`. `git diff --check` passes. The four read-only
+Node verifiers pass locally: `refs.mjs` 31/31, `token-parity.mjs` 195/195,
+`transfer-limits.mjs` 21/21, and `room-schema.mjs` 9/9. The schema verifier confirms the
+existing Room v1 export (9 tables); it does not add or generate Room v2. The Gradle
+wrapper cannot start locally: `JAVA_HOME` is unset and no `java` command exists. Thus no
+JVM unit tests, Android lint, APK assembly, or provider-runtime test has run locally; the
+active branch's exact-SHA Android CI is the required build/test evidence and is pending
+until the focused commit is pushed.
 
-The current SAF checkpoint/recovery diff is not yet committed or CI-verified. It adds a
-versioned, Room-independent commit checkpoint and recovery protocol, a two-entry rename-history
-bound (optional backup rename then final promotion), strict scope/URI/id/phase/order/duplicate/
-cycle validation before provider access, and a persisted unresolved-rename marker to avoid
-blind mutation retries. Deterministic tests cover malformed-history rejection with zero provider
-calls, observable journal/provider ordering, journal/provider failure and retry, and history
-preservation. The detailed offline snapshot is in
-`MORSEC_OFFLINE_PATCH/current-saf-recovery/README.md`.
+Implementation and executable test-source coverage include: checkpoint model version 2
+with a persisted staged-content digest; journaled provider create/copy/flush/rename/delete
+intent and result boundaries; exact-identity recovery after a result-save failure; final
+identity authority based on exact name, size, digest, parent, grant and commit context;
+no automatic obsolescence when both pre-rename and returned identities resolve; and no
+provider-temporary/backup deletion before final authority is established. Cancellation
+after an uncheckpointed provider mutation remains reconciliation-required, whereas a
+cancellation with a saved result can be terminal; late cancellation does not withdraw an
+authoritative publication, and recovery resumes exact cleanup. Interrupted visible-final
+copies are never committed and retain exact identity for reconciliation or explicit
+cleanup.
 
-The earlier Part C/filename-budget group and CI result recorded below remain the verified
-baseline; they do not certify this checkpoint/recovery diff. Next: finish the focused SAF review,
-run the exact required CI on the pushed SHA, and record measured results. Do not claim full SAF
-completion until every acceptance item is evidenced.
+The closure tests cover partial-write and flush/sync ENOSPC, ordinary I/O distinction,
+permission revocation and `SecurityException` cases, cancellation around create/open/
+write/flush/verify/rename/reconciliation/delete, create and cleanup result-save failures,
+recoverable safe-overwrite and visible-copy interruption, exact-absence cleanup recovery,
+and an integrated virtual 5-GiB coordinator copy/verification run using `Long` accounting
+without allocating a 5-GiB fixture or claiming a real 5-GiB hash. ADR-0003 and
+`doc/architecture.md` have been amended; refresh this section with measured exact-SHA CI
+evidence after the run is green.
+
+Important durability boundary: the inspected package has `SafCommitJournal` as an
+abstraction and `InMemorySafCommitJournal` only in test sources. There is no production
+journal implementation, so the versioned model and fake-backed recovery tests do **not**
+establish process-death durability. Keep Room at schema v1; Room v2 and its migration were
+not started. Both tracked changes and the untracked closure test are retained in the rescue
+artifact `MORSEC_OFFLINE_PATCH/saf-destination-closure-2026-10-05.tar.gz` until push and
+CI are green.
+
+Immediate next steps: stage only the reviewed SAF/CI/documentation files, commit and push
+only `arena/01a10ca1-morsec`, verify the remote SHA, wait for the exact-SHA CI run, then
+update this handoff with the final SHA, green CI URL, test/lint/APK evidence, and any
+provider limitations. Do not begin excluded work. Stop after SAF destination closure.
 
 ---
 
