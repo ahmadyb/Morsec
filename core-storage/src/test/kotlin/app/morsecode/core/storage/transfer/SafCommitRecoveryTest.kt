@@ -26,6 +26,7 @@ class SafCommitRecoveryTest {
 
     private fun recoveryLabel(outcome: SafCommitRecoveryOutcome): String = when (outcome) {
         is SafCommitRecoveryOutcome.Committed -> "committed:${outcome.checkpoint.phase.id}"
+        is SafCommitRecoveryOutcome.Cancelled -> "cancelled:${outcome.checkpoint.phase.id}"
         is SafCommitRecoveryOutcome.ReconciliationRequired ->
             "reconciliation:${outcome.error.category.id}:${errorCode(outcome.error)}:" +
                 "${outcome.checkpoint.phase.id}:${outcome.checkpoint.unresolvedRenamePhase?.id}"

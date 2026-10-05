@@ -269,7 +269,7 @@ class SafCommitDestinationClosureTest {
     fun `storage-full after a partial stream write is typed and preserves staging without rename`() {
         val gateway = RecordingSafGateway().apply {
             partialWriteFailureAfterBytes = 2L
-            partialWriteFailure = storageFull()
+            partialWriteFailure = RecordingSafGateway.storageFull()
         }
         val staging = TrackingStaging(payload)
         val journal = InMemorySafCommitJournal()
@@ -314,7 +314,7 @@ class SafCommitDestinationClosureTest {
     fun `storage-full at stream flush or descriptor sync never advances to verification`() {
         listOf(
             RecordingSafGateway().apply {
-                throwOn = { operation -> if (operation == OP_FLUSH) storageFull() else null }
+                throwOn = { operation -> if (operation == RecordingSafGateway.OP_FLUSH) RecordingSafGateway.storageFull() else null }
             },
             RecordingSafGateway().apply {
                 syncFailure = IOException("wrapped", IOException("No space left on device"))
@@ -341,7 +341,7 @@ class SafCommitDestinationClosureTest {
     @Test
     fun `ordinary IO without an ENOSPC signal is not mislabeled storage-full`() {
         val gateway = RecordingSafGateway().apply {
-            throwOn = { operation -> if (operation == OP_STREAM_WRITE) IOException("interrupted write") else null }
+            throwOn = { operation -> if (operation == RecordingSafGateway.OP_STREAM_WRITE) IOException("interrupted write") else null }
         }
         val staging = TrackingStaging(payload)
 
@@ -435,7 +435,7 @@ class SafCommitDestinationClosureTest {
     @Test
     fun `SecurityException during provider copy write stays PermissionRevoked`() {
         val gateway = RecordingSafGateway().apply {
-            throwOn = { operation -> if (operation == OP_STREAM_WRITE) SecurityException("revoked") else null }
+            throwOn = { operation -> if (operation == RecordingSafGateway.OP_STREAM_WRITE) SecurityException("revoked") else null }
         }
         val staging = TrackingStaging(payload)
 
@@ -451,7 +451,7 @@ class SafCommitDestinationClosureTest {
     @Test
     fun `SecurityException during fresh provider verification read stays PermissionRevoked`() {
         val gateway = RecordingSafGateway().apply {
-            throwOn = { operation -> if (operation == OP_STREAM_READ) SecurityException("revoked") else null }
+            throwOn = { operation -> if (operation == RecordingSafGateway.OP_STREAM_READ) SecurityException("revoked") else null }
         }
         val staging = TrackingStaging(payload)
 
@@ -488,7 +488,7 @@ class SafCommitDestinationClosureTest {
         val gateway = RecordingSafGateway().apply {
             afterRename = { renameReturned = true }
             throwOn = { operation ->
-                if (operation == OP_QUERY && renameReturned) SecurityException("revoked during reconciliation") else null
+                if (operation == RecordingSafGateway.OP_QUERY && renameReturned) SecurityException("revoked during reconciliation") else null
             }
         }
         val staging = TrackingStaging(payload)
@@ -782,7 +782,8 @@ class SafCommitDestinationClosureTest {
         val recovered = instance.resumeOrReconcile(checkpoint, grant)
 
         assertTrue(recovered is SafCommitRecoveryOutcome.Committed)
-        assertNotEquals(interrupted, recovered.checkpoint.finalIdentity)
+        val committed = recovered as SafCommitRecoveryOutcome.Committed
+        assertNotEquals(interrupted, committed.checkpoint.finalIdentity)
         assertFalse(interrupted.documentUri in gateway.existing)
         assertEquals(2, gateway.countOf("create:"))
         assertEquals(1, gateway.countOf("deleteAndReconcile:"))
@@ -1201,7 +1202,8 @@ class SafCommitDestinationClosureTest {
         val recovered = instance.resumeOrReconcile(intent, grant)
 
         assertTrue(recovered is SafCommitRecoveryOutcome.Cancelled)
-        assertEquals(SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED, recovered.checkpoint.phase)
+        val cancelled = recovered as SafCommitRecoveryOutcome.Cancelled
+        assertEquals(SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED, cancelled.checkpoint.phase)
         assertEquals("exact absence prevents a duplicate delete", 1, gateway.countOf("deleteAndReconcile:"))
         assertTrue(gateway.countOf("query:${temporary.documentUri}") > queriesBeforeRecovery)
     }
