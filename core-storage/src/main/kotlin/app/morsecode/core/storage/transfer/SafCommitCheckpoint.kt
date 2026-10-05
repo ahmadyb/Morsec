@@ -43,6 +43,10 @@ public enum class SafCommitCheckpointPhase(public val id: String) {
     BACKUP_DELETE_OBSERVED("backup_delete_observed"),
     STAGING_DELETE_INTENT("staging_delete_intent"),
     STAGING_DELETE_OBSERVED("staging_delete_observed"),
+    /** User cancellation before commit publication; provider identities are retained for exact cleanup. */
+    CANCELLED("cancelled"),
+    CANCELLED_TEMPORARY_DELETE_INTENT("cancelled_temporary_delete_intent"),
+    CANCELLED_TEMPORARY_DELETE_OBSERVED("cancelled_temporary_delete_observed"),
     PUBLICATION_INTENT("publication_intent"),
     PUBLISHED("published"),
     RECONCILIATION_REQUIRED("reconciliation_required"),
@@ -111,8 +115,10 @@ public data class SafCommitCheckpointFailure(
 
 /**
  * Versioned, Room-independent state sufficient to resume or reconcile a SAF
- * commit. It contains identities and an expected SHA-256 value, never handles,
- * streams, paths, file bytes, or digest accumulator internals.
+ * commit. It contains exact identities, the caller's expected SHA-256 value, and
+ * the verified staged-content digest needed to revalidate final authority after
+ * recovery. It never contains handles, streams, paths, file bytes, or digest
+ * accumulator internals.
  */
 public data class SafCommitCheckpoint(
     public val version: Int,
@@ -147,6 +153,8 @@ public data class SafCommitCheckpoint(
     public val lastFailure: SafCommitCheckpointFailure? = null,
     /** Rename mutation whose returned state still needs provider reconciliation. */
     public val unresolvedRenamePhase: SafRenamePhase? = null,
+    /** Digest of the verified staged bytes; required to authorize final cleanup after recovery. */
+    public val verifiedDigest: Sha256Digest? = null,
 ) {
     init {
         require(version > 0) { "checkpoint version must be positive" }
@@ -155,6 +163,9 @@ public data class SafCommitCheckpoint(
         require(expectedSizeBytes >= 0L) { "expected size must not be negative" }
         require(copiedBytes >= 0L) { "copied byte count must not be negative" }
         require(copiedBytes <= expectedSizeBytes) { "copied byte count exceeds expected size" }
+        require(verifiedDigest == null || expectedDigest == null || verifiedDigest == expectedDigest) {
+            "verified digest must agree with a supplied expected digest"
+        }
         require(pendingCleanup.map { it.type }.distinct().size == pendingCleanup.size) {
             "cleanup types must be unique"
         }
@@ -185,7 +196,7 @@ public data class SafCommitCheckpoint(
             "pendingCleanup=${pendingCleanup.map { it.type.id }.sorted()})"
 
     public companion object {
-        public const val CURRENT_VERSION: Int = 1
+        public const val CURRENT_VERSION: Int = 2
 
         public fun fromRecord(
             record: SafCommitRecord,
@@ -239,6 +250,7 @@ public data class SafCommitCheckpoint(
             },
             copiedBytes = record.copiedBytes,
             stagingReleased = record.stagingReleased,
+            verifiedDigest = record.verifiedDigest,
         )
     }
 }
@@ -259,6 +271,11 @@ public sealed interface SafCommitRecoveryOutcome {
         override fun toString(): String = "SafCommitRecoveryOutcome.Skipped(phase=${checkpoint.phase.id})"
     }
     public data class Committed(public val checkpoint: SafCommitCheckpoint) : SafCommitRecoveryOutcome
+    /** Cancellation is terminal for copy/publication; exact cleanup is an explicit separate retry. */
+    public data class Cancelled(public val checkpoint: SafCommitCheckpoint) : SafCommitRecoveryOutcome {
+        override fun toString(): String =
+            "SafCommitRecoveryOutcome.Cancelled(phase=${checkpoint.phase.id}, copiedBytes=${checkpoint.copiedBytes})"
+    }
     public data class ReconciliationRequired(
         public val checkpoint: SafCommitCheckpoint,
         public val error: TransferStorageError,

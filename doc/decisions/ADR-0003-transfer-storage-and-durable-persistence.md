@@ -1,9 +1,12 @@
 # ADR-0003 — Android transfer storage adapters and durable persistence
 
-- **Status:** accepted (2026-10-02)
+- **Status:** accepted (2026-10-02), amended for the SAF destination closure pass (2026-10-05)
 - **Applies to:** `:core-storage` (Android source, destination, restoration, cleanup),
   `:core-data` (Room entities, migration, persistence adapter, clock), `:core-transfer`
   (unchanged contracts, one added decision vocabulary)
+- **Closure amendment scope:** SAF destination commit, checkpoint, recovery and cleanup only.
+  The existing Room v1 schema and persistence boundaries below are unchanged; no Room v2
+  entity, migration, SAF journal adapter or production journal is started here.
 - **Supersedes:** nothing. **Amends:** the pre-implementation report for this group,
   which contained one contradiction (foreign keys) and several unstated assumptions
   (durability, SAF visibility, descriptor ownership, zero-progress policy) that are
@@ -186,24 +189,33 @@ it is not a SAF capability.
 **Default SAF strategy: app-private staging, then a verified provider temporary and
 rename.** The ordered pipeline is:
 
-1. Check the staged length and hash staged bytes in a bounded fresh pass through exact EOF before creating a provider document. If a caller supplied an expected digest, it must match; otherwise the observed staged digest is the transient comparison value for the provider copy.
+1. Check the staged length and hash staged bytes in a bounded fresh pass through exact EOF before creating a provider document. If a caller supplied an expected digest, it must match; otherwise the observed staged digest is retained as `verifiedDigest` in the version-2 SAF checkpoint so recovery can revalidate the final copy.
 2. Resolve the destination through the persisted grant and apply the selected duplicate
    policy. Direct-child lookup comes from the provider's child listing and compares exact
    display names; provider document ids remain opaque.
 3. Create a uniquely named `.morsec-part` temporary document and store the exact
    provider-returned URI and document id together.
-4. Copy with a bounded buffer; flush while the writer is open; close that owner; then
-   open a fresh reader and verify length and SHA-256 against the digest from the staged
-   pass. Require exact EOF even when provider size metadata matches: a bounded one-byte
-   probe rejects trailing data rather than accepting a matching prefix, and a missing
-   size column does not bypass the probe. The digest itself is transient and is not logged
-   or stored in recovery state. SAF flush is `FlushAttemptedGuaranteeUnknown`, never a
-   claim of durable flush.
+4. Copy with a bounded buffer; journal copy and flush intent/result boundaries; flush
+   while the writer is open; close that owner; then open a fresh reader and verify length
+   and SHA-256 against the staged-pass digest. Require exact EOF even when provider size
+   metadata matches: a bounded one-byte probe rejects trailing data rather than accepting
+   a matching prefix, and a missing size column does not bypass the probe. The version-2
+   checkpoint stores the verified staged-content digest (separately from a caller-supplied
+   expected digest) but never handles, streams, bytes or accumulator state. SAF flush is
+   `FlushAttemptedGuaranteeUnknown`, never a claim of durable flush.
 5. Request rename only after verification. Query the before and returned identities;
-   publish only when one authoritative identity is proven. Both identities, neither, a
-   null return, a failed query, or an identity mismatch remain reconciliation cases.
-6. Release app-private staging only after delivery is known. If its deletion does not
-   complete, delivery stays delivered and the record retains staging cleanup as pending.
+   do not infer that one is obsolete merely because both resolve. Establish one
+   authoritative final only when the exact URI/id is a direct child with the expected
+   final name and size, its bytes match `verifiedDigest`, grant/parent checks pass, and
+   rename history matches the commit context. Otherwise retain both identities for
+   reconciliation. A null return, failed query or identity mismatch is never success.
+6. Save cleanup intent before every provider deletion and result/observation after it.
+   A failed result save recovers by querying the same exact URI/id; it does not blindly
+   issue a second delete. Post-publication provider-temporary/backup cleanup is authorized
+   only from a version-2 checkpoint carrying the established final identity, digest,
+   expected size, direct-parent/grant evidence and strategy-appropriate rename context.
+   Staging is released only after delivery is known; a failed staging deletion remains
+   pending.
 
 Every SAF filename uses the 127-byte UTF-8 limit from
 `ProtocolLimits.MAX_PATH_SEGMENT_BYTES`, which is the existing per-segment protocol
@@ -233,14 +245,21 @@ requires reconciliation; it cannot destroy the old file to make room for a new o
 
 Cleanup is modeled separately from delivery. `pendingCleanup` can contain `STAGING`,
 `PROVIDER_TEMPORARY`, and/or `BACKUP`. The commit record binds the stored grant id,
-tree/root, transfer id, partial/commit id, final identity, pending item and state. Retry
-validates grant/tree context and an eligible cleanup state. Provider cleanup uses the
-exact recorded URI/id, queries that identity before issuing a delete and again afterwards,
-and requires confirmed absence; names and containment alone never authorize a delete.
-`stagingReleased` records the app-private delete observation independently. Permission
-revocation or a still-present document remains pending; an unknown query is not success.
-These are commit-record facts only: this decision does not start Room v2, a Room adapter,
-or a cleanup service.
+tree/root, transfer id, partial/commit id, final identity, verified staged digest, pending
+item and state. Before post-publication provider cleanup, the coordinator requires a
+final-verification/publication checkpoint with strategy-appropriate rename evidence, then
+rechecks the final exact URI/id, expected child name, parent, size and digest. Each delete
+has a saved intent and an observed result; exact-URI absence after a failed result save
+settles the prior request without another delete. `stagingReleased` records the app-private
+delete observation independently. Permission revocation or a still-present document
+remains pending; an unknown query is not success.
+
+The executable protocol is deliberately distinct from production durability. The package
+contains `SafCommitJournal` as an abstraction and `InMemorySafCommitJournal` as a test
+fake; it has **no production journal implementation**. Version 2 describes the checkpoint
+shape and coordinator/recovery rules, but no Room v2 schema, Room transfer adapter, or
+production persistence is delivered here. The database remains at version 1, and no
+cleanup service is added.
 
 ---
 
@@ -255,8 +274,8 @@ already reused.
 `DestinationHandle`) is the sole owner. It exposes the stream and channel, records a
 single `closed` flag, and its `close()` closes the `ParcelFileDescriptor` **once**.
 Callers use the handle in a `use { }` block and must **not** close the derived stream or
-channel; the derived objects are closed transitively by the descriptor. No nested
-`use` over a wrapper whose lifetime the caller does not own.
+channel; the derived objects are closed transitively by the descriptor. No nested `use`
+over a wrapper whose lifetime the caller does not own.
 
 Tests must assert descriptor closure — exactly once — on: success, seek failure, read
 failure, write failure, verification failure, and cancellation.
@@ -292,7 +311,8 @@ the file length. The skipped prefix is never materialised.
 
 ## Decision 7 — Large-file tests: accounting is virtual, hashing is bounded
 
-CI must not hash or iterate 5 GiB. The evidence is split three ways:
+CI must not allocate or hash a physical 5 GiB fixture. It does run bounded virtual
+5-GiB accounting through the integrated coordinator; the evidence is split three ways:
 
 1. **Long-range accounting and seek/skip** use *virtual* sources: a stream that advances
    a `Long` cursor and hands back a pre-filled bounded buffer. Nothing is generated per
@@ -369,7 +389,9 @@ later runtime layer to act on.
 
 Storage inspection sits behind interfaces (`PartialInspector`, `SourceProbe`,
 `GrantProbe`) so that the overwhelming majority of restoration tests are deterministic
-JVM tests with fakes; only the provider implementations need Robolectric.
+JVM tests with fakes; only the provider implementations need Robolectric. This existing
+decision does not authorize starting a restoration coordinator beyond SAF reconciliation
+in the current SAF destination pass.
 
 ---
 
@@ -439,15 +461,17 @@ unresolved attempt retains both the pre-rename and returned identities, along wi
 classification when provider observations completed. If a query failed, the evidence is
 marked unclassified rather than guessed.
 
-Checkpoint version 1 limits rename history to two entries: one optional backup rename,
+Checkpoint version 2 limits rename history to two entries: one optional backup rename,
 then one final promotion. There is no compaction; a duplicate phase, invalid sequence,
 cycle, scope mismatch, malformed URI/id pair, or history over the bound is rejected before
 provider access and the coordinator stops for reconciliation. Each durable entry carries
 the grant, tree, root, parent, session, transfer and commit scope plus its typed rename
 phase and sequence. The identity pair is not ancestry proof: any identity later acted on is
-re-queried and must be listed as a direct child of the approved parent. If the provider call succeeds but its result checkpoint cannot be persisted, recovery
-retains the unresolved rename phase and does not blindly repeat that mutation. A failed
-intent save occurs before the provider call.
+re-queried and must be listed as a direct child of the approved parent. If the provider call
+succeeds but its result checkpoint cannot be persisted, recovery retains the unresolved
+rename phase and does not blindly repeat that mutation. A failed intent save occurs before
+the provider call. Version 2 additionally retains the verified staged-content digest,
+separate from the caller's optional expected digest, for final revalidation before cleanup.
 
 ### Rename reconciliation table
 
@@ -455,31 +479,35 @@ intent save occurs before the provider call.
 | --- | --- | --- |
 | `RESOLVED_TO_RETURNED` | returned identity resolves; before identity is absent | adopt the returned URI/id |
 | `RESOLVED_TO_ORIGINAL` | same/original identity resolves | adopt the original URI/id |
-| `AMBIGUOUS_BOTH_RESOLVE` | both distinct identities resolve | stop; retain both for a later query |
+| `AMBIGUOUS_BOTH_RESOLVE` | both distinct identities resolve | retain both until the exact final name, size and digest, direct parent, grant, and commit context prove which is authoritative; otherwise reconciliation |
 | `RETURNED_UNRESOLVED` | before resolves but returned identity does not | stop; do not assume rename failed |
 | `NEITHER_RESOLVES` | neither identity resolves | stop; do not publish or delete |
 | `NULL_RETURN` | rename returned no URI | stop; retain the before identity |
 | query/authorization failure | presence was not established | stop with typed error and unclassified evidence |
 
-Only the two resolved rows authorize promotion. A same-name lookup, URI containment, or
-a provider's returned URI by itself does not settle identity. Before an operation the
-coordinator also checks grant context, authority, and the URI's encoded id against the
-stored id. Cleanup never searches by name.
+A same-name lookup, URI containment, or a provider's returned URI by itself does not
+settle identity. Before an operation the coordinator also checks grant context, authority,
+and the URI's encoded id against the stored id. Cleanup never searches by name. Post-
+publication provider-temporary and backup cleanup requires the exact final identity plus
+verified-digest checkpoint, expected size, expected child name, direct-parent reachability,
+grant context, and strategy-appropriate rename history. Unverified interrupted-copy
+handling is a distinct reconciliation/disposal path and can never report delivery.
 
 ### Cleanup state and retry table
 
 | Pending item | Persisted target | Successful retry | Still present / grant revoked | Unknown query or identity mismatch |
 | --- | --- | --- | --- | --- |
 | `STAGING` | exact `PartialIdentity` in app-private storage | set `stagingReleased`; remove the item | keep pending | keep pending; do not claim cleanup |
-| `PROVIDER_TEMPORARY` | stored temporary URI + id | remove only after confirmed absence | keep pending | reconciliation required |
-| `BACKUP` | stored backup URI + id | remove only after confirmed absence | keep pending | reconciliation required |
+| `PROVIDER_TEMPORARY` | stored temporary URI + id, authorized by a verified final checkpoint | remove only after confirmed absence | keep pending | reconciliation required |
+| `BACKUP` | stored backup URI + id, authorized by a verified final checkpoint | remove only after confirmed absence | keep pending | reconciliation required |
 
 The record's `pendingCleanup` set can carry more than one item. `stagingReleased` is a
 separate observed fact, because the final document can be delivered while staging or a
 backup still needs cleanup. The `retryPendingCleanup` operation repeats only the recorded
-deletes and staging deletion; it does not recopy, rename, search by name, or turn an
-unknown result into success. It requires the stored final identity and a compatible grant
-context before returning a delivered outcome.
+deletes and staging deletion; it does not recopy, rename, search by filename, or turn an
+unknown result into success. If deletion succeeds but its result checkpoint save fails,
+recovery first queries that same URI/id and settles exact absence without blindly repeating
+the deletion.
 
 ### SAF API compatibility table
 
@@ -493,6 +521,29 @@ The production tier is chosen from `Build.VERSION.SDK_INT`. Tests inject a tier 
 an arbitrary SDK number. No repeated decoding or raw-URI `%2F` test proves containment,
 and provider document ids are never assumed to be string-prefix descendants.
 
+### SAF destination closure evidence and boundary
+
+`SafCommitDestinationClosureTest` exercises the integrated coordinator with a virtual
+5,368,709,120-byte (5 GiB) staging stream and provider row. It covers Long byte accounting,
+copy, final verification and cleanup without allocating a 5 GiB fixture or computing a
+real 5 GiB SHA-256. The same test suite adds partial-write and flush/sync ENOSPC cases,
+ordinary-I/O typing, grant revocation and `SecurityException` cases, cancellation around
+create/open/write/flush/verify/rename/reconciliation/delete, rename and cleanup result-save
+failures, safe-overwrite interruption, and interrupted visible-final-copy recovery. This
+is test-source coverage; results are claimed only from the exact-SHA CI run recorded in
+the final handoff. Cancellation after a provider mutation whose result checkpoint is not
+saved remains `RECONCILIATION_REQUIRED`; recovery does not downgrade that unresolved state
+to terminal `Cancelled`. Once publication is authoritative, cancellation does not withdraw
+the final and recovery continues identity-checked cleanup.
+
+The checkpoint is a Room-independent, versioned model. In this package
+`SafCommitJournal` is only an interface, and `InMemorySafCommitJournal` is a test fake;
+there is no production journal implementation. Thus coordinator recovery behavior is
+executable against the abstraction and unit fake, but **production process-death durability
+is not delivered**. This SAF model version 2 is not Room schema version 2. The Room
+database stays at version 1; no Room v2 entities or migration, transfer adapter, cleanup
+service, or other later-milestone work is started by this closure pass.
+
 ---
 
 ## Consequences
@@ -502,7 +553,9 @@ and provider document ids are never assumed to be string-prefix descendants.
   `Room`, `java.io` or stream type enters the module; `tools/verify/transfer-limits.mjs`
   enforces that and CI runs it.
 - `core-storage` gains `api(project(":core-transfer"))` and packages for source,
-  destination, verification, restoration and cleanup.
-- `core-data` gains two entities, one migration, one adapter and one clock.
+  destination, verification, SAF checkpoint/reconciliation and cleanup abstractions.
+- `core-data` remains at Room schema version 1. Its clock is unchanged by this SAF closure;
+  no Room v2 entities, migration, SAF journal adapter or production journal are added.
 - `core-model` is unchanged.
-- `app` is unchanged, and `TRANSFER_ENGINE` stays gated.
+- `app` is unchanged, `CURRENT_MILESTONE` stays 2, and `TRANSFER_ENGINE` stays gated
+  until milestone 5.

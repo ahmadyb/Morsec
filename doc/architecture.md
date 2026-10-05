@@ -206,31 +206,40 @@ how to perform. The twenty-eight invariants it enforces are listed in
 [`transfer-protocol.md`](transfer-protocol.md#4-the-twenty-eight-invariants) and asserted
 one by one in `TransferReducerInvariantTest`.
 
-### Android storage adapters and durable persistence (M3)
+### Android storage adapters and persistence boundary (M3)
 
 The pure core names the adapter work — `RequestSourceStream`,
 `RequestDestinationPartial`, `PersistConfirmedOffset`, `BeginVerification`,
 `CommitVerifiedDestination`, `DeletePartialDestination` — and performs none of it. The
-Android half of that work, and the Room persistence that makes it survive a process
-death, live here:
+Android storage adapters and the versioned SAF checkpoint protocol live here; a production
+journal and Room persistence for that checkpoint remain unimplemented:
 
 | Module | Owns |
 | --- | --- |
-| `:core-storage` | Android source adapters (MediaStore, SAF, app-private, legacy), destination/partial strategies, incremental verification, the checkpoint coordinator, the duplicate-policy resolver, the restoration coordinator, the cleanup planner |
-| `:core-data` | the Room entities and migration for recovery state, the `TransferSnapshotStore` adapter, and the injected `Clock` |
+| `:core-storage` | Android source adapters (MediaStore, SAF, app-private, legacy), destination/partial strategies, incremental verification, the versioned SAF checkpoint model and coordinator/recovery protocol, the journal abstraction, duplicate-policy resolver and cleanup planner |
+| `:core-data` | the existing Room schema (still version 1) and injected `Clock`; no SAF journal adapter or Room v2 recovery migration |
 | `:core-transfer` | unchanged, plus one added `RestorationDecision` vocabulary |
 
 The direction is one-way: `core-storage` and `core-data` depend on `core-transfer`;
 `core-transfer` depends on neither and gains no Android, `Uri`, Room or stream type.
 
-Eleven decisions govern the parts where a plausible default silently loses data — Room
+**The SAF checkpoint model is not production durability.** This package defines
+`SafCommitJournal` and executes recovery against that abstraction; the only journal
+implementation inspected is `InMemorySafCommitJournal` in test sources. There is no
+production journal or `:core-data` adapter, and the Room database remains version 1.
+Checkpoint model version 2 is unrelated to Room schema version 2. Do not claim process-death
+durability from the versioned model or the test fake.
+
+Thirteen decisions govern the parts where a plausible default silently loses data — Room
 schema bootstrap without bot commits, session ownership with **no** foreign key,
 durability as an explicit capability rather than an assumed `fsync`, app-private staging
 as the SAF default, single-owner descriptors, a bounded non-seekable zero-progress
 policy, virtual rather than physical large-file tests, the clock in `:core-data`,
 migration tests that execute rather than merely compile, **deletion settled by
-observation rather than by the request**, and **the SAF API tier as a type selected from
-the real SDK**. They are recorded with their reasoning in
+observation rather than by the request**, **the SAF API tier as a type selected from the
+real SDK**, **bounded commit-scoped rename evidence with exact cleanup retries**, and
+**the versioned SAF checkpoint model separated from production persistence**. They are
+recorded with their reasoning in
 [`decisions/ADR-0003-transfer-storage-and-durable-persistence.md`](decisions/ADR-0003-transfer-storage-and-durable-persistence.md);
 this section is the map, not the argument.
 
@@ -255,29 +264,37 @@ Three properties it holds:
 
 The SAF commit path is distinct from browsing. `SafTreeReader` may use `DocumentFile`
 for listing and presentation, but commit containment and authorization do not use it as
-proof. `SafCommitCoordinatorFactory.create()` constructs the production coordinator with
-`DocumentsContractSafGateway` over the supplied real `ContentResolver`; it has no fake
-fallback. Unit tests inject a fake gateway explicitly. The production API tier is chosen
-from `Build.VERSION.SDK_INT`, not an arbitrary integer.
+proof. `SafCommitCoordinatorFactory.create()` constructs the coordinator with
+`DocumentsContractSafGateway` over the supplied real `ContentResolver` and requires the
+caller to provide a `SafCommitJournal`; it has no fake gateway fallback. Unit tests inject
+a fake gateway explicitly. The production API tier is chosen from `Build.VERSION.SDK_INT`,
+not an arbitrary integer. No production `SafCommitJournal` implementation exists yet, so
+this factory and checkpoint protocol do not by themselves make commit state durable across
+process death.
 
 The coordinator treats the sequence as an ordered safety boundary:
 
 | Phase | Required observation before advancing |
 | --- | --- |
-| Verify/resolve | The staged length is checked and its bytes are hashed in a bounded fresh pass through exact EOF; a supplied expected digest must match. The observed digest is transient and anchors provider-copy verification. The grant context is rechecked; the destination is provider-resolved and the duplicate policy is explicit. |
-| Create/copy | A provider-created temporary URI/id is retained; bytes are copied with a bounded buffer; flush is attempted before closing the writer; all owners close before verification. |
-| Verify | A fresh reader is opened after writer close; length and SHA-256 are checked against the staged-byte digest before rename or publication. If size metadata is absent, a bounded one-byte EOF probe rejects a matching prefix with trailing bytes. SAF flush remains guarantee-unknown. |
-| Rename | The provider-returned identity and the before identity are queried; only a unique, verified identity is authoritative. A null return, duplicate surviving identities, query failure or mismatch is reconciliation, not success. |
-| Deliver/cleanup | Final identity is recorded before cleanup. Staging, provider-temporary and backup cleanup are independent pending items and each provider deletion uses the exact stored URI/id followed by an absence query. |
+| Verify/resolve | The staged length is checked and its bytes are hashed in a bounded fresh pass through exact EOF; a supplied expected digest must match. The computed staged-content digest is retained as `verifiedDigest` in the version-2 checkpoint, separate from the optional expected digest. The grant context is rechecked; the destination is provider-resolved and the duplicate policy is explicit. |
+| Create/copy | A provider-created temporary URI/id is retained; create, copy and flush intent/result boundaries are journaled; bytes are copied with a bounded buffer; flush is attempted before closing the writer; all owners close before verification. Storage-full remains distinct from generic I/O. |
+| Verify | A fresh reader is opened after writer close; length and SHA-256 are checked against `verifiedDigest` before rename or publication. If size metadata is absent, a bounded one-byte EOF probe rejects a matching prefix with trailing bytes. SAF flush remains guarantee-unknown. |
+| Rename | The provider-returned identity and the before identity are queried; if both resolve, neither is automatically treated as obsolete. The exact final-name child, size, digest, parent, grant and commit-scoped rename history must establish authority. Otherwise both identities remain in reconciliation; a null return, query failure or mismatch is never success. |
+| Deliver/cleanup | Final identity and verified digest are recorded before cleanup. Staging, provider-temporary and backup cleanup are independent pending items; post-publication provider cleanup requires final-verification context, and each provider deletion saves intent, uses exact stored URI/id, then saves its observation. A failed result save recovers by exact-identity absence observation rather than repeating deletion. |
 
-The version-1 checkpoint is a pure replacement snapshot and includes a bounded rename history
-(maximum two entries: one backup move followed by one final promotion). Each entry stores
-the before and optional returned URI/id identities, the grant/tree/authority/root/parent and session/transfer/commit scope,
-a typed rename phase, and its zero-based sequence. Recovery rejects mismatched scope, malformed
+The version-2 checkpoint is a pure replacement snapshot and includes a bounded rename history
+(maximum two entries: one backup move followed by one final promotion), exact identities,
+pending-cleanup identities, and the verified staged-content digest separate from the optional
+caller-supplied expected digest. Each rename entry stores the before and optional returned
+URI/id identities, the grant/tree/authority/root/parent and session/transfer/commit scope, a
+typed rename phase, and its zero-based sequence. Recovery rejects mismatched scope, malformed
 URI/id pairs, duplicate or out-of-order phases, repeated entries, cycles, and unsupported
 checkpoint versions before making any provider call. It does not compact the history: reaching
 the bound or attempting a phase twice stops in reconciliation. A failed or unresolved rename
 persists its phase so recovery observes exact provider candidates but never blindly repeats it.
+The model is independent of Room, but there is no production `SafCommitJournal`; only the
+interface and an in-memory test fake exist, so the model is not production-durable across
+process death.
 
 Every SAF provider filename is limited to `ProtocolLimits.MAX_PATH_SEGMENT_BYTES`
 (127) UTF-8 bytes by `SafFilenamePolicy`. It rejects malformed UTF-16, NUL/control
@@ -300,21 +317,37 @@ only then requests deletion of the backup. There is no delete-first path.
 | --- | --- | --- |
 | `RENAME_STARTED` / `RENAMED` | temporary identity plus rename evidence | query the exact before/returned URI/id pairs; do not select by name |
 | `RECONCILIATION_REQUIRED` | every known URI/id pair and typed cause | query again only when authorized; unknown stays unresolved |
-| `BACKUP_CLEANUP_PENDING` | final identity, backup identity, and pending set | retry the exact backup identity; confirm absence |
-| `PROVIDER_TEMPORARY_CLEANUP_PENDING` | final identity and exact obsolete temporary identity | retry that stored identity; confirm absence |
-| `STAGING_CLEANUP_PENDING` | final identity, `STAGING` pending, `stagingReleased = false` | retry app-private deletion for the exact partial id |
+| `BACKUP_CLEANUP_PENDING` | exact final and backup identities, verified digest, expected size, grant and overwrite rename history | revalidate the final, retry exact backup identity; confirm absence |
+| `PROVIDER_TEMPORARY_CLEANUP_PENDING` | exact final and temporary identities, verified digest, expected size, grant and final-promotion history | revalidate the final, retry that stored identity; confirm absence |
+| `STAGING_CLEANUP_PENDING` | exact final identity and verified digest, `STAGING` pending, `stagingReleased = false` | revalidate final authority, retry app-private deletion for the exact partial id |
 | `COMMITTED` | final identity, empty pending set, `stagingReleased = true` | terminal |
 
 `SafCommitRecord.pendingCleanup` is a set because backup/provider cleanup and staging
 cleanup can overlap. `stagingReleased` is independent of delivery; a delivered file can
 remain committed while cleanup is pending. The commit record binds the stored grant id,
-tree/root, transfer id, partial/commit id, final identity, pending item and state.
-`retryPendingCleanup()` validates the grant/tree context and an eligible cleanup state;
-staging deletion targets the stored partial id. Provider deletion also re-queries the
-exact stored URI/id before the request and after it; a stale id, replacement, or unknown
-query does not authorize deletion. Retry does not copy, rename, or search by filename.
-Log-safe diagnostics redact document URIs, ids, private paths, control characters and
-digest bytes.
+tree/root, transfer id, partial/commit id, final identity, verified digest, pending item and
+state. `retryPendingCleanup()` validates the grant/tree context, final-verification
+checkpoint and strategy-appropriate rename history; it rechecks exact final identity,
+expected child name, size and digest before permitting post-publication provider cleanup.
+Provider deletion saves intent and re-queries the exact stored URI/id before and after the
+request; if the result checkpoint fails, recovery observes exact-URI absence instead of
+blindly deleting again. A stale id, replacement, or unknown query never authorizes
+deletion. Retry does not copy, rename, or search by filename. Log-safe diagnostics redact
+document URIs, ids, private paths, control characters and digest bytes.
+
+`SafCommitDestinationClosureTest` contains an integrated virtual 5-GiB coordinator run
+that exercises `Long` copy, verification and cleanup accounting without allocating a
+5-GiB file or doing a real 5-GiB SHA-256. Its fault matrix covers partial-write and
+flush/sync ENOSPC, ordinary I/O classification, permission revocation, cancellation at
+provider mutation/reconciliation boundaries, result-save failures, recoverable
+safe-overwrite interruptions and visible-final-copy interruption/recovery. This names
+test coverage; the exact-SHA CI result is the execution evidence.
+
+Cancellation after a provider mutation without its result checkpoint remains
+`RECONCILIATION_REQUIRED`; it is not collapsed into terminal `Cancelled`. Exact cleanup
+is explicit and identity-scoped. Once final publication is authoritative, a late
+cancellation does not withdraw it: recovery revalidates the final and continues pending
+cleanup.
 
 A locally calculated staging digest proves only that the provider copy matches the staged
 bytes. Without a sender-provided expected digest or equivalent trusted transfer

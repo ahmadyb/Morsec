@@ -73,11 +73,36 @@ internal class RecordingSafGateway(
     /** A rename whose returned identity does not resolve. */
     var renameDropsReturned: Boolean = false,
 
+    /** The provider may assign a different display name than the requested one. */
+    var renameDisplayNameOverride: ((String) -> String)? = null,
+
     /** Injects a close error after the fake stream has released its backing buffer. */
     var closeFailureOn: ((String) -> Throwable?)? = null,
 
     /** Injects a live-grant failure at a named SAF operation. */
     var grantFailureOn: ((SafContainmentOperation) -> TransferStorageError?)? = null,
+
+    /** Callbacks run after the corresponding provider side effect/read. */
+    var afterCreate: (() -> Unit)? = null,
+    var afterRename: (() -> Unit)? = null,
+    var afterQuery: ((String) -> Unit)? = null,
+    var afterStreamWrite: (() -> Unit)? = null,
+    var afterStreamRead: (() -> Unit)? = null,
+    var afterOpenWrite: (() -> Unit)? = null,
+    var afterOpenRead: (() -> Unit)? = null,
+    var afterDelete: ((String) -> Unit)? = null,
+    var afterFlush: (() -> Unit)? = null,
+
+    /** Injects an IOException after a prefix of a single write has landed. */
+    var partialWriteFailureAfterBytes: Long? = null,
+    var partialWriteFailure: Throwable? = null,
+
+    /** Failure at a selected rename call, used for backup/promotion matrices. */
+    var failRenameAttempt: Int? = null,
+    var renameAttemptFailure: TransferStorageError? = null,
+
+    /** Failure from descriptor sync, after OutputStream.flush succeeds. */
+    var syncFailure: Throwable? = null,
 ) : SafDocumentGateway {
 
     /** The operations that can be made to fail, for a test that walks them. */
@@ -135,6 +160,8 @@ internal class RecordingSafGateway(
         private set
 
     private var nextDocumentId = 1
+    private var renameAttempts = 0
+    private var partialWriteFailureTriggered = false
 
     /** Keep the tree-grant root and provider document identity in the platform URI shape. */
     private fun documentUriFor(parentOrTreeUri: String, documentId: String): String {
@@ -234,14 +261,20 @@ internal class RecordingSafGateway(
             contents[uri] = ByteArray(0)
             written[uri] = ByteArray(0)
             lastCreatedUri = uri
+            afterCreate?.invoke()
             SafCreate.Created(uri, id, displayName)
         }
     }
 
     override fun rename(documentUri: String, displayName: String): SafRename {
         record("rename:$documentUri:$displayName")
+        val attempt = ++renameAttempts
         return guarded(OP_RENAME, { SafRename.Failed(it) }) {
+            if (failRenameAttempt == attempt) {
+                return@guarded SafRename.Failed(renameAttemptFailure ?: TransferStorageError.StorageFull("rename"))
+            }
             renameFailure?.let { return SafRename.Failed(it) }
+            val actualDisplayName = renameDisplayNameOverride?.invoke(displayName) ?: displayName
             val newUri = when (renameReturns) {
                 RenameReturn.SAME -> documentUri
                 RenameReturn.NEW -> {
@@ -255,13 +288,14 @@ internal class RecordingSafGateway(
                 RenameReturn.NULL -> null
             }
             if (newUri == null || newUri == documentUri) {
-                names[documentUri] = displayName
+                names[documentUri] = actualDisplayName
             } else {
-                names[newUri] = displayName
+                names[newUri] = actualDisplayName
                 if (!renameDropsReturned) existing += newUri
                 if (!renameKeepsOriginal) existing -= documentUri
             }
             record(if (newUri == null) "rename-result:null" else "rename-result:returned")
+            afterRename?.invoke()
             SafRename.Renamed(newUri)
         }
     }
@@ -302,6 +336,7 @@ internal class RecordingSafGateway(
         return try {
             fail(OP_DELETE)
             if (deletionObserved is SafDeletion.ConfirmedAbsent) existing -= documentUri
+            afterDelete?.invoke(documentUri)
             deletionObserved
         } catch (error: Exception) {
             when (val mapped = mapError(error)) {
@@ -313,6 +348,7 @@ internal class RecordingSafGateway(
 
     override fun query(documentUri: String): SafLookup {
         record("query:$documentUri")
+        afterQuery?.invoke(documentUri)
         return guarded(OP_QUERY, { SafLookup.Failed(it) }) {
             queryFailure?.let { return SafLookup.Failed(it) }
             if (documentUri !in existing) return SafLookup.Absent
@@ -328,7 +364,11 @@ internal class RecordingSafGateway(
             val sink = RecordingOutputStream(documentUri) { bytes ->
                 written[documentUri] = bytes
             }
-            SafOpen.Opened(SafWriteHandle(null, sink))
+            val handle = SafWriteHandle(null, sink) {
+                syncFailure?.let { throw it }
+            }
+            afterOpenWrite?.invoke()
+            SafOpen.Opened(handle)
         }
     }
 
@@ -338,6 +378,7 @@ internal class RecordingSafGateway(
             openFailure?.let { return SafOpen.Refused(it) }
             openedHandles++
             val bytes = written[documentUri] ?: contents[documentUri] ?: ByteArray(0)
+            afterOpenRead?.invoke()
             SafOpen.Opened(SafReadHandle(RecordingInputStream(documentUri, bytes)))
         }
     }
@@ -367,19 +408,31 @@ internal class RecordingSafGateway(
         private val sink = ByteArrayOutputStream()
 
         override fun write(b: Int) {
-            fail(OP_STREAM_WRITE)
-            sink.write(b)
+            val one = byteArrayOf(b.toByte())
+            write(one, 0, 1)
         }
 
         override fun write(b: ByteArray, off: Int, len: Int) {
+            record("write:$uri:$len")
             fail(OP_STREAM_WRITE)
+            val failAfter = partialWriteFailureAfterBytes
+            val landed = sink.size().toLong()
+            if (!partialWriteFailureTriggered && failAfter != null && landed + len > failAfter) {
+                val accepted = (failAfter - landed).coerceIn(0L, len.toLong()).toInt()
+                if (accepted > 0) sink.write(b, off, accepted)
+                partialWriteFailureTriggered = true
+                afterStreamWrite?.invoke()
+                throw (partialWriteFailure ?: storageFull())
+            }
             sink.write(b, off, len)
+            afterStreamWrite?.invoke()
         }
 
         override fun flush() {
             record("flush:$uri")
             fail(OP_FLUSH)
             sink.flush()
+            afterFlush?.invoke()
         }
 
         override fun close() {
@@ -398,13 +451,15 @@ internal class RecordingSafGateway(
         private val source = ByteArrayInputStream(bytes)
 
         override fun read(): Int {
+            record("read:$uri:1")
             fail(OP_STREAM_READ)
-            return source.read()
+            return source.read().also { afterStreamRead?.invoke() }
         }
 
         override fun read(b: ByteArray, off: Int, len: Int): Int {
+            record("read:$uri:$len")
             fail(OP_STREAM_READ)
-            return source.read(b, off, len)
+            return source.read(b, off, len).also { afterStreamRead?.invoke() }
         }
 
         override fun close() {
