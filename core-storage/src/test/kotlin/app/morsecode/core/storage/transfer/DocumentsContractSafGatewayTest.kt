@@ -289,6 +289,9 @@ class DocumentsContractSafGatewayTest {
         // A provider that resolves a collision by renaming must have its choice
         // recorded, or a later step would look for a document that never existed.
         assertEquals("holiday (1).mp4", result.displayName)
+        assertTrue(
+            SafFilenamePolicy.utf8Length(result.displayName) <= SafFilenamePolicy.MAX_FILENAME_BYTES,
+        )
     }
 
     @Test

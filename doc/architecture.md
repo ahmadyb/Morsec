@@ -270,6 +270,14 @@ The coordinator treats the sequence as an ordered safety boundary:
 | Rename | The provider-returned identity and the before identity are queried; only a unique, verified identity is authoritative. A null return, duplicate surviving identities, query failure or mismatch is reconciliation, not success. |
 | Deliver/cleanup | Final identity is recorded before cleanup. Staging, provider-temporary and backup cleanup are independent pending items and each provider deletion uses the exact stored URI/id followed by an absence query. |
 
+Every SAF provider filename is limited to `ProtocolLimits.MAX_PATH_SEGMENT_BYTES`
+(127) UTF-8 bytes by `SafFilenamePolicy`. It rejects malformed UTF-16, NUL/control
+characters, path separators and traversal markers. It preserves the input's exact Unicode
+normalization form, counts UTF-8 bytes, and trims only complete code points from the
+basename when a duplicate, temporary, replacement or backup suffix must fit; the
+extension and deterministic suffix are budgeted first. Duplicate attempts remain bounded
+at `MAX_RENAME_ATTEMPTS`.
+
 The default strategy is temporary-copy-then-rename. `VISIBLE_FINAL_COPY` is a separate
 strategy and requires explicit policy; it is not a fallback when rename is unsupported.
 It remains visible while incomplete and reports that fact. It cannot implement overwrite.

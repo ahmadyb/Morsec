@@ -400,6 +400,13 @@ class SafDestinationTest {
         assertEquals(0L, record(size = 0L).expectedSizeBytes)
     }
 
+    @Test
+    fun `a commit record enforces the SAF filename byte budget`() {
+        val limit = SafFilenamePolicy.MAX_FILENAME_BYTES
+        assertEquals(limit, SafFilenamePolicy.utf8Length(record(name = "x".repeat(limit)).expectedFinalName))
+        assertTrue(runCatching { record(name = "x".repeat(limit + 1)) }.isFailure)
+    }
+
     // -----------------------------------------------------------------------
     // Commit states
     // -----------------------------------------------------------------------

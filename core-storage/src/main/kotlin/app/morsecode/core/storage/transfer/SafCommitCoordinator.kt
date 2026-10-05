@@ -501,14 +501,8 @@ public object SafDuplicateNaming {
     public const val MAX_RENAME_ATTEMPTS: Int = 100
 
     public fun withSuffix(displayName: String, index: Int): String {
-        val dot = displayName.lastIndexOf('.')
-        return if (dot > 0) {
-            val base = displayName.substring(0, dot)
-            val extension = displayName.substring(dot)
-            "$base ($index)$extension"
-        } else {
-            "$displayName ($index)"
-        }
+        require(index > 0) { "duplicate suffix index must be positive" }
+        return SafFilenamePolicy.withDuplicateSuffix(displayName, " ($index)")
     }
 
     /**

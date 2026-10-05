@@ -403,7 +403,7 @@ public data class SafCommitRecord(
         require(expectedSizeBytes >= 0L) {
             "expectedSizeBytes must not be negative, was $expectedSizeBytes"
         }
-        require(expectedFinalName.isNotBlank()) { "expectedFinalName must not be blank" }
+        SafFilenamePolicy.requireOriginalName(expectedFinalName)
         require(grantId == null || grantId.isNotBlank()) { "grantId must not be blank when present" }
         require(temporaryIdentity == null || temporaryIdentity.documentUri == temporaryUri) {
             "temporary identity uri must match temporaryUri"
@@ -448,7 +448,7 @@ public fun temporaryDocumentName(finalName: String, partialId: PartialIdentity):
     val body = partialId.value.map { char ->
         if (char.isLetterOrDigit() || char == '-' || char == '_') char else '-'
     }.joinToString("")
-    return "$finalName.$body.morsec-part"
+    return SafFilenamePolicy.withAppendedSuffix(finalName, ".$body.morsec-part")
 }
 
 /**
@@ -464,7 +464,7 @@ public fun backupDocumentName(finalName: String, partialId: PartialIdentity): St
     val body = partialId.value.map { char ->
         if (char.isLetterOrDigit() || char == '-' || char == '_') char else '-'
     }.joinToString("")
-    return "$finalName.$body.morsec-backup"
+    return SafFilenamePolicy.withAppendedSuffix(finalName, ".$body.morsec-backup")
 }
 
 // ---------------------------------------------------------------------------

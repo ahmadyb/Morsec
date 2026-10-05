@@ -205,6 +205,14 @@ rename.** The ordered pipeline is:
 6. Release app-private staging only after delivery is known. If its deletion does not
    complete, delivery stays delivered and the record retains staging cleanup as pending.
 
+Every SAF filename uses the 127-byte UTF-8 limit from
+`ProtocolLimits.MAX_PATH_SEGMENT_BYTES`, which is the existing per-segment protocol
+storage bound. `SafFilenamePolicy` rejects malformed UTF-16, control/NUL characters,
+separators and traversal markers. It preserves the exact Unicode spelling used by the
+existing transfer-path policy, never counts Kotlin UTF-16 code units as bytes, and
+reserves extension plus required duplicate/temporary/backup suffix before trimming only
+whole code points from a non-empty basename. Duplicate candidates remain bounded.
+
 A locally calculated staging digest proves only that the provider copy matches the staged
 bytes. Without a sender-provided expected digest or equivalent trusted transfer
 verification, it does not independently prove sender authenticity.
