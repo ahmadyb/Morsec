@@ -18,13 +18,19 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 class SafCommitRecoveryTest {
 
+    private fun errorCode(error: TransferStorageError): String = when (error) {
+        is TransferStorageError.StateConflict -> error.reason
+        is TransferStorageError.ContainmentUnknown -> error.reason
+        else -> error.category.id
+    }
+
     private fun recoveryLabel(outcome: SafCommitRecoveryOutcome): String = when (outcome) {
         is SafCommitRecoveryOutcome.Committed -> "committed:${outcome.checkpoint.phase.id}"
         is SafCommitRecoveryOutcome.ReconciliationRequired ->
-            "reconciliation:${outcome.error.category.id}:${outcome.error.safeMessage()}:" +
+            "reconciliation:${outcome.error.category.id}:${errorCode(outcome.error)}:" +
                 "${outcome.checkpoint.phase.id}:${outcome.checkpoint.unresolvedRenamePhase?.id}"
         is SafCommitRecoveryOutcome.Failed ->
-            "failed:${outcome.error.category.id}:${outcome.error.safeMessage()}:${outcome.checkpoint.phase.id}"
+            "failed:${outcome.error.category.id}:${errorCode(outcome.error)}:${outcome.checkpoint.phase.id}"
         is SafCommitRecoveryOutcome.ReadyToResume -> "ready:${outcome.checkpoint.phase.id}"
         is SafCommitRecoveryOutcome.Skipped -> "skipped:${outcome.checkpoint.phase.id}"
     }
@@ -110,7 +116,10 @@ class SafCommitRecoveryTest {
 
         val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.Committed)
+        assertTrue(
+            "provider-verified recovery result=${recoveryLabel(recovered)}",
+            recovered is SafCommitRecoveryOutcome.Committed,
+        )
         val committed = recovered as SafCommitRecoveryOutcome.Committed
         assertEquals(SafCommitCheckpointPhase.COMMITTED, committed.checkpoint.phase)
         assertEquals(0, gateway.countOf("openWrite:"))
@@ -120,7 +129,10 @@ class SafCommitRecoveryTest {
         val callsAfterFirstRecovery = gateway.calls.size
         val second = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(second is SafCommitRecoveryOutcome.Committed)
+        assertTrue(
+            "idempotent recovery result=${recoveryLabel(second)}",
+            second is SafCommitRecoveryOutcome.Committed,
+        )
         assertEquals(callsAfterFirstRecovery + 1, gateway.calls.size)
         assertEquals(0, gateway.countOf("openWrite:"))
         assertEquals(1, gateway.countOf("rename:"))
@@ -187,7 +199,10 @@ class SafCommitRecoveryTest {
 
             val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-            assertTrue("${phase.id} verifies before promotion", recovered is SafCommitRecoveryOutcome.Committed)
+            assertTrue(
+                "${phase.id} verifies before promotion; result=${recoveryLabel(recovered)}",
+                recovered is SafCommitRecoveryOutcome.Committed,
+            )
             assertEquals("${phase.id} never recopies a verified exact document", 0, gateway.countOf("openWrite:"))
             assertEquals("${phase.id} promotes once", 1, gateway.countOf("rename:"))
             assertTrue("${phase.id} retains no staging after verified commit", staging.deleted)
@@ -361,7 +376,10 @@ class SafCommitRecoveryTest {
 
         val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.Committed)
+        assertTrue(
+            "returned-final recovery result=${recoveryLabel(recovered)}",
+            recovered is SafCommitRecoveryOutcome.Committed,
+        )
         assertEquals(finalUri, (recovered as SafCommitRecoveryOutcome.Committed).checkpoint.finalIdentity?.documentUri)
         assertEquals(0, gateway.countOf("rename:"))
         assertEquals(0, gateway.countOf("openWrite:"))
@@ -496,7 +514,10 @@ class SafCommitRecoveryTest {
 
         val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.Committed)
+        assertTrue(
+            "backup-intent recovery result=${recoveryLabel(recovered)}",
+            recovered is SafCommitRecoveryOutcome.Committed,
+        )
         val committed = recovered as SafCommitRecoveryOutcome.Committed
         assertEquals(existing, committed.checkpoint.backupIdentity)
         assertEquals(2, committed.checkpoint.renameHistory.size)
@@ -611,7 +632,10 @@ class SafCommitRecoveryTest {
 
             val cleaned = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-            assertTrue("${phase.id} completes after exact deletion and observation", cleaned is SafCommitRecoveryOutcome.Committed)
+            assertTrue(
+                "${phase.id} completes after exact deletion and observation; result=${recoveryLabel(cleaned)}",
+                cleaned is SafCommitRecoveryOutcome.Committed,
+            )
             assertFalse("${phase.id} removes only the stored document", providerUri in gateway.existing)
             assertEquals("${phase.id} deletes once", 1, gateway.countOf("deleteAndReconcile:"))
         }
@@ -641,7 +665,10 @@ class SafCommitRecoveryTest {
 
         val resumedIntent = coordinator(intentGateway, intentStaging, intentJournal)
             .resumeOrReconcile(intentCheckpoint, grant)
-        assertTrue(resumedIntent is SafCommitRecoveryOutcome.Committed)
+        assertTrue(
+            "staging-delete intent recovery result=${recoveryLabel(resumedIntent)}",
+            resumedIntent is SafCommitRecoveryOutcome.Committed,
+        )
         assertTrue(intentStaging.deleted)
 
         val observedGateway = RecordingSafGateway()
@@ -667,7 +694,10 @@ class SafCommitRecoveryTest {
         val recoveredObserved = coordinator(observedGateway, observedStaging, observedJournal)
             .resumeOrReconcile(observedCheckpoint, grant)
 
-        assertTrue(recoveredObserved is SafCommitRecoveryOutcome.Committed)
+        assertTrue(
+            "observed staging-delete recovery result=${recoveryLabel(recoveredObserved)}",
+            recoveredObserved is SafCommitRecoveryOutcome.Committed,
+        )
         assertEquals(0, observedGateway.countOf("deleteAndReconcile:"))
         assertEquals(SafCommitCheckpointPhase.COMMITTED, (recoveredObserved as SafCommitRecoveryOutcome.Committed).checkpoint.phase)
     }
@@ -862,6 +892,7 @@ class SafCommitRecoveryTest {
         assertEquals(0, gateway.countOf("rename:"))
         assertEquals(0, gateway.countOf("openWrite:"))
         assertEquals(
+            "revocation journal phase; result=${recoveryLabel(recovered)}; saves=${journal.saveAttempts}",
             SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
             journal.load(partialId)?.phase,
         )

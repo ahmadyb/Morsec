@@ -53,13 +53,19 @@ class SafCommitOrderTest {
 
     private val bytes = "morsec".toByteArray()
 
+    private fun errorCode(error: TransferStorageError): String = when (error) {
+        is TransferStorageError.StateConflict -> error.reason
+        is TransferStorageError.ContainmentUnknown -> error.reason
+        else -> error.category.id
+    }
+
     private fun outcomeLabel(outcome: SafCommitOutcome): String = when (outcome) {
         is SafCommitOutcome.Committed -> "committed:${outcome.checkpoint?.phase?.id}"
         is SafCommitOutcome.ReconciliationRequired ->
-            "reconciliation:${outcome.error.category.id}:${outcome.error.safeMessage()}:" +
+            "reconciliation:${outcome.error.category.id}:${errorCode(outcome.error)}:" +
                 "${outcome.checkpoint?.phase?.id}:${outcome.checkpoint?.unresolvedRenamePhase?.id}"
         is SafCommitOutcome.Failed ->
-            "failed:${outcome.error.category.id}:${outcome.error.safeMessage()}:${outcome.checkpoint?.phase?.id}"
+            "failed:${outcome.error.category.id}:${errorCode(outcome.error)}:${outcome.checkpoint?.phase?.id}"
         is SafCommitOutcome.Skipped -> "skipped:${outcome.record.state.id}"
         is SafCommitOutcome.PendingUserDecision -> "pending:${outcome.record.state.id}"
         is SafCommitOutcome.SafeOverwriteUnsupported -> "overwrite_unsupported:${outcome.record.state.id}"
