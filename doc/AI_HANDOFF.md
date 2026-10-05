@@ -23,84 +23,92 @@ latest status are in the current section below.
 
 ---
 
-## Current authoritative state — 2026-10-05: SAF destination closure awaiting hosted runner
+## Current authoritative state — 2026-10-05: SAF destination closure accepted
 
-Complete only the SAF destination closure pass on `arena/01a10ca1-morsec`. Keep
-`CURRENT_MILESTONE = 2`; `TRANSFER_ENGINE` stays gated until milestone 5. Do not start
-Room v2/schema migration, a Room transfer adapter, LAN/Nearby/Wi-Fi Direct, foreground
-service, notifications, wake locks, transfer-screen integration, Media3, WebShare, or
-any later-milestone work. Room remains schema version 1.
+Complete only the SAF destination closure pass on the fixed branch
+`arena/01a10ca1-morsec`, based on accepted parent
+`7fab62ffd6387855bd3fb80c03683dd93c496a36`. Keep `CURRENT_MILESTONE = 2` and
+`TRANSFER_ENGINE` gated until milestone 5. Do not begin Room schema v2 or migration,
+a Room transfer adapter, LAN/Nearby/Wi-Fi Direct, foreground service, notifications,
+wake locks, transfer-screen integration, Media3, WebShare, or later-milestone work.
 
-The active branch is pushed at `a89d085c3ce955eebea368e9f2a78034bb93c1bb`; local HEAD
-matches `origin/arena/01a10ca1-morsec`. The pushed closure implementation commit
-`68188d1d99995d42faebad6d1b1e910ffdee99a6` failed its first build on a duplicate local
-`backupIdentity` declaration. A safe merge on the active branch retained that pushed
-commit and removed the duplicate in `e2b89c4`; no branch switch, reset, force-push, or
-change to the prior Arena branch was made. The subsequent test-compile fixes are in
-`c76caf9`.
+The closure implementation and tests were pushed at
+`156cfa95b3bf9f5944ff34568fdb5dc95950838f`. Exact-SHA Android CI run
+[37376882298](https://github.com/ahmadyb/Morsec/actions/runs/37376882298) is green on
+that SHA. It records implementation/test evidence; the final handoff synchronization is
+documentation-only, and the final delivery report records its resulting SHA and exact-SHA
+run.
 
-### Exact-SHA CI and local evidence
+### Verification evidence
 
-- Run `37360600493` for `68188d1` identified the duplicate `backupIdentity` declaration;
-  it is removed in the current tree.
-- Run `37369357072` for `e2b89c4` reached the build. Main-source compilation, the
-  reference/token/protocol verifiers, Room v1 export, Android lint (0 errors, 45
-  warnings in 7 reports), debug APK assembly, and instrumentation APK assembly passed.
-  The JVM-unit-test task failed before running tests because the new test source had
-  unresolved companion references, two outcome smart-casts, and one non-exhaustive
-  recovery-label `when`; all reported source errors were fixed in `c76caf9`.
-- Exact-SHA run `37370188349` for `c76caf9` and run `37371884583` for `a89d085` were
-  both cancelled before any job step: GitHub reported that no hosted runner acquired the
-  job after repeated attempts. These are infrastructure failures, not green code results,
-  and provide no JVM test evidence. Workflow dispatch is unavailable to the integration
-  token, so continue by pushing reviewed commits to the active branch and inspect the
-  resulting push runs.
-- The read-only Node verifiers pass locally: `refs.mjs` 31/31,
-  `token-parity.mjs` 195/195, `transfer-limits.mjs` 21/21, and `room-schema.mjs` 9/9.
-  The schema verifier confirms the existing Room v1 export (9 tables, 29,767 bytes); no
-  Room v2 schema was added. The local Gradle wrapper cannot start because `JAVA_HOME` is
-  unset and no `java` command exists; there is no local Kotlin compilation, JVM test,
-  lint, APK, or provider-runtime result.
+- **JVM tests:** 2,531 passed, 0 failed, 0 skipped in 137 reports. `core-storage`:
+  1,328 passed, 0 failed, 0 skipped in 70 reports.
+- **Static checks:** milestone hygiene and reference/design-token/protocol-limit
+  verifiers passed.
+- **Android lint:** 0 errors, 45 warnings in 7 reports.
+- **Artifacts:** debug APK 18.87 MiB; instrumentation APK 1.10 MiB.
+- **Room:** CI exported the unchanged version-1 schema: 9 tables, 29,767 bytes. No Room
+  v2 entity, migration, or transfer adapter was started.
+- **Local toolchain:** Gradle cannot run in this sandbox because Java is not installed;
+  hosted CI is the compile, test, lint, and APK evidence.
 
-### Implemented closure and test-source evidence
+### SAF closure implementation and acceptance evidence
 
-The version-2, Room-independent checkpoint stores the verified staged-content digest.
-Intent/result checkpoints surround provider create, copy, flush/sync, rename, query and
-cleanup/deletion boundaries. A result-save failure after deletion is recovered by
-observing the exact identity; cleanup intent precedes deletion. Provider-temporary and
-backup deletion remains gated on authoritative final identity established from exact
-identity, expected name, size, digest, parent, grant and commit context; when both
-pre-rename and returned identities resolve, neither is automatically called obsolete.
-Cancellation after an uncheckpointed provider mutation remains reconciliation-required.
-Interrupted visible-final copies are never committed and retain exact identity for
-reconciliation or explicit cleanup.
+1. The version-2, Room-independent checkpoint carries the verified staged-content digest
+   separately from the optional expected digest, exact provider identities, scoped rename
+   history, and pending-cleanup identities. Journal intent/result boundaries surround
+   provider create/copy/flush/rename and deletion operations. Failed intents stop before
+   mutation; a mutation without a saved result remains unresolved.
+2. Provider-temporary and backup cleanup is production-code reachable only after the
+   authoritative final identity is established using exact URI/id, expected final name,
+   size, digest, direct parent, persisted grant/tree, and commit/rename context. If both
+   pre-rename and returned identities resolve, neither is automatically declared
+   obsolete. Cleanup intent is saved before deletion. If its result save fails, recovery
+   queries that exact URI/id and does not blindly repeat deletion.
+3. Executable recovery and result-save-failure tests cover create, rename, flush, provider
+   temporary, backup, staging, and interrupted-copy cleanup boundaries. The committed
+   recovery test revalidates final identity and provider bytes/digest and asserts no
+   recreation, rewrite, deletion, or second rename.
+4. The failure matrix covers ENOSPC at writable open after provider creation, after a
+   partial stream write, and at flush/sync; ordinary I/O remains distinct from storage
+   full. Permission revocation and `SecurityException`, plus cancellation around create,
+   open/write, flush, verification, rename, reconciliation and deletion, are exercised.
+   Cancellation after mutation but before a result checkpoint remains
+   `RECONCILIATION_REQUIRED`.
+5. An integrated coordinator test streams, verifies, and accounts for a virtual 5-GiB
+   destination with `Long` counters and bounded buffers; it allocates neither a 5-GiB
+   fixture nor a real 5-GiB digest.
+6. Safe overwrite builds/verifies a replacement before moving the old final to a backup;
+   recovery retains both identities until the new final is proven and never uses
+   delete-first. Visible-final fallback is explicit, cannot overwrite, remains visible
+   while incomplete, and interrupted rows are never committed; recovery uses exact
+   identity before cleanup/recreation.
+7. ADR-0003 and `doc/architecture.md` describe the checkpoint, ordering, recovery,
+   provider limits, failure coverage, and durability boundary. Provider filenames use the
+   127-byte UTF-8 budget and preserve Unicode code points while fitting deterministic
+   suffixes.
 
-The closure test source covers partial-write and flush/sync ENOSPC, ordinary I/O
-separation, permission revocation and `SecurityException`, cancellation around
-create/open/write/flush/verify/rename/reconciliation/delete, create and cleanup
-result-save failures, recoverable safe-overwrite and visible-copy interruption,
-exact-absence recovery, and an integrated virtual 5-GiB coordinator copy/verification
-using `Long` accounting without allocating 5 GiB or claiming a real 5-GiB hash. These
-are implemented test cases, not yet passed JVM tests; wait for exact-SHA CI before
-claiming execution.
+### Durability and provider limits
 
-ADR-0003 and `doc/architecture.md` have been amended. Durability boundary: the inspected
-package has `SafCommitJournal` as an abstraction and `InMemorySafCommitJournal` only in
-test sources. There is no production journal implementation, so the versioned model and
-fake-backed recovery tests do **not** establish process-death durability. Room v2 and
-its migration were not started.
+`SafCommitJournal` is an abstraction; `InMemorySafCommitJournal` exists only as a test
+fake. There is **no production journal implementation**, so the versioned checkpoint and
+fake-backed executable recovery do not establish process-death durability. Checkpoint
+model version 2 is distinct from Room schema version 2. A successful SAF flush is only
+`FlushAttemptedGuaranteeUnknown`.
 
-The offline rescue archive
-`MORSEC_OFFLINE_PATCH/saf-destination-closure-2026-10-05.tar.gz` contains the full
-tracked delta from accepted parent `7fab62ffd6387855bd3fb80c03683dd93c496a36`, including
-the test-compile fixes; patch application and byte-for-byte test restoration were
-verified. Keep the archive until the active branch has a green exact-SHA CI run.
+Containment evidence is API-tiered: API 23–25 can use the selected tree root but cannot
+prove child ancestry; API 26–28 may use `findDocumentPath`; API 29+ may use
+`isChildDocument`. A provider query/rename that is absent, failed, ambiguous, or cannot
+re-establish the stored identity yields a typed unknown/refusal or reconciliation, not a
+heuristic success. The closure coordinator tests use a recording fake gateway; CI does not
+establish compatibility with every OEM or third-party document provider. The visible-final
+strategy must be opted into and cannot provide atomic visibility or overwrite.
 
-Next: use a reviewed documentation/status commit on `arena/01a10ca1-morsec` to trigger
-another push CI run and verify hosted-runner availability. If a job starts, diagnose any
-remaining compile/test failures, then update this section with measured green
-test/lint/APK evidence. Verify each pushed SHA and the final exact-SHA CI run. Stop after
-SAF destination closure; do not begin excluded work.
+The refreshed offline rescue artifact is retained at
+`MORSEC_OFFLINE_PATCH/saf-destination-closure-2026-10-05.tar.gz`. It contains the full
+tracked delta from the accepted parent through the final tracked tree, a path-preserving
+copy of the closure test, and checksums. Preserve it and the untracked `MORSEC_OFFLINE_PATCH/`
+directory; do not reset, clean, or switch branches. Stop when SAF closure is complete.
 
 ---
 
