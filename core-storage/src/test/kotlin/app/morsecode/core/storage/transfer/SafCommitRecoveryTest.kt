@@ -159,10 +159,11 @@ class SafCommitRecoveryTest {
             val operation = call.substringBefore(':')
             if (operation != "query") operation else if (call == "query:$finalUri") "query:final" else "query:unexpected"
         }
+        // Revalidation repeats provider reads at authorization, exact-child, and byte-verification boundaries.
         assertEquals(5, repeatedOperationNames.count { it == "authorize" })
-        assertEquals(3, repeatedOperationNames.count { it == "query:final" })
+        assertEquals(6, repeatedOperationNames.count { it == "query:final" })
         assertEquals(0, repeatedOperationNames.count { it == "query:unexpected" })
-        assertEquals(1, repeatedOperationNames.count { it == "findChild" })
+        assertEquals(4, repeatedOperationNames.count { it == "findChild" })
         assertEquals(1, repeatedOperationNames.count { it == "openRead" })
         assertEquals(1, repeatedOperationNames.count { it == "closeRead" })
         assertTrue(
