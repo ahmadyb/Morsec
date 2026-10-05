@@ -941,10 +941,12 @@ class SafCommitDestinationClosureTest {
         assertNotNull(reconciliation.record.temporaryIdentity)
         assertEquals(1, gateway.countOf("openWrite:"))
         assertEquals(1, gateway.countOf("closeWrite:"))
-        assertEquals(1, gateway.countOf("closeRead:"))
+        assertEquals(0, gateway.countOf("closeRead:"))
         assertEquals(0, gateway.countOf("openRead:"))
         assertEquals(0, gateway.countOf("rename:"))
         assertEquals(0, staging.deleteCalls)
+        assertTrue(staging.readHandles.isNotEmpty())
+        assertTrue(staging.readHandles.all { it.closeCount == 1 })
         assertEquals(0, gateway.liveHandles)
     }
 

@@ -3411,6 +3411,7 @@ public class SafCommitCoordinator private constructor(
         var outstanding = current.pendingCleanup.toMutableSet()
         var settled = current
         var resultPhase = stored.phase
+        var cleanupFailure: TransferStorageError? = null
         for (item in listOf(SafCleanupPending.BACKUP, SafCleanupPending.PROVIDER_TEMPORARY)) {
             if (item !in outstanding) continue
             val identity = when (item) {
@@ -3471,6 +3472,7 @@ public class SafCommitCoordinator private constructor(
                     )
                 }
                 resultPhase = observedPhase
+                cleanupFailure = authorization
                 continue
             }
             if (authorization != null) {
@@ -3534,11 +3536,12 @@ public class SafCommitCoordinator private constructor(
                     else -> TransferStorageError.StateConflict("cleanup_unsettled")
                 }
             }
+            if (failure != null) cleanupFailure = failure
             settled = settled.copy(
                 state = stateForCleanup(outstanding),
                 pendingCleanup = outstanding.toSet(),
             )
-            if (!saveCheckpoint(settled, grant, observedPhase, failure = failure)) {
+            if (!saveCheckpoint(settled, grant, observedPhase, failure = cleanupFailure)) {
                 // The durable intent still includes this identity. Preserve it in
                 // the reconciliation snapshot so recovery performs a fresh exact
                 // URI/id query before deciding whether another delete is needed.
@@ -3589,6 +3592,7 @@ public class SafCommitCoordinator private constructor(
             }
             val observation = deleteStagingAndObserve(current.partialId)
             if (observation.confirmedAbsent) outstanding.remove(SafCleanupPending.STAGING)
+            if (observation.error != null) cleanupFailure = observation.error
             settled = settled.copy(
                 state = stateForCleanup(outstanding),
                 pendingCleanup = outstanding.toSet(),
@@ -3598,7 +3602,7 @@ public class SafCommitCoordinator private constructor(
                     settled,
                     grant,
                     SafCommitCheckpointPhase.STAGING_DELETE_OBSERVED,
-                    failure = observation.error,
+                    failure = cleanupFailure,
                 )
             ) {
                 return journalFailure(
@@ -3623,6 +3627,7 @@ public class SafCommitCoordinator private constructor(
             stagingReleased = settled.stagingReleased || SafCleanupPending.STAGING !in remaining,
         )
         if (remaining.isEmpty()) {
+            cleanupFailure = null
             settled = settled.copy(state = SafCommitState.COMMITTED)
             if (!saveCheckpoint(settled, grant, SafCommitCheckpointPhase.COMMITTED)) {
                 return journalFailure(
@@ -3641,7 +3646,7 @@ public class SafCommitCoordinator private constructor(
                 SafCleanupPending.STAGING in remaining -> SafCommitCheckpointPhase.STAGING_DELETE_OBSERVED
                 else -> resultPhase
             }
-            if (!saveCheckpoint(settled, grant, resultPhase)) {
+            if (!saveCheckpoint(settled, grant, resultPhase, failure = cleanupFailure)) {
                 return journalFailure(
                     settled,
                     grant,
@@ -3651,7 +3656,9 @@ public class SafCommitCoordinator private constructor(
                 )
             }
         }
-        val resultCheckpoint = runCatching { checkpointFor(settled, grant, resultPhase) }.getOrNull()
+        val resultCheckpoint = runCatching {
+            checkpointFor(settled, grant, resultPhase, failure = cleanupFailure)
+        }.getOrNull()
         return SafCommitOutcome.Committed(
             record = settled,
             finalUri = final.documentUri,
@@ -5194,11 +5201,12 @@ public class SafCommitCoordinator private constructor(
         )) {
             is RenameSettlement.Unknown -> return if (settled.error == TransferStorageError.Cancelled) {
                 cancelAfterRename(
-                    current.copy(renameHistory = current.renameHistory + settled.evidence),
+                    current,
                     grant,
                     settled.knownUris,
                     returnedRenameIdentity = settled.evidence.returned,
                     returnedRenameUri = renamed.documentUri,
+                    unresolvedRenamePhase = settled.evidence.phase,
                 )
             } else {
                 onRenameUnresolved(

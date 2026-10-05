@@ -159,11 +159,17 @@ class SafCommitRecoveryTest {
             val operation = call.substringBefore(':')
             if (operation != "query") operation else if (call == "query:$finalUri") "query:final" else "query:unexpected"
         }
-        assertEquals(2, repeatedOperationNames.count { it == "authorize" })
-        assertEquals(2, repeatedOperationNames.count { it == "query:final" })
+        assertEquals(5, repeatedOperationNames.count { it == "authorize" })
+        assertEquals(3, repeatedOperationNames.count { it == "query:final" })
         assertEquals(0, repeatedOperationNames.count { it == "query:unexpected" })
         assertEquals(1, repeatedOperationNames.count { it == "findChild" })
-        assertTrue(repeatedOperationNames.all { it in setOf("authorize", "query:final", "findChild") })
+        assertEquals(1, repeatedOperationNames.count { it == "openRead" })
+        assertEquals(1, repeatedOperationNames.count { it == "closeRead" })
+        assertTrue(
+            repeatedOperationNames.all {
+                it in setOf("authorize", "query:final", "findChild", "openRead", "read", "closeRead")
+            },
+        )
         assertEquals(0, gateway.countOf("create:"))
         assertEquals(0, gateway.countOf("openWrite:"))
         assertEquals(0, gateway.countOf("deleteAndReconcile:"))
