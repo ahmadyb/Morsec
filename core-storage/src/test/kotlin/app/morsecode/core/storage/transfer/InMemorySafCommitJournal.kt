@@ -1,7 +1,5 @@
 package app.morsecode.core.storage.transfer
 
-import app.morsecode.core.transfer.identity.PartialIdentity
-
 /** Test-only deterministic journal; production receives only the interface. */
 internal class InMemorySafCommitJournal(
     private val eventLog: MutableList<String>? = null,

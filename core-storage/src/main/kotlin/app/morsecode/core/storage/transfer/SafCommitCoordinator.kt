@@ -7,7 +7,6 @@ import java.io.InputStream
 import java.io.OutputStream
 import app.morsecode.core.model.DuplicatePolicy
 import app.morsecode.core.storage.saf.SafPaths
-import app.morsecode.core.transfer.identity.PartialIdentity
 import app.morsecode.core.transfer.integrity.Sha256Digest
 
 /*
@@ -1812,7 +1811,7 @@ public class SafCommitCoordinator(
                 record,
                 grant,
                 TransferStorageError.StateConflict("backup_rename_result_unobserved"),
-                listOf(existing.documentUri, replacement.documentUri, checkpoint.returnedRenameUri),
+                listOfNotNull(existing.documentUri, replacement.documentUri, checkpoint.returnedRenameUri),
             )
         }
         val digest = recoveryStagedDigest(record)
@@ -5147,7 +5146,7 @@ public class SafCommitCoordinator(
         grant: SafTreeGrant,
         settled: RenameSettlement.Unknown,
         temporaryUri: String,
-        returnedRenameUri: String,
+        returnedRenameUri: String?,
     ): SafCommitOutcome.ReconciliationRequired {
         val unresolved = record.copy(
             state = SafCommitState.RECONCILIATION_REQUIRED,

@@ -1,6 +1,5 @@
 package app.morsecode.core.storage.transfer
 
-import app.morsecode.core.transfer.identity.PartialIdentity
 import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 import org.junit.Assert.assertFalse

@@ -2,7 +2,6 @@ package app.morsecode.core.storage.transfer
 
 import android.net.Uri
 import app.morsecode.core.model.DuplicatePolicy
-import app.morsecode.core.transfer.identity.PartialIdentity
 import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Accumulator
