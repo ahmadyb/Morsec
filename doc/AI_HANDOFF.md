@@ -23,7 +23,7 @@ latest status are in the current section below.
 
 ---
 
-## Current authoritative state — 2026-10-05: SAF destination closure CI retry in progress
+## Current authoritative state — 2026-10-05: SAF destination closure awaiting hosted runner
 
 Complete only the SAF destination closure pass on `arena/01a10ca1-morsec`. Keep
 `CURRENT_MILESTONE = 2`; `TRANSFER_ENGINE` stays gated until milestone 5. Do not start
@@ -31,7 +31,7 @@ Room v2/schema migration, a Room transfer adapter, LAN/Nearby/Wi-Fi Direct, fore
 service, notifications, wake locks, transfer-screen integration, Media3, WebShare, or
 any later-milestone work. Room remains schema version 1.
 
-The active branch is pushed at `c76caf99d9bd882b55df870b2b5f5aeaa473922f`; local HEAD
+The active branch is pushed at `a89d085c3ce955eebea368e9f2a78034bb93c1bb`; local HEAD
 matches `origin/arena/01a10ca1-morsec`. The pushed closure implementation commit
 `68188d1d99995d42faebad6d1b1e910ffdee99a6` failed its first build on a duplicate local
 `backupIdentity` declaration. A safe merge on the active branch retained that pushed
@@ -43,17 +43,18 @@ change to the prior Arena branch was made. The subsequent test-compile fixes are
 
 - Run `37360600493` for `68188d1` identified the duplicate `backupIdentity` declaration;
   it is removed in the current tree.
-- Run `37369357072` for `e2b89c4` reached the build. Production compilation, the
+- Run `37369357072` for `e2b89c4` reached the build. Main-source compilation, the
   reference/token/protocol verifiers, Room v1 export, Android lint (0 errors, 45
   warnings in 7 reports), debug APK assembly, and instrumentation APK assembly passed.
   The JVM-unit-test task failed before running tests because the new test source had
   unresolved companion references, two outcome smart-casts, and one non-exhaustive
   recovery-label `when`; all reported source errors were fixed in `c76caf9`.
-- Exact-SHA run `37370188349` for `c76caf9` was cancelled before any job step: GitHub
-  reported that no hosted runner acquired the job after repeated attempts. This is not a
-  green code result and provides no unit-test evidence for `c76caf9`. Workflow dispatch
-  is unavailable to the integration token, so continue by pushing reviewed commits to
-  the active branch and inspect the resulting push runs.
+- Exact-SHA run `37370188349` for `c76caf9` and run `37371884583` for `a89d085` were
+  both cancelled before any job step: GitHub reported that no hosted runner acquired the
+  job after repeated attempts. These are infrastructure failures, not green code results,
+  and provide no JVM test evidence. Workflow dispatch is unavailable to the integration
+  token, so continue by pushing reviewed commits to the active branch and inspect the
+  resulting push runs.
 - The read-only Node verifiers pass locally: `refs.mjs` 31/31,
   `token-parity.mjs` 195/195, `transfer-limits.mjs` 21/21, and `room-schema.mjs` 9/9.
   The schema verifier confirms the existing Room v1 export (9 tables, 29,767 bytes); no
@@ -96,9 +97,10 @@ the test-compile fixes; patch application and byte-for-byte test restoration wer
 verified. Keep the archive until the active branch has a green exact-SHA CI run.
 
 Next: use a reviewed documentation/status commit on `arena/01a10ca1-morsec` to trigger
-another push CI run, diagnose and fix any test failures, then update this section with
-measured green test/lint/APK evidence. Verify each pushed SHA and the final exact-SHA CI
-run. Stop after SAF destination closure; do not begin excluded work.
+another push CI run and verify hosted-runner availability. If a job starts, diagnose any
+remaining compile/test failures, then update this section with measured green
+test/lint/APK evidence. Verify each pushed SHA and the final exact-SHA CI run. Stop after
+SAF destination closure; do not begin excluded work.
 
 ---
 
