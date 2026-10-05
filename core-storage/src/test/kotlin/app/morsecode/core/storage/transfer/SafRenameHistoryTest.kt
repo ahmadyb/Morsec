@@ -109,7 +109,7 @@ class SafRenameHistoryTest {
         assertFalse(SafRenameHistoryPolicy.isWellFormed(listOf(evidence(returned = malformedReturned)), scope))
         assertFalse(
             SafRenameHistoryPolicy.isWellFormed(
-                listOf(evidence(before = identity("bad%2Fid"), returned = identity("safe"))),
+                listOf(evidence(before = identity("%2E%2E"), returned = identity("safe"))),
                 scope,
             ),
         )
@@ -137,13 +137,15 @@ class SafRenameHistoryTest {
     }
 
     @Test
-    fun `history refuses identities under a different tree root`() {
+    fun `history refuses unscoped identities and identities under a different tree root`() {
+        val unscoped = SafStoredDocumentIdentity("content://provider/document/before", "before")
         val otherTreeUri = Uri.parse("content://provider/tree/other-root")
         val outsideTree = SafStoredDocumentIdentity(
             documentUri = requireNotNull(SafContainment.documentUriUsingTree(otherTreeUri, "before")).toString(),
             documentId = "before",
         )
 
+        assertFalse(SafRenameHistoryPolicy.isWellFormed(listOf(evidence(before = unscoped, returned = null)), scope))
         assertFalse(SafRenameHistoryPolicy.isWellFormed(listOf(evidence(before = outsideTree)), scope))
     }
 

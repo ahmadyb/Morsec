@@ -2407,10 +2407,14 @@ public class SafCommitCoordinator(
         fun validDocumentIdentity(identity: SafStoredDocumentIdentity): Boolean {
             val strictUri = runCatching { java.net.URI(identity.documentUri) }.getOrNull() ?: return false
             val uri = identity.documentUri.toUri()
+            val uriSegments = uri.pathSegments
             return strictUri.scheme == "content" &&
                 strictUri.rawAuthority == checkpoint.approvedTree.authority &&
                 strictUri.rawQuery == null &&
                 strictUri.rawFragment == null &&
+                uriSegments.size == 4 &&
+                uriSegments[0] == "tree" &&
+                uriSegments[2] == "document" &&
                 uri.scheme == "content" &&
                 uri.authority == checkpoint.approvedTree.authority &&
                 SafContainment.treeDocumentIdOf(uri) == checkpoint.approvedTree.rootDocumentId &&
@@ -2430,11 +2434,15 @@ public class SafCommitCoordinator(
         checkpoint.returnedRenameUri?.let { returnedUri ->
             val strictUri = runCatching { java.net.URI(returnedUri) }.getOrNull() ?: return false
             val uri = returnedUri.toUri()
+            val uriSegments = uri.pathSegments
             val returnedId = SafContainment.documentIdOf(uri)
             if (strictUri.scheme != "content" ||
                 strictUri.rawAuthority != checkpoint.approvedTree.authority ||
                 strictUri.rawQuery != null ||
                 strictUri.rawFragment != null ||
+                uriSegments.size != 4 ||
+                uriSegments[0] != "tree" ||
+                uriSegments[2] != "document" ||
                 uri.scheme != "content" ||
                 uri.authority != checkpoint.approvedTree.authority ||
                 SafContainment.treeDocumentIdOf(uri) != checkpoint.approvedTree.rootDocumentId ||

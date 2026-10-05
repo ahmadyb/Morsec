@@ -148,25 +148,25 @@ class SafCommitOrderTest {
         assertTrue("successful sequence result=${outcomeLabel(outcome)}", outcome is SafCommitOutcome.Committed)
 
         // Staging is hashed in a bounded fresh pass before any provider child lookup.
-        assertTrue(order.after("staging:open", "findChild:"))
+        assertTrue("staging hash precedes first child lookup", order.after("staging:open", "findChild:"))
         assertEquals(2, gateway.calls.count { it == "staging:open" })
 
         // A live grant is checked immediately before each provider phase.
-        assertTrue(order.after("authorize:reconcile", "findChild:"))
-        assertTrue(order.after("authorize:create_destination", "create:"))
-        assertTrue(order.after("authorize:open_write", "openWrite:"))
-        assertTrue(order.after("authorize:verify", "openRead:"))
-        assertTrue(order.after("authorize:rename", "rename:"))
+        assertTrue("recovery authorization precedes child lookup", order.after("authorize:reconcile", "findChild:"))
+        assertTrue("create authorization precedes creation", order.after("authorize:create_destination", "create:"))
+        assertTrue("write authorization precedes writer open", order.after("authorize:open_write", "openWrite:"))
+        assertTrue("verification authorization precedes reader open", order.after("authorize:verify", "openRead:"))
+        assertTrue("rename authorization precedes rename", order.after("authorize:rename", "rename:"))
 
         // Copy and flush precede the close that releases the bytes.
-        assertTrue(order.after("openWrite:", "flush:"))
-        assertTrue(order.after("flush:", "closeWrite:"))
+        assertTrue("copy precedes flush", order.after("openWrite:", "flush:"))
+        assertTrue("flush precedes write-owner close", order.after("flush:", "closeWrite:"))
         // Destination is queried before it is reopened for verification.
-        assertTrue(order.after("closeWrite:", "query:"))
-        assertTrue(order.after("query:", "openRead:"))
+        assertTrue("writer closes before provider observation", order.after("closeWrite:", "query:"))
+        assertTrue("provider observation precedes verification reader", order.after("query:", "openRead:"))
         // Verification is the last thing before publication.
-        assertTrue(order.after("openRead:", "closeRead:"))
-        assertTrue(order.after("closeRead:", "rename:"))
+        assertTrue("verification reader closes", order.after("openRead:", "closeRead:"))
+        assertTrue("verification finishes before publication rename", order.after("closeRead:", "rename:"))
         // The renamed identity is reopened and verified again before staging
         // can be released; the first read proved the temp, not the final name.
         val finalRename = gateway.calls.indexOfLast { it.startsWith("rename:") }
@@ -176,7 +176,7 @@ class SafCommitOrderTest {
         assertTrue("final verification follows rename", finalRename < finalRead)
         assertTrue("final read owner closes before staging release", finalReadClose < stagingDelete)
         // Staging is released only after the rename is settled.
-        assertTrue(order.after("query:", "staging:delete"))
+        assertTrue("provider observation precedes staging release", order.after("query:", "staging:delete"))
     }
 
     @Test
@@ -215,17 +215,17 @@ class SafCommitOrderTest {
         val reconciliationIntent = events.indexOf("journal-save:${SafCommitCheckpointPhase.RENAME_RECONCILIATION_INTENT.id}")
         val observation = events.indexOfFirstFrom(mutation + 1) { it.startsWith("query:") }
         val settledSave = events.lastIndexOf("journal-save:${SafCommitCheckpointPhase.FINAL_RENAMED.id}")
-        assertTrue("intent save precedes rename: $events", intent >= 0 && mutation > intent)
+        assertTrue("intent save precedes rename", intent >= 0 && mutation > intent)
         assertTrue(
-            "provider result is recorded before its result checkpoint: $events",
+            "provider result is recorded before its result checkpoint",
             providerResult > mutation && resultSave > providerResult,
         )
         assertTrue(
-            "reconciliation intent precedes the provider observation: $events",
+            "reconciliation intent precedes the provider observation",
             reconciliationIntent > resultSave && observation > reconciliationIntent,
         )
         assertTrue(
-            "provider query reconciliation precedes the settled checkpoint: $events",
+            "provider query reconciliation precedes the settled checkpoint",
             observation > mutation && settledSave > observation,
         )
     }

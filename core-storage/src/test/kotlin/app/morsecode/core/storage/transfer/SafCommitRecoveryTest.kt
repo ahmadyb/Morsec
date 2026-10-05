@@ -138,7 +138,16 @@ class SafCommitRecoveryTest {
             "idempotent recovery result=${recoveryLabel(second)}",
             second is SafCommitRecoveryOutcome.Committed,
         )
-        assertEquals(callsAfterFirstRecovery + 1, gateway.calls.size)
+        val repeatedRecoveryCalls = gateway.calls.drop(callsAfterFirstRecovery)
+        val finalUri = requireNotNull(committed.checkpoint.finalIdentity).documentUri
+        val repeatedOperationNames = repeatedRecoveryCalls.map { call ->
+            val operation = call.substringBefore(':')
+            if (operation != "query") operation else if (call == "query:$finalUri") "query:final" else "query:unexpected"
+        }
+        assertEquals(
+            listOf("authorize", "authorize", "query:final", "query:final"),
+            repeatedOperationNames,
+        )
         assertEquals(0, gateway.countOf("openWrite:"))
         assertEquals(1, gateway.countOf("rename:"))
     }

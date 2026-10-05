@@ -159,10 +159,13 @@ public object SafRenameHistoryPolicy {
     private fun scopeIsWellFormed(scope: SafRenameScope): Boolean {
         val strictTreeUri = runCatching { java.net.URI(scope.treeUri) }.getOrNull() ?: return false
         val treeUri = scope.treeUri.toUri()
+        val treeSegments = treeUri.pathSegments
         return strictTreeUri.scheme == "content" &&
             strictTreeUri.rawAuthority == scope.authority &&
             strictTreeUri.rawQuery == null &&
             strictTreeUri.rawFragment == null &&
+            treeSegments.size == 2 &&
+            treeSegments[0] == "tree" &&
             treeUri.scheme == "content" &&
             treeUri.authority == scope.authority &&
             SafContainment.treeDocumentIdOf(treeUri) == scope.rootDocumentId &&
@@ -176,11 +179,15 @@ public object SafRenameHistoryPolicy {
     ): Boolean {
         val strictUri = runCatching { java.net.URI(identity.documentUri) }.getOrNull() ?: return false
         val uri = identity.documentUri.toUri()
+        val uriSegments = uri.pathSegments
         val parsedId = SafContainment.documentIdOf(uri) ?: return false
         return strictUri.scheme == "content" &&
             strictUri.rawAuthority == scope.authority &&
             strictUri.rawQuery == null &&
             strictUri.rawFragment == null &&
+            uriSegments.size == 4 &&
+            uriSegments[0] == "tree" &&
+            uriSegments[2] == "document" &&
             uri.scheme == "content" &&
             uri.authority == scope.authority &&
             SafContainment.treeDocumentIdOf(uri) == scope.rootDocumentId &&
