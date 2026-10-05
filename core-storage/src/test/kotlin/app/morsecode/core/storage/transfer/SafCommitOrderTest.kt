@@ -53,6 +53,18 @@ class SafCommitOrderTest {
 
     private val bytes = "morsec".toByteArray()
 
+    private fun outcomeLabel(outcome: SafCommitOutcome): String = when (outcome) {
+        is SafCommitOutcome.Committed -> "committed:${outcome.checkpoint?.phase?.id}"
+        is SafCommitOutcome.ReconciliationRequired ->
+            "reconciliation:${outcome.error.category.id}:${outcome.error.safeMessage()}:" +
+                "${outcome.checkpoint?.phase?.id}:${outcome.checkpoint?.unresolvedRenamePhase?.id}"
+        is SafCommitOutcome.Failed ->
+            "failed:${outcome.error.category.id}:${outcome.error.safeMessage()}:${outcome.checkpoint?.phase?.id}"
+        is SafCommitOutcome.Skipped -> "skipped:${outcome.record.state.id}"
+        is SafCommitOutcome.PendingUserDecision -> "pending:${outcome.record.state.id}"
+        is SafCommitOutcome.SafeOverwriteUnsupported -> "overwrite_unsupported:${outcome.record.state.id}"
+    }
+
     private fun record(
         policy: DuplicatePolicy = DuplicatePolicy.RENAME,
         strategy: SafCommitStrategy = SafCommitStrategy.TEMP_THEN_RENAME,
@@ -127,7 +139,7 @@ class SafCommitOrderTest {
     fun `a successful commit runs the sequence in the documented order`() {
         val gateway = RecordingSafGateway()
         val (outcome, order) = record(gateway = gateway)
-        assertTrue(outcome is SafCommitOutcome.Committed)
+        assertTrue("successful sequence result=${outcomeLabel(outcome)}", outcome is SafCommitOutcome.Committed)
 
         // Staging is hashed in a bounded fresh pass before any provider child lookup.
         assertTrue(order.after("staging:open", "findChild:"))

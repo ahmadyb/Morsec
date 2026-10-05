@@ -18,6 +18,17 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 class SafCommitRecoveryTest {
 
+    private fun recoveryLabel(outcome: SafCommitRecoveryOutcome): String = when (outcome) {
+        is SafCommitRecoveryOutcome.Committed -> "committed:${outcome.checkpoint.phase.id}"
+        is SafCommitRecoveryOutcome.ReconciliationRequired ->
+            "reconciliation:${outcome.error.category.id}:${outcome.error.safeMessage()}:" +
+                "${outcome.checkpoint.phase.id}:${outcome.checkpoint.unresolvedRenamePhase?.id}"
+        is SafCommitRecoveryOutcome.Failed ->
+            "failed:${outcome.error.category.id}:${outcome.error.safeMessage()}:${outcome.checkpoint.phase.id}"
+        is SafCommitRecoveryOutcome.ReadyToResume -> "ready:${outcome.checkpoint.phase.id}"
+        is SafCommitRecoveryOutcome.Skipped -> "skipped:${outcome.checkpoint.phase.id}"
+    }
+
     private val grant = SafTreeGrant(
         grantId = "grant-1",
         treeUri = Uri.parse("content://provider/tree/root"),
@@ -401,7 +412,10 @@ class SafCommitRecoveryTest {
 
             val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-            assertTrue("${phase.id} settles a matching, verified final child", recovered is SafCommitRecoveryOutcome.Committed)
+            assertTrue(
+                "${phase.id} settles a matching, verified final child; result=${recoveryLabel(recovered)}",
+                recovered is SafCommitRecoveryOutcome.Committed,
+            )
             assertEquals("${phase.id} does not repeat the rename", 0, gateway.countOf("rename:"))
             assertEquals("${phase.id} does not recopy", 0, gateway.countOf("openWrite:"))
             assertTrue("${phase.id} releases staging only after re-verification", staging.deleted)
@@ -440,7 +454,10 @@ class SafCommitRecoveryTest {
 
         val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.Committed)
+        assertTrue(
+            "backup rename recovery should commit; result=${recoveryLabel(recovered)}",
+            recovered is SafCommitRecoveryOutcome.Committed,
+        )
         val committed = recovered as SafCommitRecoveryOutcome.Committed
         assertEquals(backupUri, committed.checkpoint.backupIdentity?.documentUri)
         assertEquals(0, gateway.countOf("openWrite:"))
@@ -838,10 +855,16 @@ class SafCommitRecoveryTest {
 
         val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.ReconciliationRequired)
+        assertTrue(
+            "revocation must stop recovery; result=${recoveryLabel(recovered)}",
+            recovered is SafCommitRecoveryOutcome.ReconciliationRequired,
+        )
         assertEquals(0, gateway.countOf("rename:"))
         assertEquals(0, gateway.countOf("openWrite:"))
-        assertTrue(journal.load(partialId)?.phase == SafCommitCheckpointPhase.RECONCILIATION_REQUIRED)
+        assertEquals(
+            SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
+            journal.load(partialId)?.phase,
+        )
     }
 
     @Test
