@@ -183,6 +183,7 @@ public object SafRenameHistoryPolicy {
             strictUri.rawFragment == null &&
             uri.scheme == "content" &&
             uri.authority == scope.authority &&
+            SafContainment.treeDocumentIdOf(uri) == scope.rootDocumentId &&
             parsedId == identity.documentId &&
             SafDocumentIdRules.validate(identity.documentId) is SafDocumentIdCheck.Valid
     }

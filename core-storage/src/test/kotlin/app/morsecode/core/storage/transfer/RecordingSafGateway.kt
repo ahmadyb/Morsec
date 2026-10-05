@@ -1,5 +1,7 @@
 package app.morsecode.core.storage.transfer
 
+import android.net.Uri
+import android.provider.DocumentsContract
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -134,6 +136,17 @@ internal class RecordingSafGateway(
 
     private var nextDocumentId = 1
 
+    /** Keep the tree-grant root and provider document identity in the platform URI shape. */
+    private fun documentUriFor(parentOrTreeUri: String, documentId: String): String {
+        val parentUri = Uri.parse(parentOrTreeUri)
+        val authority = requireNotNull(parentUri.authority)
+        val treeDocumentId = requireNotNull(
+            runCatching { DocumentsContract.getTreeDocumentId(parentUri) }.getOrNull(),
+        )
+        val treeUri = DocumentsContract.buildTreeDocumentUri(authority, treeDocumentId)
+        return DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId).toString()
+    }
+
     /** Which identity a rename hands back. */
     enum class RenameReturn { SAME, NEW, NULL }
 
@@ -214,7 +227,7 @@ internal class RecordingSafGateway(
         return guarded(OP_CREATE, { SafCreate.Failed(it) }) {
             createFailure?.let { return SafCreate.Failed(it) }
             val id = "doc-${nextDocumentId++}"
-            val uri = "$parentUri/document/$id"
+            val uri = documentUriFor(parentUri, id)
             existing += uri
             names[uri] = displayName
             if (hideCreatedDocumentsFromChildListing) hiddenFromChildListing += uri
@@ -233,8 +246,7 @@ internal class RecordingSafGateway(
                 RenameReturn.SAME -> documentUri
                 RenameReturn.NEW -> {
                     val id = "doc-${nextDocumentId++}"
-                    val parent = documentUri.substringBefore("/document/")
-                    val uri = "$parent/document/$id"
+                    val uri = documentUriFor(documentUri, id)
                     contents[uri] = contents[documentUri] ?: ByteArray(0)
                     written[uri] = written[documentUri] ?: ByteArray(0)
                     uri
@@ -334,7 +346,7 @@ internal class RecordingSafGateway(
 
     private fun info(uri: String): SafDocumentInfo = SafDocumentInfo(
         documentUri = uri,
-        documentId = uri.substringAfterLast('/'),
+        documentId = requireNotNull(SafContainment.documentIdOf(Uri.parse(uri))),
         displayName = nameOf(uri),
         sizeBytes = when {
             omitSizeOnQuery -> null

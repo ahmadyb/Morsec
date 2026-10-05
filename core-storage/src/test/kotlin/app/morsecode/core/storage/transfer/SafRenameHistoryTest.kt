@@ -1,5 +1,6 @@
 package app.morsecode.core.storage.transfer
 
+import android.net.Uri
 import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 import org.junit.Assert.assertFalse
@@ -24,8 +25,11 @@ class SafRenameHistoryTest {
         commitId = PartialIdentity("commit-1"),
     )
 
+    private fun documentUri(documentId: String): String =
+        requireNotNull(SafContainment.documentUriUsingTree(Uri.parse(scope.treeUri), documentId)).toString()
+
     private fun identity(id: String) = SafStoredDocumentIdentity(
-        documentUri = "content://provider/document/$id",
+        documentUri = documentUri(id),
         documentId = id,
     )
 
@@ -93,11 +97,11 @@ class SafRenameHistoryTest {
     @Test
     fun `history refuses malformed source and returned uri id pairs`() {
         val malformedSource = SafStoredDocumentIdentity(
-            "content://provider/document/source-id",
+            documentUri("source-id"),
             "different-source-id",
         )
         val malformedReturned = SafStoredDocumentIdentity(
-            "content://provider/document/returned-id",
+            documentUri("returned-id"),
             "different-returned-id",
         )
 
@@ -111,7 +115,12 @@ class SafRenameHistoryTest {
         )
         assertFalse(
             SafRenameHistoryPolicy.isWellFormed(
-                listOf(evidence(before = identity("before"), returned = identity("content://other/document/id"))),
+                listOf(
+                    evidence(
+                        before = identity("before"),
+                        returned = SafStoredDocumentIdentity("content://other/document/id", "id"),
+                    ),
+                ),
                 scope,
             ),
         )
@@ -125,6 +134,17 @@ class SafRenameHistoryTest {
                 scope,
             ),
         )
+    }
+
+    @Test
+    fun `history refuses identities under a different tree root`() {
+        val otherTreeUri = Uri.parse("content://provider/tree/other-root")
+        val outsideTree = SafStoredDocumentIdentity(
+            documentUri = requireNotNull(SafContainment.documentUriUsingTree(otherTreeUri, "before")).toString(),
+            documentId = "before",
+        )
+
+        assertFalse(SafRenameHistoryPolicy.isWellFormed(listOf(evidence(before = outsideTree)), scope))
     }
 
     @Test

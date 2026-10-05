@@ -2403,10 +2403,17 @@ public class SafCommitCoordinator(
                 existingIdentity = checkpoint.existingIdentity,
             )
         ) return false
+        // Parse both identities with DocumentsContract; document-id ancestry is never inferred by prefix.
         fun validDocumentIdentity(identity: SafStoredDocumentIdentity): Boolean {
+            val strictUri = runCatching { java.net.URI(identity.documentUri) }.getOrNull() ?: return false
             val uri = identity.documentUri.toUri()
-            return uri.scheme == "content" &&
+            return strictUri.scheme == "content" &&
+                strictUri.rawAuthority == checkpoint.approvedTree.authority &&
+                strictUri.rawQuery == null &&
+                strictUri.rawFragment == null &&
+                uri.scheme == "content" &&
                 uri.authority == checkpoint.approvedTree.authority &&
+                SafContainment.treeDocumentIdOf(uri) == checkpoint.approvedTree.rootDocumentId &&
                 SafContainment.documentIdOf(uri) == identity.documentId &&
                 SafDocumentIdRules.validate(identity.documentId) is SafDocumentIdCheck.Valid
         }
@@ -2421,10 +2428,16 @@ public class SafCommitCoordinator(
         }
         if (identities.any { !validDocumentIdentity(it) }) return false
         checkpoint.returnedRenameUri?.let { returnedUri ->
+            val strictUri = runCatching { java.net.URI(returnedUri) }.getOrNull() ?: return false
             val uri = returnedUri.toUri()
             val returnedId = SafContainment.documentIdOf(uri)
-            if (uri.scheme != "content" ||
+            if (strictUri.scheme != "content" ||
+                strictUri.rawAuthority != checkpoint.approvedTree.authority ||
+                strictUri.rawQuery != null ||
+                strictUri.rawFragment != null ||
+                uri.scheme != "content" ||
                 uri.authority != checkpoint.approvedTree.authority ||
+                SafContainment.treeDocumentIdOf(uri) != checkpoint.approvedTree.rootDocumentId ||
                 returnedId == null ||
                 SafDocumentIdRules.validate(returnedId) !is SafDocumentIdCheck.Valid ||
                 checkpoint.returnedRenameIdentity?.let { identity ->

@@ -44,7 +44,12 @@ class SafCommitRecoveryTest {
     )
     private val payload = "checkpoint-recovery-bytes".toByteArray()
     private val partialId = PartialIdentity("partial-1")
-    private val parentUri = SafContainment.documentUriUsingTree(grant.treeUri, grant.rootDocumentId).toString()
+
+    private fun documentUri(documentId: String): String =
+        requireNotNull(SafContainment.documentUriUsingTree(grant.treeUri, documentId)).toString()
+
+    private fun documentId(documentUri: String): String =
+        requireNotNull(SafContainment.documentIdOf(Uri.parse(documentUri)))
 
     private fun record(
         policy: DuplicatePolicy = DuplicatePolicy.RENAME,
@@ -98,7 +103,7 @@ class SafCommitRecoveryTest {
         val journal = InMemorySafCommitJournal()
         val source = record()
         val tempName = temporaryDocumentName(source.expectedFinalName, partialId)
-        val tempUri = "$parentUri/document/temp-1"
+        val tempUri = documentUri("temp-1")
         gateway.addNamed(tempUri, tempName)
         gateway.written[tempUri] = payload
         val tempIdentity = SafStoredDocumentIdentity(tempUri, "temp-1")
@@ -181,7 +186,7 @@ class SafCommitRecoveryTest {
             val journal = InMemorySafCommitJournal()
             val source = record()
             val temporaryName = temporaryDocumentName(source.expectedFinalName, partialId)
-            val temporaryUri = "$parentUri/document/interrupted-${phase.id}"
+            val temporaryUri = documentUri("interrupted-${phase.id}")
             gateway.addNamed(temporaryUri, temporaryName)
             gateway.written[temporaryUri] = payload
             val identity = SafStoredDocumentIdentity(temporaryUri, "interrupted-${phase.id}")
@@ -216,7 +221,7 @@ class SafCommitRecoveryTest {
         val journal = InMemorySafCommitJournal()
         val source = record(digest = false)
         val candidateName = temporaryDocumentName(source.expectedFinalName, partialId)
-        val candidateUri = "$parentUri/document/candidate-1"
+        val candidateUri = documentUri("candidate-1")
         gateway.addNamed(candidateUri, candidateName)
         gateway.written[candidateUri] = payload
         val checkpoint = SafCommitCheckpoint.fromRecord(
@@ -243,7 +248,7 @@ class SafCommitRecoveryTest {
         val journal = InMemorySafCommitJournal()
         val source = record().copy(state = SafCommitState.RECONCILIATION_REQUIRED)
         val malformed = SafStoredDocumentIdentity(
-            documentUri = "$parentUri/document/uri-id",
+            documentUri = documentUri("uri-id"),
             documentId = "different-id",
         )
         val checkpoint = SafCommitCheckpoint.fromRecord(
@@ -251,6 +256,47 @@ class SafCommitRecoveryTest {
                 renameHistory = listOf(
                     SafRenameEvidence(
                         before = malformed,
+                        returned = null,
+                        scope = SafRenameScope.fromRecord(source, grant),
+                        phase = SafRenamePhase.FINAL_PROMOTION,
+                        sequence = 0,
+                    ),
+                ),
+            ),
+            grant,
+            SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
+        )
+        assertTrue(journal.save(checkpoint))
+
+        val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
+
+        assertTrue(recovered is SafCommitRecoveryOutcome.ReconciliationRequired)
+        assertEquals(
+            TransferStorageError.ContainmentUnknown("checkpoint_identity_malformed"),
+            (recovered as SafCommitRecoveryOutcome.ReconciliationRequired).error,
+        )
+        assertEquals(0, gateway.providerCallCount)
+        assertFalse(staging.deleted)
+    }
+
+    @Test
+    fun `history identity outside the checkpoint tree is rejected before provider access`() {
+        val gateway = RecordingSafGateway()
+        val staging = Staging(payload)
+        val journal = InMemorySafCommitJournal()
+        val source = record().copy(state = SafCommitState.RECONCILIATION_REQUIRED)
+        val otherTree = Uri.parse("content://provider/tree/other-root")
+        val outsideIdentity = SafStoredDocumentIdentity(
+            documentUri = requireNotNull(
+                SafContainment.documentUriUsingTree(otherTree, "history-before"),
+            ).toString(),
+            documentId = "history-before",
+        )
+        val checkpoint = SafCommitCheckpoint.fromRecord(
+            source.copy(
+                renameHistory = listOf(
+                    SafRenameEvidence(
+                        before = outsideIdentity,
                         returned = null,
                         scope = SafRenameScope.fromRecord(source, grant),
                         phase = SafRenamePhase.FINAL_PROMOTION,
@@ -295,6 +341,29 @@ class SafCommitRecoveryTest {
     }
 
     @Test
+    fun `an unsupported checkpoint version is rejected before provider access`() {
+        val gateway = RecordingSafGateway()
+        val staging = Staging(payload)
+        val journal = InMemorySafCommitJournal()
+        val checkpoint = SafCommitCheckpoint.fromRecord(
+            record(),
+            grant,
+            SafCommitCheckpointPhase.READY,
+        ).copy(version = SafCommitCheckpoint.CURRENT_VERSION + 1)
+        assertTrue(journal.save(checkpoint))
+
+        val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
+
+        assertTrue(recovered is SafCommitRecoveryOutcome.ReconciliationRequired)
+        assertEquals(
+            TransferStorageError.Unsupported("saf_checkpoint_version"),
+            (recovered as SafCommitRecoveryOutcome.ReconciliationRequired).error,
+        )
+        assertEquals(0, gateway.providerCallCount)
+        assertFalse(staging.deleted)
+    }
+
+    @Test
     fun `an exact content URI outside the approved parent is not trusted during recovery`() {
         val gateway = RecordingSafGateway()
         val staging = Staging(payload)
@@ -333,7 +402,7 @@ class SafCommitRecoveryTest {
         val journal = InMemorySafCommitJournal()
         val source = record()
         val candidateName = temporaryDocumentName(source.expectedFinalName, partialId)
-        val candidateUri = "$parentUri/document/other-1"
+        val candidateUri = documentUri("other-1")
         gateway.addNamed(candidateUri, candidateName)
         gateway.written[candidateUri] = byteArrayOf(1, 2, 3)
         val checkpoint = SafCommitCheckpoint.fromRecord(
@@ -357,8 +426,8 @@ class SafCommitRecoveryTest {
         val staging = Staging(payload)
         val journal = InMemorySafCommitJournal()
         val source = record()
-        val tempUri = "$parentUri/document/temp-old"
-        val finalUri = "$parentUri/document/final-new"
+        val tempUri = documentUri("temp-old")
+        val finalUri = documentUri("final-new")
         gateway.addNamed(finalUri, source.expectedFinalName)
         gateway.written[finalUri] = payload
         val tempIdentity = SafStoredDocumentIdentity(tempUri, "temp-old")
@@ -402,13 +471,13 @@ class SafCommitRecoveryTest {
             val sameIdentityRename = phase == SafCommitCheckpointPhase.FINAL_RENAME_INTENT
             val source = record()
             val temporaryUri = if (sameIdentityRename) {
-                "$parentUri/document/final-same-identity"
+                documentUri("final-same-identity")
             } else {
-                "$parentUri/document/temp-before-${phase.id}"
+                documentUri("temp-before-${phase.id}")
             }
-            val temporaryId = temporaryUri.substringAfterLast('/')
-            val finalUri = if (sameIdentityRename) temporaryUri else "$parentUri/document/final-${phase.id}"
-            val finalId = finalUri.substringAfterLast('/')
+            val temporaryId = documentId(temporaryUri)
+            val finalUri = if (sameIdentityRename) temporaryUri else documentUri("final-${phase.id}")
+            val finalId = documentId(finalUri)
             gateway.addNamed(finalUri, source.expectedFinalName)
             gateway.written[finalUri] = payload
             val temporaryIdentity = SafStoredDocumentIdentity(temporaryUri, temporaryId)
@@ -446,10 +515,10 @@ class SafCommitRecoveryTest {
         val staging = Staging(payload)
         val journal = InMemorySafCommitJournal()
         val source = record(policy = DuplicatePolicy.OVERWRITE)
-        val existingUri = "$parentUri/document/old-final"
-        val replacementUri = "$parentUri/document/replacement"
+        val existingUri = documentUri("old-final")
+        val replacementUri = documentUri("replacement")
         val backupName = backupDocumentName(source.expectedFinalName, partialId)
-        val backupUri = "$parentUri/document/renamed-backup"
+        val backupUri = documentUri("renamed-backup")
         gateway.addNamed(backupUri, backupName)
         gateway.written[backupUri] = byteArrayOf(9, 8, 7)
         gateway.existing.remove(existingUri)
@@ -490,8 +559,8 @@ class SafCommitRecoveryTest {
         val staging = Staging(payload)
         val journal = InMemorySafCommitJournal()
         val source = record(policy = DuplicatePolicy.OVERWRITE)
-        val existingUri = "$parentUri/document/old-final"
-        val replacementUri = "$parentUri/document/replacement"
+        val existingUri = documentUri("old-final")
+        val replacementUri = documentUri("replacement")
         val backupName = backupDocumentName(source.expectedFinalName, partialId)
         gateway.addNamed(existingUri, backupName)
         gateway.written[existingUri] = byteArrayOf(9, 8, 7)
@@ -571,7 +640,7 @@ class SafCommitRecoveryTest {
         val temporaryName = temporaryDocumentName("movie.mp4", partialId)
         gateway.addNamed(temporary.documentUri, temporaryName)
         gateway.written[temporary.documentUri] = payload
-        val replacementUri = "$parentUri/document/same-name-replacement"
+        val replacementUri = documentUri("same-name-replacement")
         gateway.addNamed(replacementUri, temporaryName)
         gateway.hiddenFromChildListing += temporary.documentUri
 
@@ -597,11 +666,11 @@ class SafCommitRecoveryTest {
             val staging = Staging(payload)
             val journal = InMemorySafCommitJournal()
             val source = record()
-            val finalUri = "$parentUri/document/cleanup-final-$index"
+            val finalUri = documentUri("cleanup-final-$index")
             gateway.addNamed(finalUri, "movie.mp4")
             gateway.written[finalUri] = payload
             val finalIdentity = SafStoredDocumentIdentity(finalUri, "cleanup-final-$index")
-            val providerUri = "$parentUri/document/cleanup-target-$index"
+            val providerUri = documentUri("cleanup-target-$index")
             val providerId = "cleanup-target-$index"
             val providerName = when (cleanupType) {
                 SafCleanupPending.PROVIDER_TEMPORARY -> temporaryDocumentName(source.expectedFinalName, partialId)
@@ -646,7 +715,7 @@ class SafCommitRecoveryTest {
         val intentGateway = RecordingSafGateway()
         val intentStaging = Staging(payload)
         val intentJournal = InMemorySafCommitJournal()
-        val intentFinal = "$parentUri/document/staging-intent-final"
+        val intentFinal = documentUri("staging-intent-final")
         intentGateway.addNamed(intentFinal, "movie.mp4")
         val intentIdentity = SafStoredDocumentIdentity(intentFinal, "staging-intent-final")
         val intentRecord = record().copy(
@@ -674,7 +743,7 @@ class SafCommitRecoveryTest {
         val observedGateway = RecordingSafGateway()
         val observedStaging = Staging(payload)
         val observedJournal = InMemorySafCommitJournal()
-        val observedFinal = "$parentUri/document/staging-observed-final"
+        val observedFinal = documentUri("staging-observed-final")
         observedGateway.addNamed(observedFinal, "movie.mp4")
         assertTrue(observedStaging.delete(partialId))
         val observedRecord = record().copy(
@@ -714,7 +783,7 @@ class SafCommitRecoveryTest {
                 SafPendingCleanupIdentity(
                     type = SafCleanupPending.PROVIDER_TEMPORARY,
                     documentIdentity = SafStoredDocumentIdentity(
-                        "$parentUri/document/not-the-temporary",
+                        documentUri("not-the-temporary"),
                         "not-the-temporary",
                     ),
                 ),
@@ -735,7 +804,7 @@ class SafCommitRecoveryTest {
         val staging = Staging(payload)
         val journal = InMemorySafCommitJournal()
         val source = record()
-        val finalUri = "$parentUri/document/final-missing"
+        val finalUri = documentUri("final-missing")
         val finalIdentity = SafStoredDocumentIdentity(finalUri, "final-missing")
         val checkpoint = SafCommitCheckpoint.fromRecord(
             source.copy(
@@ -860,7 +929,7 @@ class SafCommitRecoveryTest {
         val staging = Staging(payload)
         val journal = InMemorySafCommitJournal()
         val source = record()
-        val tempUri = "$parentUri/document/temp-revoked"
+        val tempUri = documentUri("temp-revoked")
         gateway.addNamed(tempUri, temporaryDocumentName(source.expectedFinalName, partialId))
         gateway.written[tempUri] = payload
         val identity = SafStoredDocumentIdentity(tempUri, "temp-revoked")

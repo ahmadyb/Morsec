@@ -108,7 +108,7 @@ class SafCommitReconciliationTest {
         val outcome = commit(gateway)
         val committed = outcome as SafCommitOutcome.Committed
         assertTrue("rename must not fall back to the pre-rename URI", committed.finalUri != gateway.lastCreatedUri)
-        assertEquals("doc-2", committed.finalUri.substringAfterLast('/'))
+        assertEquals("doc-2", SafContainment.documentIdOf(Uri.parse(committed.finalUri)))
         assertEquals(gateway.lastCreatedUri, committed.record.temporaryIdentity?.documentUri)
         assertEquals("doc-1", committed.record.temporaryIdentity?.documentId)
         assertEquals(committed.finalUri, committed.record.finalIdentity?.documentUri)
