@@ -1202,8 +1202,8 @@ class SafCommitDestinationClosureTest {
         val recovered = instance.resumeOrReconcile(intent, grant)
 
         assertTrue(recovered is SafCommitRecoveryOutcome.Cancelled)
-        val cancelled = recovered as SafCommitRecoveryOutcome.Cancelled
-        assertEquals(SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED, cancelled.checkpoint.phase)
+        val cancelledRecovery = recovered as SafCommitRecoveryOutcome.Cancelled
+        assertEquals(SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED, cancelledRecovery.checkpoint.phase)
         assertEquals("exact absence prevents a duplicate delete", 1, gateway.countOf("deleteAndReconcile:"))
         assertTrue(gateway.countOf("query:${temporary.documentUri}") > queriesBeforeRecovery)
     }
