@@ -32,7 +32,37 @@ and latest status are in the Part C state at the top of this handoff.
 
 ---
 
-## Current authoritative state — 2026-10-04: Part C SAF destination group active
+## Current authoritative state — 2026-10-05: SAF checkpoint/recovery WIP
+
+Continue only the assigned SAF destination, checkpoint, rename-history, recovery, and related
+test/documentation work on `arena/01a0f97d-morsec`. Room schema remains version 1; Room v2,
+migrations/adapters, LAN/Nearby, services, UI, Media3, WebShare, and unrelated coordinator work
+remain unstarted.
+
+The remote session branch and local `HEAD` were reconciled at
+`5f222a4cf465a8aef1a266de22a21666d15aa0ef` after proving that all 387 remote-tracked paths
+were present in the worktree (378 byte-identical, nine SAF paths intentionally different,
+none missing). The earlier metadata/index reset did not alter worktree contents. Rescue patch,
+manifest, source/test copies, metadata, and checksum are preserved under
+`MORSEC_OFFLINE_PATCH/current-saf-recovery/`; do not stage those artifacts.
+
+The current SAF checkpoint/recovery diff is not yet committed or CI-verified. It adds a
+versioned, Room-independent commit checkpoint and recovery protocol, a two-entry rename-history
+bound (optional backup rename then final promotion), strict scope/URI/id/phase/order/duplicate/
+cycle validation before provider access, and a persisted unresolved-rename marker to avoid
+blind mutation retries. Deterministic tests cover malformed-history rejection with zero provider
+calls, observable journal/provider ordering, journal/provider failure and retry, and history
+preservation. The detailed offline snapshot is in
+`MORSEC_OFFLINE_PATCH/current-saf-recovery/README.md`.
+
+The earlier Part C/filename-budget group and CI result recorded below remain the verified
+baseline; they do not certify this checkpoint/recovery diff. Next: finish the focused SAF review,
+run the exact required CI on the pushed SHA, and record measured results. Do not claim full SAF
+completion until every acceptance item is evidenced.
+
+---
+
+## Previous verified baseline — 2026-10-04: Part C SAF destination group active
 
 A and B are complete and approved. Work only on Part C, then stop; do not begin Room v2,
 a migration/adapter, cleanup service, restoration coordinator beyond SAF reconciliation,

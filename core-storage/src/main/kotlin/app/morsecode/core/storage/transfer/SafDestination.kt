@@ -5,6 +5,7 @@ import app.morsecode.core.model.DuplicatePolicy
 import app.morsecode.core.model.SafGrant
 import app.morsecode.core.storage.saf.PathResolution
 import app.morsecode.core.storage.saf.SafPaths
+import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Digest
 
@@ -341,6 +342,9 @@ public enum class SafCleanupPending(public val id: String) {
  * never a filename search.
  */
 public data class SafCommitRecord(
+    /** The session this commit belongs to. */
+    public val sessionId: SessionId,
+
     /** The transfer this commit belongs to. */
     public val transferId: TransferId,
 
@@ -410,6 +414,9 @@ public data class SafCommitRecord(
         }
         require(finalIdentity == null || finalIdentity.documentUri == finalUri) {
             "final identity uri must match finalUri"
+        }
+        require(renameHistory.size <= SafRenameHistoryPolicy.MAX_ENTRIES) {
+            "rename history exceeds its bounded entry count"
         }
     }
 

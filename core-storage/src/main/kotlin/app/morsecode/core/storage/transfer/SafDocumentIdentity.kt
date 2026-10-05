@@ -1,6 +1,7 @@
 package app.morsecode.core.storage.transfer
 
 import androidx.core.net.toUri
+import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 
 /*
@@ -39,17 +40,152 @@ public data class SafStoredDocumentIdentity(
     override fun toString(): String = "SafStoredDocumentIdentity([redacted])"
 }
 
+/** Rename operations performed by a SAF commit, in their only legal order. */
+public enum class SafRenamePhase(public val id: String, public val order: Int) {
+    BACKUP_RENAME("backup_rename", 0),
+    FINAL_PROMOTION("final_promotion", 1),
+}
+
+/** Immutable commit scope attached to each persisted rename-evidence entry. */
+public data class SafRenameScope(
+    public val grantId: String,
+    public val treeUri: String,
+    public val authority: String,
+    public val rootDocumentId: String,
+    public val parentDocumentId: String,
+    public val sessionId: SessionId,
+    public val transferId: TransferId,
+    public val commitId: PartialIdentity,
+) {
+    init {
+        require(grantId.isNotBlank()) { "grant id must not be blank" }
+        require(treeUri.isNotBlank()) { "tree uri must not be blank" }
+        require(authority.isNotBlank()) { "authority must not be blank" }
+        require(rootDocumentId.isNotBlank()) { "root document id must not be blank" }
+        require(parentDocumentId.isNotBlank()) { "parent document id must not be blank" }
+    }
+
+    override fun toString(): String = "SafRenameScope([redacted])"
+
+    public companion object {
+        public fun fromRecord(record: SafCommitRecord, grant: SafTreeGrant): SafRenameScope = SafRenameScope(
+            grantId = grant.grantId,
+            treeUri = record.treeUri,
+            authority = grant.authority,
+            rootDocumentId = record.rootDocumentId,
+            parentDocumentId = record.parentDocumentId,
+            sessionId = record.sessionId,
+            transferId = record.transferId,
+            commitId = record.partialId,
+        )
+    }
+}
+
 /** Identity evidence retained when a rename is reconciled after a restart. */
 public data class SafRenameEvidence(
     public val before: SafStoredDocumentIdentity,
     public val returned: SafStoredDocumentIdentity?,
     /** Null means the provider state was not fully observed. */
     public val reconciliation: SafRenameReconciliation? = null,
+    /** Required for durable history; absent only on the pure resolver's transient value. */
+    public val scope: SafRenameScope? = null,
+    /** Required for durable history; records which mutation this evidence settles. */
+    public val phase: SafRenamePhase? = null,
+    /** Zero-based append order in the commit's bounded history. */
+    public val sequence: Int? = null,
 ) {
+    init {
+        require((scope == null) == (phase == null) && (phase == null) == (sequence == null)) {
+            "rename scope, phase and sequence must be present together"
+        }
+        require(sequence == null || sequence >= 0) { "rename sequence must not be negative" }
+    }
+
     public val knownIdentities: List<SafStoredDocumentIdentity>
         get() = listOfNotNull(before, returned).distinct()
 
-    override fun toString(): String = "SafRenameEvidence([redacted])"
+    override fun toString(): String =
+        "SafRenameEvidence(phase=${phase?.id}, sequence=$sequence, [redacted])"
+}
+
+/** Bounds and validates persisted rename evidence without consulting a provider. */
+public object SafRenameHistoryPolicy {
+    /** One optional backup move followed by one final promotion. */
+    public const val MAX_ENTRIES: Int = 2
+
+    public fun isWellFormed(
+        history: List<SafRenameEvidence>,
+        expectedScope: SafRenameScope,
+    ): Boolean {
+        if (history.size > MAX_ENTRIES || !scopeIsWellFormed(expectedScope)) return false
+        val phases = mutableSetOf<SafRenamePhase>()
+        val entries = mutableSetOf<Triple<SafRenamePhase, SafStoredDocumentIdentity, SafStoredDocumentIdentity?>>()
+        val edges = mutableMapOf<SafStoredDocumentIdentity, SafStoredDocumentIdentity>()
+        var priorPhaseOrder = -1
+
+        history.forEachIndexed { index, evidence ->
+            val phase = evidence.phase ?: return false
+            if (evidence.scope != expectedScope || evidence.sequence != index) return false
+            if (phase.order < priorPhaseOrder || !phases.add(phase)) return false
+            priorPhaseOrder = phase.order
+            if (!identityIsWellFormed(evidence.before, expectedScope) ||
+                evidence.returned?.let { !identityIsWellFormed(it, expectedScope) } == true
+            ) {
+                return false
+            }
+            if (!entries.add(Triple(phase, evidence.before, evidence.returned))) return false
+            when (evidence.reconciliation) {
+                SafRenameReconciliation.RESOLVED_TO_RETURNED -> if (evidence.returned == null) return false
+                SafRenameReconciliation.RESOLVED_TO_ORIGINAL -> if (evidence.returned != evidence.before) return false
+                SafRenameReconciliation.NULL_RETURN -> if (evidence.returned != null) return false
+                else -> Unit
+            }
+
+            val returned = evidence.returned
+            if (returned != null && returned != evidence.before) {
+                if (edges.containsKey(evidence.before)) return false
+                var cursor: SafStoredDocumentIdentity? = returned
+                val visited = mutableSetOf<SafStoredDocumentIdentity>()
+                while (cursor != null && visited.add(cursor)) {
+                    if (cursor == evidence.before) return false
+                    cursor = edges[cursor]
+                }
+                edges[evidence.before] = returned
+            }
+        }
+        return true
+    }
+
+    private fun scopeIsWellFormed(scope: SafRenameScope): Boolean {
+        val strictTreeUri = runCatching { java.net.URI(scope.treeUri) }.getOrNull() ?: return false
+        val treeUri = scope.treeUri.toUri()
+        return strictTreeUri.scheme == "content" &&
+            strictTreeUri.rawAuthority == scope.authority &&
+            strictTreeUri.rawQuery == null &&
+            strictTreeUri.rawFragment == null &&
+            treeUri.scheme == "content" &&
+            treeUri.authority == scope.authority &&
+            SafContainment.treeDocumentIdOf(treeUri) == scope.rootDocumentId &&
+            SafDocumentIdRules.validate(scope.rootDocumentId) is SafDocumentIdCheck.Valid &&
+            SafDocumentIdRules.validate(scope.parentDocumentId) is SafDocumentIdCheck.Valid
+    }
+
+    private fun identityIsWellFormed(
+        identity: SafStoredDocumentIdentity,
+        scope: SafRenameScope,
+    ): Boolean {
+        val strictUri = runCatching { java.net.URI(identity.documentUri) }.getOrNull() ?: return false
+        val uri = identity.documentUri.toUri()
+        val parsedId = SafContainment.documentIdOf(uri) ?: return false
+        return strictUri.scheme == "content" &&
+            strictUri.rawAuthority == scope.authority &&
+            strictUri.rawQuery == null &&
+            strictUri.rawFragment == null &&
+            uri.scheme == "content" &&
+            uri.authority == scope.authority &&
+            parsedId == identity.documentId &&
+            SafDocumentIdRules.validate(identity.documentId) is SafDocumentIdCheck.Valid
+    }
 }
 
 /**

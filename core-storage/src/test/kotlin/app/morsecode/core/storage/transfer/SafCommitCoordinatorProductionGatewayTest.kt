@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.test.core.app.ApplicationProvider
 import app.morsecode.core.model.DuplicatePolicy
+import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Accumulator
 import java.io.ByteArrayInputStream
@@ -67,6 +68,7 @@ class SafCommitCoordinatorProductionGatewayTest {
         val coordinator = SafCommitCoordinatorFactory.create(
             resolver = context.contentResolver,
             staging = staging,
+            journal = InMemorySafCommitJournal(),
             copyBufferBytes = 7,
         )
 
@@ -93,6 +95,7 @@ class SafCommitCoordinatorProductionGatewayTest {
         val coordinator = SafCommitCoordinatorFactory.create(
             resolver = context.contentResolver,
             staging = staging,
+            journal = InMemorySafCommitJournal(),
         )
 
         val outcome = coordinator.commit(record(), grant)
@@ -106,6 +109,7 @@ class SafCommitCoordinatorProductionGatewayTest {
     }
 
     private fun record() = SafCommitRecord(
+        sessionId = SessionId("session-1"),
         transferId = TransferId("transfer-prod"),
         partialId = PartialIdentity("partial-prod"),
         treeUri = treeUri.toString(),
@@ -122,7 +126,7 @@ class SafCommitCoordinatorProductionGatewayTest {
         var deleted: Boolean = false
             private set
 
-        override fun length(identity: PartialIdentity): Long = bytes.size.toLong()
+        override fun length(identity: PartialIdentity): Long? = if (deleted) null else bytes.size.toLong()
 
         override fun open(identity: PartialIdentity): SafOpen =
             SafOpen.Opened(SafReadHandle(ByteArrayInputStream(bytes)))

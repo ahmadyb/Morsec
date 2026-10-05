@@ -2,6 +2,7 @@ package app.morsecode.core.storage.transfer
 
 import app.morsecode.core.model.DuplicatePolicy
 import app.morsecode.core.model.SafGrant
+import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -583,6 +584,7 @@ class SafDestinationTest {
         temporaryUri: String? = null,
         finalUri: String? = null,
     ): SafCommitRecord = SafCommitRecord(
+        sessionId = SessionId("session-1"),
         transferId = TransferId("t-1"),
         partialId = PartialIdentity.of(TransferId("t-1"), DestinationStrategy.SAF_STAGED),
         treeUri = treeUri,

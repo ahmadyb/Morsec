@@ -2,6 +2,7 @@ package app.morsecode.core.storage.transfer
 
 import android.net.Uri
 import app.morsecode.core.model.DuplicatePolicy
+import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Accumulator
 import java.io.ByteArrayInputStream
@@ -62,10 +63,12 @@ class SafCommitReconciliationTest {
         val coordinator = SafCommitCoordinator(
             gateway = gateway,
             staging = staging,
+            journal = InMemorySafCommitJournal(),
             allowVisibleFinalCopy = allowVisibleFinalCopy,
         )
         return coordinator.commit(
             SafCommitRecord(
+                sessionId = SessionId("session-1"),
                 transferId = TransferId("t-1"),
                 partialId = PartialIdentity("p-1"),
                 treeUri = treeUri,
@@ -84,12 +87,17 @@ class SafCommitReconciliationTest {
         private val bytes: ByteArray,
         var releases: Boolean = true,
     ) : SafStaging {
-        override fun length(identity: PartialIdentity): Long? = bytes.size.toLong()
+        private var deleted: Boolean = false
+
+        override fun length(identity: PartialIdentity): Long? = if (deleted) null else bytes.size.toLong()
 
         override fun open(identity: PartialIdentity): SafOpen =
             SafOpen.Opened(SafReadHandle(ByteArrayInputStream(bytes)))
 
-        override fun delete(identity: PartialIdentity): Boolean = releases
+        override fun delete(identity: PartialIdentity): Boolean {
+            if (releases) deleted = true
+            return releases
+        }
     }
 
     // -- Rename reconciliation ----------------------------------------------
@@ -116,10 +124,27 @@ class SafCommitReconciliationTest {
     }
 
     @Test
+    fun `a created content URI is not written unless the exact row is reachable from its approved parent`() {
+        val gateway = RecordingSafGateway().apply { hideCreatedDocumentsFromChildListing = true }
+
+        val outcome = commit(gateway)
+
+        assertTrue(outcome is SafCommitOutcome.ReconciliationRequired)
+        assertFalse(outcome.isDelivered)
+        assertEquals(0, gateway.countOf("openWrite:"))
+        assertEquals(0, gateway.countOf("rename:"))
+        assertTrue(
+            "the provider-created row remains for exact reconciliation",
+            requireNotNull(gateway.lastCreatedUri) in gateway.existing,
+        )
+    }
+
+    @Test
     fun `an empty staging file verifies through EOF and commits`() {
         val gateway = RecordingSafGateway()
         val staging = ByteArrayStaging(ByteArray(0))
         val record = SafCommitRecord(
+            sessionId = SessionId("session-1"),
             transferId = TransferId("t-1"),
             partialId = PartialIdentity("p-1"),
             treeUri = treeUri,
@@ -129,7 +154,7 @@ class SafCommitReconciliationTest {
             expectedSizeBytes = 0L,
         )
 
-        val committed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Committed
+        val committed = SafCommitCoordinator(gateway, staging, InMemorySafCommitJournal()).commit(record, grant) as SafCommitOutcome.Committed
 
         assertTrue(committed.cleanupComplete)
         assertEquals(0L, committed.record.copiedBytes)
@@ -143,6 +168,7 @@ class SafCommitReconciliationTest {
             update(payload.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() })
         }.digest()
         val record = SafCommitRecord(
+            sessionId = SessionId("session-1"),
             transferId = TransferId("t-1"),
             partialId = PartialIdentity("p-1"),
             treeUri = treeUri,
@@ -152,7 +178,7 @@ class SafCommitReconciliationTest {
             expectedSizeBytes = payload.size.toLong(),
             expectedDigest = incorrectDigest,
         )
-        val coordinator = SafCommitCoordinator(gateway, ByteArrayStaging(payload))
+        val coordinator = SafCommitCoordinator(gateway, ByteArrayStaging(payload), InMemorySafCommitJournal())
 
         val failed = coordinator.commit(record, grant) as SafCommitOutcome.Failed
 
@@ -176,6 +202,7 @@ class SafCommitReconciliationTest {
             override fun delete(identity: PartialIdentity): Boolean = true
         }
         val record = SafCommitRecord(
+            sessionId = SessionId("session-1"),
             transferId = TransferId("t-1"),
             partialId = PartialIdentity("p-1"),
             treeUri = treeUri,
@@ -185,7 +212,7 @@ class SafCommitReconciliationTest {
             expectedSizeBytes = payload.size.toLong(),
         )
 
-        val failed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Failed
+        val failed = SafCommitCoordinator(gateway, staging, InMemorySafCommitJournal()).commit(record, grant) as SafCommitOutcome.Failed
 
         assertEquals(TransferStorageError.StateConflict("staging_length_disagrees"), failed.error)
         assertEquals(0, stagingOpens)
@@ -203,6 +230,7 @@ class SafCommitReconciliationTest {
             override fun delete(identity: PartialIdentity): Boolean = true
         }
         val record = SafCommitRecord(
+            sessionId = SessionId("session-1"),
             transferId = TransferId("t-1"),
             partialId = PartialIdentity("p-1"),
             treeUri = treeUri,
@@ -212,7 +240,7 @@ class SafCommitReconciliationTest {
             expectedSizeBytes = payload.size.toLong(),
         )
 
-        val failed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Failed
+        val failed = SafCommitCoordinator(gateway, staging, InMemorySafCommitJournal()).commit(record, grant) as SafCommitOutcome.Failed
 
         assertEquals("verification_source_ended_early", (failed.error as TransferStorageError.StateConflict).reason)
         assertFalse(handle.isOpen)
@@ -240,6 +268,7 @@ class SafCommitReconciliationTest {
             override fun delete(identity: PartialIdentity): Boolean = true
         }
         val record = SafCommitRecord(
+            sessionId = SessionId("session-1"),
             transferId = TransferId("t-1"),
             partialId = PartialIdentity("p-1"),
             treeUri = treeUri,
@@ -249,7 +278,7 @@ class SafCommitReconciliationTest {
             expectedSizeBytes = payload.size.toLong(),
         )
 
-        val failed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Failed
+        val failed = SafCommitCoordinator(gateway, staging, InMemorySafCommitJournal()).commit(record, grant) as SafCommitOutcome.Failed
 
         assertTrue(failed.error is TransferStorageError.Io)
         assertTrue(closed)
@@ -290,6 +319,7 @@ class SafCommitReconciliationTest {
             override fun delete(identity: PartialIdentity): Boolean = true
         }
         val record = SafCommitRecord(
+            sessionId = SessionId("session-1"),
             transferId = TransferId("t-1"),
             partialId = PartialIdentity("p-1"),
             treeUri = treeUri,
@@ -299,7 +329,7 @@ class SafCommitReconciliationTest {
             expectedSizeBytes = payload.size.toLong(),
         )
 
-        val failed = SafCommitCoordinator(gateway, staging).commit(record, grant) as SafCommitOutcome.Failed
+        val failed = SafCommitCoordinator(gateway, staging, InMemorySafCommitJournal()).commit(record, grant) as SafCommitOutcome.Failed
 
         assertEquals(TransferStorageError.IntegrityMismatch("length"), failed.error)
         assertEquals(0, gateway.countOf("findChild:"))
@@ -748,8 +778,9 @@ class SafCommitReconciliationTest {
                 isDirectory = false,
             ),
         )
-        val coordinator = SafCommitCoordinator(gateway, ByteArrayStaging(payload))
+        val coordinator = SafCommitCoordinator(gateway, ByteArrayStaging(payload), InMemorySafCommitJournal())
         val record = SafCommitRecord(
+            sessionId = SessionId("session-1"),
             transferId = TransferId("t-1"),
             partialId = PartialIdentity("p-1"),
             treeUri = treeUri,
@@ -864,8 +895,9 @@ class SafCommitReconciliationTest {
     fun `a staging cleanup retry updates the exact partial without recopying`() {
         val gateway = RecordingSafGateway()
         val staging = ByteArrayStaging(payload, releases = false)
-        val coordinator = SafCommitCoordinator(gateway, staging)
+        val coordinator = SafCommitCoordinator(gateway, staging, InMemorySafCommitJournal())
         val record = SafCommitRecord(
+            sessionId = SessionId("session-1"),
             transferId = TransferId("t-1"),
             partialId = PartialIdentity("p-1"),
             treeUri = treeUri,

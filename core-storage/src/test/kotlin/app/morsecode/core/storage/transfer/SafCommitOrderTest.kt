@@ -58,16 +58,19 @@ class SafCommitOrderTest {
         strategy: SafCommitStrategy = SafCommitStrategy.TEMP_THEN_RENAME,
         gateway: RecordingSafGateway = RecordingSafGateway(),
         allowVisibleFinalCopy: Boolean = false,
+        journal: InMemorySafCommitJournal = InMemorySafCommitJournal(),
     ): Pair<SafCommitOutcome, Order> {
         val log = Order(gateway.calls)
         val staging = RecordingStaging(bytes, gateway.calls)
         val coordinator = SafCommitCoordinator(
             gateway = gateway,
             staging = staging,
+            journal = journal,
             allowVisibleFinalCopy = allowVisibleFinalCopy,
         )
         val outcome = coordinator.commit(
             SafCommitRecord(
+                sessionId = app.morsecode.core.transfer.identity.SessionId("session-1"),
                 transferId = app.morsecode.core.transfer.identity.TransferId("t-1"),
                 partialId = PartialIdentity("p-1"),
                 treeUri = treeUri,
@@ -103,7 +106,9 @@ class SafCommitOrderTest {
         private val log: MutableList<String>,
         private val deletes: () -> Boolean = { true },
     ) : SafStaging {
-        override fun length(identity: PartialIdentity): Long? = bytes.size.toLong()
+        private var deleted: Boolean = false
+
+        override fun length(identity: PartialIdentity): Long? = if (deleted) null else bytes.size.toLong()
 
         override fun open(identity: PartialIdentity): SafOpen {
             log += "staging:open"
@@ -112,7 +117,9 @@ class SafCommitOrderTest {
 
         override fun delete(identity: PartialIdentity): Boolean {
             log += "staging:delete"
-            return deletes()
+            val removed = deletes()
+            if (removed) deleted = true
+            return removed
         }
     }
 
@@ -152,6 +159,63 @@ class SafCommitOrderTest {
         assertTrue("final read owner closes before staging release", finalReadClose < stagingDelete)
         // Staging is released only after the rename is settled.
         assertTrue(order.after("query:", "staging:delete"))
+    }
+
+    @Test
+    fun `the journal brackets create copy flush verification rename publication and staging delete`() {
+        val gateway = RecordingSafGateway()
+        val journal = InMemorySafCommitJournal(gateway.calls)
+        val (outcome, _) = record(gateway = gateway, journal = journal)
+        assertTrue(outcome is SafCommitOutcome.Committed)
+        val phases = journal.writes.map { it.phase }
+
+        fun precedes(before: SafCommitCheckpointPhase, after: SafCommitCheckpointPhase) {
+            val beforeIndex = phases.indexOf(before)
+            val afterIndex = phases.indexOf(after)
+            assertTrue("${before.id} must be persisted before ${after.id}: $phases", beforeIndex >= 0 && afterIndex > beforeIndex)
+        }
+
+        precedes(SafCommitCheckpointPhase.TEMPORARY_CREATE_INTENT, SafCommitCheckpointPhase.TEMPORARY_CREATED)
+        precedes(SafCommitCheckpointPhase.TEMPORARY_CREATED, SafCommitCheckpointPhase.COPY_STARTED)
+        precedes(SafCommitCheckpointPhase.COPY_STARTED, SafCommitCheckpointPhase.COPY_COMPLETED)
+        precedes(SafCommitCheckpointPhase.COPY_COMPLETED, SafCommitCheckpointPhase.FLUSH_INTENT)
+        precedes(SafCommitCheckpointPhase.FLUSH_INTENT, SafCommitCheckpointPhase.FLUSH_COMPLETED)
+        precedes(SafCommitCheckpointPhase.FLUSH_COMPLETED, SafCommitCheckpointPhase.PROVIDER_VERIFICATION_INTENT)
+        precedes(SafCommitCheckpointPhase.PROVIDER_VERIFICATION_INTENT, SafCommitCheckpointPhase.PROVIDER_VERIFIED)
+        precedes(SafCommitCheckpointPhase.PROVIDER_VERIFIED, SafCommitCheckpointPhase.FINAL_RENAME_INTENT)
+        precedes(SafCommitCheckpointPhase.FINAL_RENAME_INTENT, SafCommitCheckpointPhase.FINAL_RENAMED)
+        precedes(SafCommitCheckpointPhase.FINAL_RENAMED, SafCommitCheckpointPhase.RENAME_RECONCILIATION_INTENT)
+        precedes(SafCommitCheckpointPhase.FINAL_VERIFIED, SafCommitCheckpointPhase.PUBLISHED)
+        precedes(SafCommitCheckpointPhase.STAGING_DELETE_INTENT, SafCommitCheckpointPhase.STAGING_DELETE_OBSERVED)
+        precedes(SafCommitCheckpointPhase.STAGING_DELETE_OBSERVED, SafCommitCheckpointPhase.COMMITTED)
+
+        val events = gateway.calls
+        val intent = events.indexOf("journal-save:${SafCommitCheckpointPhase.FINAL_RENAME_INTENT.id}")
+        val mutation = events.indexOfFirstFrom(intent + 1) { it.startsWith("rename:") }
+        val providerResult = events.indexOf("rename-result:returned")
+        val resultSave = events.indexOf("journal-save:${SafCommitCheckpointPhase.FINAL_RENAMED.id}")
+        val reconciliationIntent = events.indexOf("journal-save:${SafCommitCheckpointPhase.RENAME_RECONCILIATION_INTENT.id}")
+        val observation = events.indexOfFirstFrom(mutation + 1) { it.startsWith("query:") }
+        val settledSave = events.lastIndexOf("journal-save:${SafCommitCheckpointPhase.FINAL_RENAMED.id}")
+        assertTrue("intent save precedes rename: $events", intent >= 0 && mutation > intent)
+        assertTrue(
+            "provider result is recorded before its result checkpoint: $events",
+            providerResult > mutation && resultSave > providerResult,
+        )
+        assertTrue(
+            "reconciliation intent precedes the provider observation: $events",
+            reconciliationIntent > resultSave && observation > reconciliationIntent,
+        )
+        assertTrue(
+            "provider query reconciliation precedes the settled checkpoint: $events",
+            observation > mutation && settledSave > observation,
+        )
+    }
+
+    private fun List<String>.indexOfFirstFrom(start: Int, predicate: (String) -> Boolean): Int {
+        if (start < 0) return -1
+        for (index in start until size) if (predicate(this[index])) return index
+        return -1
     }
 
     @Test
@@ -199,7 +263,7 @@ class SafCommitOrderTest {
     fun `a rename the provider refuses stops the commit before staging is released`() {
         val gateway = RecordingSafGateway(renameFailure = TransferStorageError.Io("rename"))
         val (outcome, order) = record(gateway = gateway)
-        assertTrue(outcome is SafCommitOutcome.Failed)
+        assertTrue(outcome is SafCommitOutcome.ReconciliationRequired)
         assertTrue("verification still happens, before the rename", order.contains("openRead:"))
         assertTrue("staging must survive a failed rename", !order.contains("staging:delete"))
     }
@@ -208,12 +272,9 @@ class SafCommitOrderTest {
     fun `a failed rename leaves the state on failure, never on published`() {
         val gateway = RecordingSafGateway(renameFailure = TransferStorageError.Io("rename"))
         val (outcome, _) = record(gateway = gateway)
-        val failed = outcome as SafCommitOutcome.Failed
-        assertTrue(
-            "a failed rename must not advance toward committed",
-            failed.record.state == SafCommitState.COMMIT_FAILED ||
-                failed.record.state == SafCommitState.RECONCILIATION_REQUIRED,
-        )
+        val unresolved = outcome as SafCommitOutcome.ReconciliationRequired
+        assertEquals(SafCommitState.RECONCILIATION_REQUIRED, unresolved.record.state)
+        assertTrue("the mutation result remains unresolved", unresolved.checkpoint?.unresolvedRenamePhase == SafRenamePhase.FINAL_PROMOTION)
     }
 
     @Test
@@ -221,9 +282,10 @@ class SafCommitOrderTest {
         // The staged length is the authority; a short copy must not be renamed.
         val gateway = RecordingSafGateway()
         val staging = ShortStaging(bytes)
-        val coordinator = SafCommitCoordinator(gateway = gateway, staging = staging)
+        val coordinator = SafCommitCoordinator(gateway = gateway, staging = staging, journal = InMemorySafCommitJournal())
         val outcome = coordinator.commit(
             SafCommitRecord(
+                sessionId = app.morsecode.core.transfer.identity.SessionId("session-1"),
                 transferId = app.morsecode.core.transfer.identity.TransferId("t-1"),
                 partialId = PartialIdentity("p-1"),
                 treeUri = treeUri,
@@ -236,6 +298,52 @@ class SafCommitOrderTest {
         )
         assertTrue(outcome is SafCommitOutcome.Failed)
         assertTrue(!gateway.calls.any { it.startsWith("rename:") })
+    }
+
+    @Test
+    fun `the bounded SAF copy counts virtual files above four gibibytes with Long values`() {
+        val total = 5_368_709_137L
+        var remaining = total
+        val source = object : java.io.InputStream() {
+            override fun read(): Int {
+                if (remaining == 0L) return -1
+                remaining--
+                return 0
+            }
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                if (remaining == 0L) return -1
+                val count = minOf(remaining, length.toLong()).toInt()
+                remaining -= count.toLong()
+                return count
+            }
+        }
+        var written = 0L
+        val sink = object : java.io.OutputStream() {
+            override fun write(value: Int) {
+                written++
+            }
+
+            override fun write(buffer: ByteArray, offset: Int, length: Int) {
+                written += length.toLong()
+            }
+        }
+        val reader = SafReadHandle(source)
+        val writer = SafWriteHandle(null, sink)
+        val copied = try {
+            SafCopyStreamer.copy(
+                read = reader,
+                write = writer,
+                totalBytes = total,
+                buffer = ByteArray(SafCopyStreamer.COPY_BUFFER_BYTES),
+            )
+        } finally {
+            writer.close()
+            reader.close()
+        }
+
+        assertEquals(SafCopyOutcome.Copied(total), copied)
+        assertEquals(total, written)
     }
 
     @Test

@@ -100,6 +100,9 @@ internal class RecordingSafGateway(
     /** Every operation, in the order it happened. */
     val calls: MutableList<String> = mutableListOf()
 
+    /** Count of every fake provider/gateway call, including grant rechecks. */
+    val providerCallCount: Int get() = calls.size
+
     /** Bytes written per uri, so a test can say what landed where. */
     val written: MutableMap<String, ByteArray> = mutableMapOf()
 
@@ -115,6 +118,12 @@ internal class RecordingSafGateway(
 
     /** Documents that exist, by uri. */
     val existing: MutableSet<String> = contents.keys.toMutableSet()
+
+    /** Documents deliberately omitted from name lookup, to model a moved/stale child. */
+    val hiddenFromChildListing: MutableSet<String> = mutableSetOf()
+
+    /** Makes each new document unreachable from its parent listing for containment tests. */
+    var hideCreatedDocumentsFromChildListing: Boolean = false
 
     /** Display name by uri. Defaults to the last path segment. */
     private val names: MutableMap<String, String> = mutableMapOf()
@@ -189,8 +198,9 @@ internal class RecordingSafGateway(
         record("findChild:$parentUri:$displayName")
         return guarded(OP_FIND_CHILD, { SafLookup.Failed(it) }) {
             queryFailure?.let { return SafLookup.Failed(it) }
-            val hit = existing.firstOrNull { nameOf(it) == displayName }
-                ?: return SafLookup.Absent
+            val hit = existing.firstOrNull {
+                it !in hiddenFromChildListing && nameOf(it) == displayName
+            } ?: return SafLookup.Absent
             SafLookup.Found(info(hit))
         }
     }
@@ -207,6 +217,7 @@ internal class RecordingSafGateway(
             val uri = "$parentUri/document/$id"
             existing += uri
             names[uri] = displayName
+            if (hideCreatedDocumentsFromChildListing) hiddenFromChildListing += uri
             contents[uri] = ByteArray(0)
             written[uri] = ByteArray(0)
             lastCreatedUri = uri
@@ -238,6 +249,7 @@ internal class RecordingSafGateway(
                 if (!renameDropsReturned) existing += newUri
                 if (!renameKeepsOriginal) existing -= documentUri
             }
+            record(if (newUri == null) "rename-result:null" else "rename-result:returned")
             SafRename.Renamed(newUri)
         }
     }

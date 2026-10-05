@@ -270,6 +270,15 @@ The coordinator treats the sequence as an ordered safety boundary:
 | Rename | The provider-returned identity and the before identity are queried; only a unique, verified identity is authoritative. A null return, duplicate surviving identities, query failure or mismatch is reconciliation, not success. |
 | Deliver/cleanup | Final identity is recorded before cleanup. Staging, provider-temporary and backup cleanup are independent pending items and each provider deletion uses the exact stored URI/id followed by an absence query. |
 
+The version-1 checkpoint is a pure replacement snapshot and includes a bounded rename history
+(maximum two entries: one backup move followed by one final promotion). Each entry stores
+the before and optional returned URI/id identities, the grant/tree/authority/root/parent and session/transfer/commit scope,
+a typed rename phase, and its zero-based sequence. Recovery rejects mismatched scope, malformed
+URI/id pairs, duplicate or out-of-order phases, repeated entries, cycles, and unsupported
+checkpoint versions before making any provider call. It does not compact the history: reaching
+the bound or attempting a phase twice stops in reconciliation. A failed or unresolved rename
+persists its phase so recovery observes exact provider candidates but never blindly repeats it.
+
 Every SAF provider filename is limited to `ProtocolLimits.MAX_PATH_SEGMENT_BYTES`
 (127) UTF-8 bytes by `SafFilenamePolicy`. It rejects malformed UTF-16, NUL/control
 characters, path separators and traversal markers. It preserves the input's exact Unicode

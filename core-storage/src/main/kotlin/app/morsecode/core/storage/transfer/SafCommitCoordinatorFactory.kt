@@ -42,12 +42,14 @@ public object SafCommitCoordinatorFactory {
     public fun create(
         resolver: ContentResolver,
         staging: SafStaging,
+        journal: SafCommitJournal,
         allowVisibleFinalCopy: Boolean = false,
         copyBufferBytes: Int = SafCopyStreamer.COPY_BUFFER_BYTES,
         isCancelled: () -> Boolean = { false },
     ): SafCommitCoordinator = SafCommitCoordinator(
         gateway = DocumentsContractSafGateway(resolver),
         staging = staging,
+        journal = journal,
         allowVisibleFinalCopy = allowVisibleFinalCopy,
         copyBufferBytes = copyBufferBytes,
         isCancelled = isCancelled,

@@ -439,6 +439,16 @@ unresolved attempt retains both the pre-rename and returned identities, along wi
 classification when provider observations completed. If a query failed, the evidence is
 marked unclassified rather than guessed.
 
+Checkpoint version 1 limits rename history to two entries: one optional backup rename,
+then one final promotion. There is no compaction; a duplicate phase, invalid sequence,
+cycle, scope mismatch, malformed URI/id pair, or history over the bound is rejected before
+provider access and the coordinator stops for reconciliation. Each durable entry carries
+the grant, tree, root, parent, session, transfer and commit scope plus its typed rename
+phase and sequence. The identity pair is not ancestry proof: any identity later acted on is
+re-queried and must be listed as a direct child of the approved parent. If the provider call succeeds but its result checkpoint cannot be persisted, recovery
+retains the unresolved rename phase and does not blindly repeat that mutation. A failed
+intent save occurs before the provider call.
+
 ### Rename reconciliation table
 
 | Reconciliation result | Evidence | Coordinator decision |

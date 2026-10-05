@@ -38,6 +38,7 @@ class SafCommitCoordinatorFactoryTest {
         SafCommitCoordinatorFactory.create(
             resolver = resolver(),
             staging = EmptyStaging,
+            journal = InMemorySafCommitJournal(),
         )
 
     @Test
@@ -77,7 +78,7 @@ class SafCommitCoordinatorFactoryTest {
         // The point of taking the resolver explicitly: the coordinator holds no
         // Context, so it cannot reach a provider the caller did not grant.
         val supplied = resolver()
-        val built = SafCommitCoordinatorFactory.create(supplied, EmptyStaging)
+        val built = SafCommitCoordinatorFactory.create(supplied, EmptyStaging, InMemorySafCommitJournal())
         val gateway = built.gateway as DocumentsContractSafGateway
         assertEquals(SafContainmentTier.forSdk(android.os.Build.VERSION.SDK_INT), gateway.containmentTier)
     }
