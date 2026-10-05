@@ -263,6 +263,9 @@ public sealed class SafHandle : Closeable {
 public class SafWriteHandle internal constructor(
     private val descriptor: ParcelFileDescriptor?,
     private val stream: OutputStream,
+    private val syncDescriptor: (ParcelFileDescriptor?) -> Unit = { fileDescriptor ->
+        fileDescriptor?.fileDescriptor?.sync()
+    },
 ) : SafHandle() {
 
     public fun write(buffer: ByteArray, offset: Int, length: Int) {
@@ -282,7 +285,7 @@ public class SafWriteHandle internal constructor(
         // java.io.FileDescriptor underneath it. This is still only an attempt:
         // a provider is free to hand back a socket, a pipe or an in-memory
         // handle, none of which have a durable medium to force to.
-        descriptor?.fileDescriptor?.sync()
+        syncDescriptor(descriptor)
         FlushDurability.FlushAttemptedGuaranteeUnknown
     } catch (e: Exception) {
         FlushDurability.FlushFailed(StorageFailureClassifier.classifyOrProviderFailure(e, "flush"))
@@ -678,7 +681,7 @@ public sealed interface SafCommitOutcome {
  * leaves the staged bytes in place, so a retry has something to retry with and
  * the user still has the data.
  */
-public class SafCommitCoordinator(
+public class SafCommitCoordinator private constructor(
     /**
      * The gateway this coordinator acts through.
      *
@@ -697,10 +700,47 @@ public class SafCommitCoordinator(
      * False means a provider without rename support gets a typed refusal rather
      * than a silent downgrade to writing under the user's chosen name.
      */
-    private val allowVisibleFinalCopy: Boolean = false,
-    private val copyBufferBytes: Int = SafCopyStreamer.COPY_BUFFER_BYTES,
-    private val isCancelled: () -> Boolean = { false },
+    private val allowVisibleFinalCopy: Boolean,
+    private val copyBufferBytes: Int,
+    private val isCancelled: () -> Boolean,
+    private val verificationDigesterFactory: () -> ChunkDigester,
 ) {
+    /** Production constructor always uses incremental SHA-256. */
+    public constructor(
+        gateway: SafDocumentGateway,
+        staging: SafStaging,
+        journal: SafCommitJournal,
+        allowVisibleFinalCopy: Boolean = false,
+        copyBufferBytes: Int = SafCopyStreamer.COPY_BUFFER_BYTES,
+        isCancelled: () -> Boolean = { false },
+    ) : this(
+        gateway,
+        staging,
+        journal,
+        allowVisibleFinalCopy,
+        copyBufferBytes,
+        isCancelled,
+        { Sha256Digester() },
+    )
+
+    /** Test seam for virtual large-file accounting; inaccessible outside this module. */
+    internal constructor(
+        gateway: SafDocumentGateway,
+        staging: SafStaging,
+        journal: SafCommitJournal,
+        verificationDigesterFactory: () -> ChunkDigester,
+        allowVisibleFinalCopy: Boolean = false,
+        copyBufferBytes: Int = SafCopyStreamer.COPY_BUFFER_BYTES,
+        isCancelled: () -> Boolean = { false },
+    ) : this(
+        gateway,
+        staging,
+        journal,
+        allowVisibleFinalCopy,
+        copyBufferBytes,
+        isCancelled,
+        verificationDigesterFactory,
+    )
 
     /**
      * Commits [record] after hashing the staged bytes and checking their length.
@@ -737,7 +777,7 @@ public class SafCommitCoordinator(
                 error = TransferStorageError.ContainmentUnknown("rename_history_malformed"),
             )
         }
-        val scopedRecord = record.copy(grantId = grant.grantId)
+        var scopedRecord = record.copy(grantId = grant.grantId, verifiedDigest = null)
         val previousCheckpoint = try {
             journal.load(scopedRecord.partialId)
         } catch (_: Exception) {
@@ -764,44 +804,16 @@ public class SafCommitCoordinator(
             if (previousCheckpoint.phase == SafCommitCheckpointPhase.COMMITTED &&
                 previousCheckpoint.finalIdentity != null && previousCheckpoint.pendingCleanup.isEmpty()
             ) {
+                val committedRecord = recordFromCheckpoint(previousCheckpoint)
                 val finalIdentity = previousCheckpoint.finalIdentity
-                authorizationError(
-                    scopedRecord,
-                    grant,
-                    SafContainmentOperation.RECONCILE,
-                    finalIdentity.documentUri,
-                    finalIdentity.documentId,
-                )?.let { error ->
-                    return reconcileKnown(scopedRecord, error, listOf(finalIdentity.documentUri))
+                cleanupFinalIdentityError(committedRecord, grant, finalIdentity)?.let { error ->
+                    return reconcileAndSave(committedRecord, grant, error, listOf(finalIdentity.documentUri))
                 }
-                return when (val lookup = gateway.query(finalIdentity.documentUri)) {
-                    is SafLookup.Found -> if (lookup.document.documentId == finalIdentity.documentId) {
-                        SafCommitOutcome.Committed(
-                            record = scopedRecord.copy(
-                                state = SafCommitState.COMMITTED,
-                                finalUri = finalIdentity.documentUri,
-                                finalIdentity = finalIdentity,
-                                stagingReleased = true,
-                            ),
-                            finalUri = finalIdentity.documentUri,
-                            checkpoint = previousCheckpoint,
-                        )
-                    } else {
-                        reconcileKnown(
-                            scopedRecord,
-                            TransferStorageError.ContainmentUnknown("committed_final_identity_changed"),
-                            listOf(finalIdentity.documentUri),
-                        )
-                    }
-
-                    SafLookup.Absent -> reconcileKnown(
-                        scopedRecord,
-                        TransferStorageError.NotFound("committed_final"),
-                        listOf(finalIdentity.documentUri),
-                    )
-
-                    is SafLookup.Failed -> reconcileKnown(scopedRecord, lookup.error, listOf(finalIdentity.documentUri))
-                }
+                SafCommitOutcome.Committed(
+                    record = committedRecord.copy(state = SafCommitState.COMMITTED, stagingReleased = true),
+                    finalUri = finalIdentity.documentUri,
+                    checkpoint = previousCheckpoint,
+                )
             }
             if (previousCheckpoint.phase != SafCommitCheckpointPhase.READY ||
                 previousCheckpoint.temporaryIdentity != null ||
@@ -832,6 +844,7 @@ public class SafCommitCoordinator(
                 checkpoint = initialCheckpoint,
             )
         }
+        if (isCancelled()) return cancelBeforePublication(scopedRecord, grant)
         authorizationError(scopedRecord, grant, SafContainmentOperation.RECONCILE)?.let {
             return route(scopedRecord, it, created = null)
         }
@@ -843,6 +856,7 @@ public class SafCommitCoordinator(
                 afterMutation = false,
             )
         }
+        if (isCancelled()) return cancelBeforePublication(scopedRecord, grant)
 
         val stagedLength = staging.length(scopedRecord.partialId)
             ?: return fail(scopedRecord, TransferStorageError.NotFound("staged_copy"))
@@ -857,7 +871,10 @@ public class SafCommitCoordinator(
         }
 
         val stagedVerification = verifyStagedBytes(scopedRecord)
-        stagedVerification.closeError?.let { return route(scopedRecord, it, created = null) }
+        stagedVerification.closeError?.let {
+            return if (it == TransferStorageError.Cancelled) cancelBeforePublication(scopedRecord, grant)
+            else route(scopedRecord, it, created = null)
+        }
         val stagedDigest = when (val result = stagedVerification.outcome) {
             is VerifyResult.Matched -> result.digest
             is VerifyResult.VerifiedWithoutExpected -> result.digest
@@ -865,8 +882,13 @@ public class SafCommitCoordinator(
                 scopedRecord,
                 TransferStorageError.IntegrityMismatch("staging_digest"),
             )
-            is VerifyResult.Failed -> return route(scopedRecord, result.error, created = null)
+            is VerifyResult.Failed -> return if (result.error == TransferStorageError.Cancelled) {
+                cancelBeforePublication(scopedRecord, grant)
+            } else {
+                route(scopedRecord, result.error, created = null)
+            }
         }
+        scopedRecord = scopedRecord.copy(verifiedDigest = stagedDigest)
         if (!saveCheckpoint(scopedRecord, grant, SafCommitCheckpointPhase.STAGING_VERIFIED)) {
             return journalFailure(
                 scopedRecord,
@@ -883,6 +905,7 @@ public class SafCommitCoordinator(
                 afterMutation = false,
             )
         }
+        if (isCancelled()) return cancelBeforePublication(scopedRecord, grant)
 
         authorizationError(scopedRecord, grant, SafContainmentOperation.RECONCILE)?.let {
             return route(scopedRecord, it, created = null)
@@ -1039,6 +1062,28 @@ public class SafCommitCoordinator(
                 record.knownDocumentIdentities.map { it.documentUri },
             )
         }
+        when (latest.phase) {
+            SafCommitCheckpointPhase.CANCELLED -> return SafCommitRecoveryOutcome.Cancelled(latest)
+            SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_INTENT ->
+                return retryCancelledTemporaryCleanup(latest, grant)
+            SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED ->
+                return SafCommitRecoveryOutcome.Cancelled(latest)
+            else -> Unit
+        }
+        if (latest.phase == SafCommitCheckpointPhase.RECONCILIATION_REQUIRED &&
+            latest.lastFailure?.categoryId == TransferStorageError.Cancelled.category.id &&
+            !checkpointAlreadyPublished(latest)
+        ) {
+            return SafCommitRecoveryOutcome.ReconciliationRequired(
+                latest,
+                TransferStorageError.Cancelled,
+                record.knownDocumentIdentities.map { it.documentUri },
+            )
+        }
+        if (isCancelled() && !checkpointAlreadyPublished(latest)) {
+            val cancelled = cancelRecoveryAtBoundary(record, latest, grant)
+            return toRecoveryOutcome(cancelled, latest)
+        }
         authorizationError(record, grant, SafContainmentOperation.RECONCILE)?.let { error ->
             return recoveryReconciliation(
                 record,
@@ -1095,8 +1140,16 @@ public class SafCommitCoordinator(
             SafCommitCheckpointPhase.BACKUP_RENAMED,
             -> resumeBackupRename(record, latest, grant)
 
+            SafCommitCheckpointPhase.CANCELLED,
+            SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_INTENT,
+            SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED,
+            -> SafCommitRecoveryOutcome.Cancelled(latest)
+
             SafCommitCheckpointPhase.COMMITTED -> verifyCommittedCheckpoint(record, latest, grant)
             SafCommitCheckpointPhase.RECONCILIATION_REQUIRED -> when {
+                record.finalIdentity != null &&
+                    record.strategy == SafCommitStrategy.VISIBLE_FINAL_COPY &&
+                    !checkpointAlreadyPublished(latest) -> resumeVisibleCopy(record, latest, grant)
                 record.finalIdentity != null -> resumePublished(record, latest, grant)
                 latest.unresolvedRenamePhase == SafRenamePhase.FINAL_PROMOTION ->
                     resumeFinalRename(record, latest, grant)
@@ -1149,6 +1202,9 @@ public class SafCommitCoordinator(
         checkpoint: SafCommitCheckpoint,
         grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
+        if (isCancelled()) {
+            return toRecoveryOutcome(cancelRecoveryAtBoundary(record, checkpoint, grant), checkpoint)
+        }
         if (record.strategy != SafCommitStrategy.TEMP_THEN_RENAME) {
             return resumeVisibleCopy(record, checkpoint, grant)
         }
@@ -1175,7 +1231,24 @@ public class SafCommitCoordinator(
                     lookup.document
                 }
 
-                SafLookup.Absent -> return resumeFromReady(record, grant)
+                SafLookup.Absent -> {
+                    if (checkpoint.phase == SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_INTENT &&
+                        !saveCheckpoint(
+                            record,
+                            grant,
+                            SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_OBSERVED,
+                        )
+                    ) {
+                        return recoveryAtPhase(
+                            record,
+                            grant,
+                            SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_INTENT,
+                            TransferStorageError.StateConflict("journal_temporary_delete_result_failed"),
+                            listOf(persistedIdentity.documentUri),
+                        )
+                    }
+                    return resumeFromReady(record, grant)
+                }
                 is SafLookup.Failed -> return recoveryReconciliation(record, grant, lookup.error, listOf(persistedIdentity.documentUri))
             }
         } else {
@@ -1207,6 +1280,12 @@ public class SafCommitCoordinator(
         }
 
         val identity = SafStoredDocumentIdentity(temporary.documentUri, temporary.documentId)
+        exactChildError(record, grant, identity, temporaryName, "temporary")?.let {
+            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+        }
+        if (isCancelled()) {
+            return toRecoveryOutcome(cancelRecoveryAtBoundary(record, checkpoint, grant), checkpoint)
+        }
         val digest = recoveryStagedDigest(record)
         if (digest is RecoveryDigest.Failed) {
             return recoveryReconciliation(record, grant, digest.error, listOf(temporary.documentUri))
@@ -1220,10 +1299,20 @@ public class SafCommitCoordinator(
             stagedDigest,
         )
         verified.closeError?.let {
-            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+            return if (it == TransferStorageError.Cancelled) {
+                toRecoveryOutcome(cancelBeforePublication(record, grant), checkpoint)
+            } else {
+                recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+            }
         }
         when (val outcome = verified.outcome) {
-            is VerifyResult.Failed -> return recoveryReconciliation(record, grant, outcome.error, listOf(identity.documentUri))
+            is VerifyResult.Failed -> return when {
+                outcome.error == TransferStorageError.Cancelled ->
+                    toRecoveryOutcome(cancelBeforePublication(record, grant), checkpoint)
+                outcome.error is TransferStorageError.IntegrityMismatch && persistedIdentity != null ->
+                    discardInterruptedTemporary(record, identity, grant)
+                else -> recoveryReconciliation(record, grant, outcome.error, listOf(identity.documentUri))
+            }
             is VerifyResult.Mismatched -> {
                 if (persistedIdentity == null) {
                     return recoveryReconciliation(
@@ -1240,11 +1329,16 @@ public class SafCommitCoordinator(
             is VerifyResult.Matched,
             -> Unit
         }
+        exactChildError(record, grant, identity, temporaryName, "temporary")?.let {
+            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+        }
+        if (isCancelled()) return toRecoveryOutcome(cancelBeforePublication(record, grant), checkpoint)
         val recovered = record.copy(
             state = SafCommitState.PROVIDER_VERIFIED,
             temporaryUri = identity.documentUri,
             temporaryIdentity = identity,
             copiedBytes = record.expectedSizeBytes,
+            verifiedDigest = stagedDigest,
         )
         if (!saveCheckpoint(recovered, grant, SafCommitCheckpointPhase.PROVIDER_VERIFIED)) {
             return recoveryReconciliation(
@@ -1277,6 +1371,9 @@ public class SafCommitCoordinator(
         checkpoint: SafCommitCheckpoint,
         grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
+        if (isCancelled()) {
+            return toRecoveryOutcome(cancelRecoveryAtBoundary(record, checkpoint, grant), checkpoint)
+        }
         if (checkpoint.phase == SafCommitCheckpointPhase.VISIBLE_CREATE_INTENT && record.finalIdentity == null) {
             return recoveryReconciliation(
                 record,
@@ -1311,43 +1408,9 @@ public class SafCommitCoordinator(
                 )
             }
 
-            SafLookup.Absent -> return resumeFromReady(record, grant)
-            is SafLookup.Failed -> return recoveryReconciliation(record, grant, lookup.error, listOf(identity.documentUri))
-        }
-        val digest = recoveryStagedDigest(record)
-        if (digest is RecoveryDigest.Failed) {
-            return recoveryReconciliation(record, grant, digest.error, listOf(identity.documentUri))
-        }
-        val stagedDigest = (digest as RecoveryDigest.Ready).digest
-        val verification = verifyProviderCopy(identity.documentUri, identity.documentId, record, grant, stagedDigest)
-        verification.closeError?.let {
-            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
-        }
-        when (val outcome = verification.outcome) {
-            is VerifyResult.Failed -> return recoveryReconciliation(record, grant, outcome.error, listOf(identity.documentUri))
-            is VerifyResult.Mismatched -> {
-                if (!saveCheckpoint(record, grant, SafCommitCheckpointPhase.VISIBLE_DELETE_INTENT)) {
-                    return recoveryReconciliation(
-                        record,
-                        grant,
-                        TransferStorageError.StateConflict("journal_visible_delete_intent_failed"),
-                        listOf(identity.documentUri),
-                    )
-                }
-                val deletion = deleteExactIdentity(record, identity, grant)
-                val failure = when (deletion) {
-                    is SafDeletion.PermissionRevoked -> deletion.error
-                    is SafDeletion.DeleteRequestFailed -> deletion.error
-                    is SafDeletion.IdentityMismatch -> TransferStorageError.ContainmentUnknown("visible_identity_changed")
-                    is SafDeletion.QueryUnknown -> TransferStorageError.StateConflict("visible_delete_unsettled")
-                    else -> null
-                }
-                if (!saveCheckpoint(
-                        record,
-                        grant,
-                        SafCommitCheckpointPhase.VISIBLE_DELETE_OBSERVED,
-                        failure = failure,
-                    )
+            SafLookup.Absent -> {
+                if (checkpoint.phase == SafCommitCheckpointPhase.VISIBLE_DELETE_INTENT &&
+                    !saveCheckpoint(record, grant, SafCommitCheckpointPhase.VISIBLE_DELETE_OBSERVED)
                 ) {
                     return recoveryAtPhase(
                         record,
@@ -1357,25 +1420,53 @@ public class SafCommitCoordinator(
                         listOf(identity.documentUri),
                     )
                 }
-                if (deletion !is SafDeletion.ConfirmedAbsent) {
-                    return recoveryAtPhase(
-                        record,
-                        grant,
-                        SafCommitCheckpointPhase.VISIBLE_DELETE_OBSERVED,
-                        failure ?: TransferStorageError.StateConflict("visible_partial_cleanup_unsettled"),
-                        listOf(identity.documentUri),
-                    )
-                }
                 return resumeFromReady(record, grant)
             }
+            is SafLookup.Failed -> return recoveryReconciliation(record, grant, lookup.error, listOf(identity.documentUri))
+        }
+        exactChildError(record, grant, identity, record.expectedFinalName, "visible_final")?.let {
+            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+        }
+        if (isCancelled()) {
+            return toRecoveryOutcome(cancelBeforePublication(record, grant), checkpoint)
+        }
+        val digest = recoveryStagedDigest(record)
+        if (digest is RecoveryDigest.Failed) {
+            return recoveryReconciliation(record, grant, digest.error, listOf(identity.documentUri))
+        }
+        val stagedDigest = (digest as RecoveryDigest.Ready).digest
+        val verification = verifyProviderCopy(identity.documentUri, identity.documentId, record, grant, stagedDigest)
+        verification.closeError?.let {
+            return if (it == TransferStorageError.Cancelled) {
+                toRecoveryOutcome(cancelBeforePublication(record, grant), checkpoint)
+            } else {
+                recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+            }
+        }
+        when (val outcome = verification.outcome) {
+            is VerifyResult.Failed -> return when {
+                outcome.error == TransferStorageError.Cancelled ->
+                    toRecoveryOutcome(cancelBeforePublication(record, grant), checkpoint)
+                outcome.error is TransferStorageError.IntegrityMismatch ->
+                    discardInterruptedVisibleFinal(record, identity, grant)
+                else -> recoveryReconciliation(record, grant, outcome.error, listOf(identity.documentUri))
+            }
+            is VerifyResult.Mismatched -> return discardInterruptedVisibleFinal(record, identity, grant)
+
 
             is VerifyResult.VerifiedWithoutExpected,
             is VerifyResult.Matched,
             -> Unit
         }
+        if (isCancelled()) return toRecoveryOutcome(cancelBeforePublication(record, grant), checkpoint)
+        exactChildError(record, grant, identity, record.expectedFinalName, "visible_final")?.let {
+            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+        }
+        if (isCancelled()) return toRecoveryOutcome(cancelBeforePublication(record, grant), checkpoint)
         val verified = record.copy(
             state = SafCommitState.PROVIDER_VERIFIED,
             copiedBytes = record.expectedSizeBytes,
+            verifiedDigest = stagedDigest,
         )
         if (!saveCheckpoint(verified, grant, SafCommitCheckpointPhase.PROVIDER_VERIFIED)) {
             return recoveryReconciliation(
@@ -1384,6 +1475,9 @@ public class SafCommitCoordinator(
                 TransferStorageError.StateConflict("journal_provider_verified_failed"),
                 listOf(identity.documentUri),
             )
+        }
+        if (isCancelled()) {
+            return toRecoveryOutcome(cancelBeforePublication(verified, grant), checkpoint)
         }
         val published = verified.copy(
             state = SafCommitState.PUBLISHED_OR_VISIBLE,
@@ -1402,12 +1496,104 @@ public class SafCommitCoordinator(
         }
     }
 
+    private fun discardInterruptedVisibleFinal(
+        record: SafCommitRecord,
+        identity: SafStoredDocumentIdentity,
+        grant: SafTreeGrant,
+    ): SafCommitRecoveryOutcome {
+        exactChildError(record, grant, identity, record.expectedFinalName, "visible_interrupted")?.let {
+            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+        }
+        if (isCancelled()) {
+            return recoveryReconciliation(
+                record,
+                grant,
+                TransferStorageError.Cancelled,
+                listOf(identity.documentUri),
+            )
+        }
+        if (!saveCheckpoint(record, grant, SafCommitCheckpointPhase.VISIBLE_DELETE_INTENT)) {
+            return recoveryReconciliation(
+                record,
+                grant,
+                TransferStorageError.StateConflict("journal_visible_delete_intent_failed"),
+                listOf(identity.documentUri),
+            )
+        }
+        if (isCancelled()) {
+            return recoveryReconciliation(record, grant, TransferStorageError.Cancelled, listOf(identity.documentUri))
+        }
+        exactChildError(record, grant, identity, record.expectedFinalName, "visible_interrupted")?.let {
+            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+        }
+        if (isCancelled()) {
+            return recoveryReconciliation(record, grant, TransferStorageError.Cancelled, listOf(identity.documentUri))
+        }
+        val deletion = deleteExactIdentity(record, identity, grant, record.expectedFinalName)
+        if (isCancelled()) {
+            return recoveryReconciliation(
+                record,
+                grant,
+                TransferStorageError.Cancelled,
+                listOf(identity.documentUri),
+            )
+        }
+        val failure = when (deletion) {
+            is SafDeletion.PermissionRevoked -> deletion.error
+            is SafDeletion.DeleteRequestFailed -> deletion.error
+            is SafDeletion.IdentityMismatch -> TransferStorageError.ContainmentUnknown("visible_identity_changed")
+            is SafDeletion.QueryUnknown -> TransferStorageError.StateConflict("visible_delete_unsettled")
+            else -> null
+        }
+        if (!saveCheckpoint(
+                record,
+                grant,
+                SafCommitCheckpointPhase.VISIBLE_DELETE_OBSERVED,
+                failure = failure,
+            )
+        ) {
+            return recoveryAtPhase(
+                record,
+                grant,
+                SafCommitCheckpointPhase.VISIBLE_DELETE_INTENT,
+                TransferStorageError.StateConflict("journal_visible_delete_result_failed"),
+                listOf(identity.documentUri),
+            )
+        }
+        if (deletion !is SafDeletion.ConfirmedAbsent) {
+            return recoveryAtPhase(
+                record,
+                grant,
+                SafCommitCheckpointPhase.VISIBLE_DELETE_OBSERVED,
+                failure ?: TransferStorageError.StateConflict("visible_partial_cleanup_unsettled"),
+                listOf(identity.documentUri),
+            )
+        }
+        return resumeFromReady(record, grant)
+    }
+
     private fun resumeFinalRename(
         record: SafCommitRecord,
         checkpoint: SafCommitCheckpoint,
         grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
+        if (isCancelled()) {
+            return toRecoveryOutcome(cancelRecoveryAtBoundary(record, checkpoint, grant), checkpoint)
+        }
         val candidate = findRecoveryChild(record, grant, record.expectedFinalName)
+        if (isCancelled()) {
+            return toRecoveryOutcome(
+                cancelAfterRename(
+                    record,
+                    grant,
+                    record.knownDocumentIdentities.map { it.documentUri } + listOfNotNull(checkpoint.returnedRenameUri),
+                    returnedRenameIdentity = checkpoint.returnedRenameIdentity,
+                    returnedRenameUri = checkpoint.returnedRenameUri,
+                    unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+                ),
+                checkpoint,
+            )
+        }
         when (candidate) {
             is SafLookup.Failed -> return recoveryReconciliation(record, grant, candidate.error, listOfNotNull(checkpoint.returnedRenameUri))
             SafLookup.Absent -> {
@@ -1550,7 +1736,7 @@ public class SafCommitCoordinator(
                 val outcome = if (record.backupIdentity != null && record.existingIdentity != null) {
                     val backup = record.backupIdentity
                     promoteReplacementAfterBackup(
-                        record.copy(state = SafCommitState.BACKUP_CREATED),
+                        record.copy(state = SafCommitState.BACKUP_CREATED, verifiedDigest = stagedDigest),
                         created,
                         backup.documentUri,
                         backup.documentId,
@@ -1560,7 +1746,7 @@ public class SafCommitCoordinator(
                     )
                 } else {
                     promoteVerifiedTemporary(
-                        record.copy(state = SafCommitState.PROVIDER_VERIFIED),
+                        record.copy(state = SafCommitState.PROVIDER_VERIFIED, verifiedDigest = stagedDigest),
                         created,
                         grant,
                         stagedDigest,
@@ -1595,8 +1781,22 @@ public class SafCommitCoordinator(
                 }
                 val stagedDigest = (digest as RecoveryDigest.Ready).digest
                 val verification = verifyProviderCopy(doc.documentUri, doc.documentId, record, grant, stagedDigest)
-                verification.closeError?.let {
-                    return recoveryReconciliation(record, grant, it, listOf(doc.documentUri))
+                verification.closeError?.let { error ->
+                    return if (error == TransferStorageError.Cancelled) {
+                        toRecoveryOutcome(
+                            cancelAfterRename(
+                                record,
+                                grant,
+                                listOfNotNull(record.temporaryIdentity?.documentUri, doc.documentUri),
+                                returnedRenameIdentity = identity,
+                                returnedRenameUri = checkpoint.returnedRenameUri ?: doc.documentUri,
+                                unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+                            ),
+                            checkpoint,
+                        )
+                    } else {
+                        recoveryReconciliation(record, grant, error, listOf(doc.documentUri))
+                    }
                 }
                 if (verification.outcome !is VerifyResult.Matched) {
                     val error = when (val result = verification.outcome) {
@@ -1604,8 +1804,36 @@ public class SafCommitCoordinator(
                         is VerifyResult.Mismatched -> TransferStorageError.IntegrityMismatch("final_candidate")
                         else -> TransferStorageError.StateConflict("final_candidate_unverified")
                     }
-                    return recoveryReconciliation(record, grant, error, listOf(doc.documentUri))
+                    return if (error == TransferStorageError.Cancelled) {
+                        toRecoveryOutcome(
+                            cancelAfterRename(
+                                record,
+                                grant,
+                                listOfNotNull(record.temporaryIdentity?.documentUri, doc.documentUri),
+                                returnedRenameIdentity = identity,
+                                returnedRenameUri = checkpoint.returnedRenameUri ?: doc.documentUri,
+                                unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+                            ),
+                            checkpoint,
+                        )
+                    } else {
+                        recoveryReconciliation(record, grant, error, listOf(doc.documentUri))
+                    }
                 }
+                if (isCancelled()) {
+                    return toRecoveryOutcome(
+                        cancelAfterRename(
+                            record,
+                            grant,
+                            listOfNotNull(record.temporaryIdentity?.documentUri, doc.documentUri),
+                            returnedRenameIdentity = identity,
+                            returnedRenameUri = checkpoint.returnedRenameUri ?: doc.documentUri,
+                            unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+                        ),
+                        checkpoint,
+                    )
+                }
+                var retainedTemporaryIdentity: SafStoredDocumentIdentity? = null
                 val sourceIdentity = record.temporaryIdentity
                 if (sourceIdentity != null && sourceIdentity != identity) {
                     authorizationError(
@@ -1619,12 +1847,37 @@ public class SafCommitCoordinator(
                     }
                     when (val source = gateway.query(sourceIdentity.documentUri)) {
                         SafLookup.Absent -> Unit
-                        is SafLookup.Found -> return recoveryReconciliation(
-                            record,
-                            grant,
-                            TransferStorageError.StateConflict("final_rename_both_identities_resolve"),
-                            listOf(sourceIdentity.documentUri, identity.documentUri),
-                        )
+                        is SafLookup.Found -> {
+                            val temporaryName = temporaryDocumentName(record.expectedFinalName, record.partialId)
+                            val listedIdentity = when (val listed = findRecoveryChild(record, grant, temporaryName)) {
+                                is SafLookup.Found -> listed.document
+                                SafLookup.Absent -> null
+                                is SafLookup.Failed -> return recoveryReconciliation(
+                                    record,
+                                    grant,
+                                    listed.error,
+                                    listOf(sourceIdentity.documentUri, identity.documentUri),
+                                )
+                            }
+                            if (source.document.documentUri != sourceIdentity.documentUri ||
+                                source.document.documentId != sourceIdentity.documentId ||
+                                source.document.displayName != temporaryName ||
+                                source.document.isDirectory ||
+                                listedIdentity == null ||
+                                listedIdentity.documentUri != sourceIdentity.documentUri ||
+                                listedIdentity.documentId != sourceIdentity.documentId ||
+                                listedIdentity.displayName != temporaryName ||
+                                listedIdentity.isDirectory
+                            ) {
+                                return recoveryReconciliation(
+                                    record,
+                                    grant,
+                                    TransferStorageError.StateConflict("final_rename_both_identities_resolve"),
+                                    listOf(sourceIdentity.documentUri, identity.documentUri),
+                                )
+                            }
+                            retainedTemporaryIdentity = sourceIdentity
+                        }
 
                         is SafLookup.Failed -> return recoveryReconciliation(
                             record,
@@ -1652,6 +1905,11 @@ public class SafCommitCoordinator(
                         SafRenamePhase.FINAL_PROMOTION,
                         sourceIdentity,
                         identity,
+                        reconciliation = if (retainedTemporaryIdentity != null) {
+                            SafRenameReconciliation.AMBIGUOUS_BOTH_RESOLVE
+                        } else {
+                            null
+                        },
                     )
                 }
                 if (!renameHistoryMatchesCommit(
@@ -1669,14 +1927,35 @@ public class SafCommitCoordinator(
                         listOf(doc.documentUri),
                     )
                 }
+                exactChildError(record, grant, identity, record.expectedFinalName, "final")?.let {
+                    return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+                }
+                if (isCancelled()) {
+                    return toRecoveryOutcome(
+                        cancelAfterRename(
+                            record,
+                            grant,
+                            listOfNotNull(record.temporaryIdentity?.documentUri, identity.documentUri),
+                            returnedRenameIdentity = identity,
+                            returnedRenameUri = checkpoint.returnedRenameUri ?: identity.documentUri,
+                        ),
+                        checkpoint,
+                    )
+                }
                 val verified = record.copy(
                     state = SafCommitState.PUBLISHED_OR_VISIBLE,
                     finalUri = identity.documentUri,
                     finalIdentity = identity,
                     renameHistory = renameHistory,
                     copiedBytes = record.expectedSizeBytes,
-                    pendingCleanup = record.pendingCleanup + SafCleanupPending.STAGING +
-                        if (record.backupIdentity == null) emptySet() else setOf(SafCleanupPending.BACKUP),
+                    pendingCleanup = record.pendingCleanup + setOf(SafCleanupPending.STAGING) +
+                        (if (record.backupIdentity == null) emptySet() else setOf(SafCleanupPending.BACKUP)) +
+                        (if (retainedTemporaryIdentity == null || retainedTemporaryIdentity == identity) {
+                            emptySet()
+                        } else {
+                            setOf(SafCleanupPending.PROVIDER_TEMPORARY)
+                        }),
+                    verifiedDigest = stagedDigest,
                 )
                 if (!saveCheckpoint(
                         verified,
@@ -1719,6 +1998,9 @@ public class SafCommitCoordinator(
         checkpoint: SafCommitCheckpoint,
         grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
+        if (isCancelled()) {
+            return toRecoveryOutcome(cancelRecoveryAtBoundary(record, checkpoint, grant), checkpoint)
+        }
         val existing = record.existingIdentity
             ?: return recoveryReconciliation(
                 record,
@@ -1747,12 +2029,33 @@ public class SafCommitCoordinator(
             replacement.documentUri,
             replacement.documentId,
         )?.let { return recoveryReconciliation(record, grant, it, listOf(replacement.documentUri)) }
+        fun cancelledAtBoundary(knownUris: List<String>): SafCommitRecoveryOutcome? =
+            if (!isCancelled()) {
+                null
+            } else {
+                toRecoveryOutcome(
+                    cancelAfterRename(
+                        record,
+                        grant,
+                        listOfNotNull(existing.documentUri, replacement.documentUri, checkpoint.returnedRenameUri) + knownUris,
+                        returnedRenameIdentity = checkpoint.returnedRenameIdentity,
+                        returnedRenameUri = checkpoint.returnedRenameUri,
+                        unresolvedRenamePhase = SafRenamePhase.BACKUP_RENAME,
+                    ),
+                    checkpoint,
+                )
+            }
+
         val backupName = backupDocumentName(record.expectedFinalName, record.partialId)
         val backupCandidate = findRecoveryChild(record, grant, backupName)
+        cancelledAtBoundary(listOfNotNull((backupCandidate as? SafLookup.Found)?.document?.documentUri))?.let {
+            return it
+        }
         if (backupCandidate is SafLookup.Failed) {
             return recoveryReconciliation(record, grant, backupCandidate.error, listOfNotNull(checkpoint.returnedRenameUri))
         }
         val originalLookup = gateway.query(existing.documentUri)
+        cancelledAtBoundary(listOf(existing.documentUri, replacement.documentUri))?.let { return it }
         if (originalLookup is SafLookup.Failed) {
             return recoveryReconciliation(record, grant, originalLookup.error, listOf(existing.documentUri))
         }
@@ -1820,6 +2123,7 @@ public class SafCommitCoordinator(
         }
         val stagedDigest = (digest as RecoveryDigest.Ready).digest
         val replacementLookup = gateway.query(replacement.documentUri)
+        cancelledAtBoundary(listOf(replacement.documentUri))?.let { return it }
         val replacementInfo = when (replacementLookup) {
             is SafLookup.Found -> if (replacementLookup.document.documentId == replacement.documentId) {
                 replacementLookup.document
@@ -1845,6 +2149,16 @@ public class SafCommitCoordinator(
             }
             is SafLookup.Failed -> return recoveryReconciliation(record, grant, replacementLookup.error, listOf(replacement.documentUri))
         }
+        exactChildError(
+            record,
+            grant,
+            replacement,
+            temporaryDocumentName(record.expectedFinalName, record.partialId),
+            "overwrite_replacement",
+        )?.let { return recoveryReconciliation(record, grant, it, listOf(replacement.documentUri)) }
+        cancelledAtBoundary(listOfNotNull(existing.documentUri, replacement.documentUri, backupInfo?.documentUri))?.let {
+            return it
+        }
         val verified = verifyProviderCopy(replacement.documentUri, replacement.documentId, record, grant, stagedDigest)
         if (verified.closeError != null || verified.outcome !is VerifyResult.Matched) {
             val error = verified.closeError ?: when (val result = verified.outcome) {
@@ -1852,8 +2166,42 @@ public class SafCommitCoordinator(
                 is VerifyResult.Mismatched -> TransferStorageError.IntegrityMismatch("overwrite_replacement")
                 else -> TransferStorageError.StateConflict("overwrite_replacement_unverified")
             }
-            return recoveryReconciliation(record, grant, error, listOf(replacement.documentUri))
+            return if (error == TransferStorageError.Cancelled) {
+                toRecoveryOutcome(
+                    cancelAfterRename(
+                        record,
+                        grant,
+                        listOfNotNull(existing.documentUri, replacement.documentUri, backupInfo?.documentUri),
+                        returnedRenameIdentity = checkpoint.returnedRenameIdentity,
+                        returnedRenameUri = checkpoint.returnedRenameUri,
+                        unresolvedRenamePhase = SafRenamePhase.BACKUP_RENAME,
+                    ),
+                    checkpoint,
+                )
+            } else {
+                recoveryReconciliation(record, grant, error, listOf(replacement.documentUri))
+            }
         }
+        if (isCancelled()) {
+            return toRecoveryOutcome(
+                cancelAfterRename(
+                    record,
+                    grant,
+                    listOfNotNull(existing.documentUri, replacement.documentUri, backupInfo?.documentUri),
+                    returnedRenameIdentity = checkpoint.returnedRenameIdentity,
+                    returnedRenameUri = checkpoint.returnedRenameUri,
+                    unresolvedRenamePhase = SafRenamePhase.BACKUP_RENAME,
+                ),
+                checkpoint,
+            )
+        }
+        exactChildError(
+            record,
+            grant,
+            replacement,
+            temporaryDocumentName(record.expectedFinalName, record.partialId),
+            "overwrite_replacement",
+        )?.let { return recoveryReconciliation(record, grant, it, listOf(replacement.documentUri)) }
         val observedBackup = backupInfo?.let { SafStoredDocumentIdentity(it.documentUri, it.documentId) }
         val renameHistory = if (
             observedBackup != null && record.renameHistory.none { it.phase == SafRenamePhase.BACKUP_RENAME }
@@ -1883,6 +2231,16 @@ public class SafCommitCoordinator(
                 listOfNotNull(observedBackup?.documentUri, existing.documentUri),
             )
         }
+        observedBackup?.let { backup ->
+            exactChildError(
+                record,
+                grant,
+                backup,
+                backupDocumentName(record.expectedFinalName, record.partialId),
+                "overwrite_backup",
+            )?.let { return recoveryReconciliation(record, grant, it, listOf(backup.documentUri, replacement.documentUri)) }
+        }
+        cancelledAtBoundary(listOfNotNull(observedBackup?.documentUri, replacement.documentUri))?.let { return it }
         val ready = record.copy(
             state = if (backupInfo == null) SafCommitState.REPLACEMENT_READY else SafCommitState.BACKUP_CREATED,
             backupIdentity = observedBackup,
@@ -1890,6 +2248,7 @@ public class SafCommitCoordinator(
             temporaryUri = replacement.documentUri,
             renameHistory = renameHistory,
             copiedBytes = record.expectedSizeBytes,
+            verifiedDigest = stagedDigest,
         )
         val phase = if (backupInfo == null) {
             SafCommitCheckpointPhase.PROVIDER_VERIFIED
@@ -1969,6 +2328,9 @@ public class SafCommitCoordinator(
 
             is SafLookup.Failed -> return recoveryReconciliation(record, grant, lookup.error, listOf(final.documentUri))
         }
+        cleanupFinalIdentityError(record, grant, final)?.let { error ->
+            return recoveryReconciliation(record, grant, error, listOf(final.documentUri))
+        }
         if (checkpoint.phase == SafCommitCheckpointPhase.FINAL_VERIFIED ||
             checkpoint.phase == SafCommitCheckpointPhase.PUBLICATION_INTENT ||
             checkpoint.phase == SafCommitCheckpointPhase.PUBLISHED
@@ -1989,6 +2351,20 @@ public class SafCommitCoordinator(
             }
             val outcome = finishAndRetryCleanup(published, final.documentUri, grant)
             return toRecoveryOutcome(outcome, checkpointFor(published, grant, SafCommitCheckpointPhase.PUBLISHED))
+        }
+        if (record.pendingCleanup.isEmpty() && record.stagingReleased) {
+            val committed = record.copy(state = SafCommitState.COMMITTED)
+            if (!saveCheckpoint(committed, grant, SafCommitCheckpointPhase.COMMITTED)) {
+                return recoveryReconciliation(
+                    committed,
+                    grant,
+                    TransferStorageError.StateConflict("journal_committed_result_failed"),
+                    listOf(final.documentUri),
+                )
+            }
+            return SafCommitRecoveryOutcome.Committed(
+                checkpointFor(committed, grant, SafCommitCheckpointPhase.COMMITTED),
+            )
         }
         val outcome = retryPendingCleanup(record, grant)
         return toRecoveryOutcome(outcome, checkpoint)
@@ -2025,6 +2401,9 @@ public class SafCommitCoordinator(
         }
         return when (val lookup = gateway.query(final.documentUri)) {
             is SafLookup.Found -> if (lookup.document.documentId == final.documentId) {
+                cleanupFinalIdentityError(record, grant, final)?.let { error ->
+                    return recoveryReconciliation(record, grant, error, listOf(final.documentUri))
+                }
                 SafCommitRecoveryOutcome.Committed(checkpoint)
             } else {
                 recoveryReconciliation(
@@ -2061,6 +2440,102 @@ public class SafCommitCoordinator(
         }
     }
 
+    /** A name lookup is only a reachability check; it must resolve to the stored URI/id. */
+    private fun exactChildError(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+        identity: SafStoredDocumentIdentity,
+        expectedName: String,
+        reason: String,
+    ): TransferStorageError? = when (
+        val listed = findRecoveryChild(record, grant, expectedName)
+    ) {
+        is SafLookup.Found -> {
+            val document = listed.document
+            if (document.documentUri == identity.documentUri &&
+                document.documentId == identity.documentId &&
+                document.displayName == expectedName &&
+                !document.isDirectory
+            ) {
+                null
+            } else {
+                TransferStorageError.ContainmentUnknown("${reason}_child_identity_mismatch")
+            }
+        }
+        SafLookup.Absent -> TransferStorageError.ContainmentUnknown("${reason}_child_not_found")
+        is SafLookup.Failed -> listed.error
+    }
+
+    /** Allows exact-URI absence to settle a prior delete without repeating it. */
+    private fun cleanupTargetIdentityError(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+        identity: SafStoredDocumentIdentity,
+        expectedName: String,
+        reason: String,
+    ): TransferStorageError? {
+        authorizationError(
+            record,
+            grant,
+            SafContainmentOperation.RECONCILE,
+            identity.documentUri,
+            identity.documentId,
+        )?.let { return it }
+        return when (val lookup = gateway.query(identity.documentUri)) {
+            SafLookup.Absent -> null
+            is SafLookup.Failed -> lookup.error
+            is SafLookup.Found -> {
+                if (lookup.document.documentUri != identity.documentUri ||
+                    lookup.document.documentId != identity.documentId
+                ) {
+                    TransferStorageError.ContainmentUnknown("${reason}_identity_mismatch")
+                } else {
+                    exactChildError(record, grant, identity, expectedName, reason)
+                }
+            }
+        }
+    }
+
+    private fun cleanupFinalIdentityError(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+        identity: SafStoredDocumentIdentity,
+    ): TransferStorageError? {
+        val verifiedDigest = record.verifiedDigest
+            ?: return TransferStorageError.StateConflict("cleanup_verified_digest_missing")
+        if (record.expectedDigest != null && record.expectedDigest != verifiedDigest) {
+            return TransferStorageError.IntegrityMismatch("cleanup_checkpoint_digest")
+        }
+        exactChildError(record, grant, identity, record.expectedFinalName, "cleanup_final")?.let { return it }
+        when (val lookup = gateway.query(identity.documentUri)) {
+            is SafLookup.Found -> if (
+                lookup.document.documentUri != identity.documentUri ||
+                lookup.document.documentId != identity.documentId ||
+                lookup.document.isDirectory || lookup.document.sizeBytes?.let { it == record.expectedSizeBytes } == false
+            ) {
+                return TransferStorageError.ContainmentUnknown("cleanup_final_identity_mismatch")
+            }
+
+            SafLookup.Absent -> return TransferStorageError.NotFound("cleanup_final")
+            is SafLookup.Failed -> return lookup.error
+        }
+        val verification = verifyProviderCopy(
+            identity.documentUri,
+            identity.documentId,
+            record,
+            grant,
+            verifiedDigest,
+        )
+        verification.closeError?.let { return it }
+        return when (val outcome = verification.outcome) {
+            is VerifyResult.Matched -> null
+            is VerifyResult.Mismatched -> TransferStorageError.IntegrityMismatch("cleanup_final_digest")
+            is VerifyResult.Failed -> outcome.error
+            is VerifyResult.VerifiedWithoutExpected ->
+                TransferStorageError.StateConflict("cleanup_final_digest_unverified")
+        }
+    }
+
     private sealed interface RecoveryDigest {
         data class Ready(val digest: Sha256Digest) : RecoveryDigest
         data class Failed(val error: TransferStorageError) : RecoveryDigest
@@ -2079,12 +2554,16 @@ public class SafCommitCoordinator(
         }
         val phase = verifyStagedBytes(record)
         phase.closeError?.let { return RecoveryDigest.Failed(it) }
-        return when (val outcome = phase.outcome) {
-            is VerifyResult.Matched -> RecoveryDigest.Ready(outcome.digest)
-            is VerifyResult.VerifiedWithoutExpected -> RecoveryDigest.Ready(outcome.digest)
-            is VerifyResult.Mismatched -> RecoveryDigest.Failed(TransferStorageError.IntegrityMismatch("staging_digest"))
-            is VerifyResult.Failed -> RecoveryDigest.Failed(outcome.error)
+        val digest = when (val outcome = phase.outcome) {
+            is VerifyResult.Matched -> outcome.digest
+            is VerifyResult.VerifiedWithoutExpected -> outcome.digest
+            is VerifyResult.Mismatched -> return RecoveryDigest.Failed(TransferStorageError.IntegrityMismatch("staging_digest"))
+            is VerifyResult.Failed -> return RecoveryDigest.Failed(outcome.error)
         }
+        if (record.verifiedDigest != null && record.verifiedDigest != digest) {
+            return RecoveryDigest.Failed(TransferStorageError.IntegrityMismatch("staging_content_changed"))
+        }
+        return RecoveryDigest.Ready(digest)
     }
 
     private fun discardInterruptedTemporary(
@@ -2092,6 +2571,13 @@ public class SafCommitCoordinator(
         identity: SafStoredDocumentIdentity,
         grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
+        val temporaryName = temporaryDocumentName(record.expectedFinalName, record.partialId)
+        exactChildError(record, grant, identity, temporaryName, "interrupted_temporary")?.let {
+            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+        }
+        if (isCancelled()) {
+            return recoveryReconciliation(record, grant, TransferStorageError.Cancelled, listOf(identity.documentUri))
+        }
         if (!saveCheckpoint(record, grant, SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_INTENT)) {
             return recoveryReconciliation(
                 record,
@@ -2100,7 +2586,29 @@ public class SafCommitCoordinator(
                 listOf(identity.documentUri),
             )
         }
-        val deletion = deleteExactIdentity(record, identity, grant)
+        if (isCancelled()) {
+            return recoveryReconciliation(record, grant, TransferStorageError.Cancelled, listOf(identity.documentUri))
+        }
+        exactChildError(record, grant, identity, temporaryName, "interrupted_temporary")?.let {
+            return recoveryReconciliation(record, grant, it, listOf(identity.documentUri))
+        }
+        if (isCancelled()) {
+            return recoveryReconciliation(record, grant, TransferStorageError.Cancelled, listOf(identity.documentUri))
+        }
+        val deletion = deleteExactIdentity(
+            record,
+            identity,
+            grant,
+            temporaryDocumentName(record.expectedFinalName, record.partialId),
+        )
+        if (isCancelled()) {
+            return recoveryReconciliation(
+                record,
+                grant,
+                TransferStorageError.Cancelled,
+                listOf(identity.documentUri),
+            )
+        }
         val failure = when (deletion) {
             is SafDeletion.PermissionRevoked -> deletion.error
             is SafDeletion.DeleteRequestFailed -> deletion.error
@@ -2140,6 +2648,7 @@ public class SafCommitCoordinator(
         record: SafCommitRecord,
         identity: SafStoredDocumentIdentity,
         grant: SafTreeGrant,
+        expectedName: String? = null,
     ): SafDeletion {
         val authorization = authorizationError(
             record,
@@ -2154,7 +2663,7 @@ public class SafCommitCoordinator(
         if (authorization != null) {
             return SafDeletion.DeleteRequestFailed(authorization)
         }
-        return deleteExactChildIdentity(record, identity, grant)
+        return deleteExactChildIdentity(record, identity, grant, expectedName)
     }
 
     /**
@@ -2168,6 +2677,7 @@ public class SafCommitCoordinator(
         record: SafCommitRecord,
         identity: SafStoredDocumentIdentity,
         grant: SafTreeGrant,
+        expectedName: String? = null,
     ): SafDeletion {
         val authorization = authorizationError(
             record,
@@ -2204,13 +2714,17 @@ public class SafCommitCoordinator(
                 observedDisplayName = document.displayName,
             )
         }
-        if (document.displayName.isBlank() || document.isDirectory) {
+        if (document.displayName.isBlank() ||
+            (expectedName != null && document.displayName != expectedName) ||
+            document.isDirectory
+        ) {
             return SafDeletion.DeleteRequestFailed(
-                TransferStorageError.ContainmentUnknown("cleanup_identity_not_file"),
+                TransferStorageError.ContainmentUnknown("cleanup_identity_not_expected_file"),
             )
         }
+        val childName = expectedName ?: document.displayName
         val listed = try {
-            gateway.findChild(record.uriForTree(record.parentDocumentId), document.displayName)
+            gateway.findChild(record.uriForTree(record.parentDocumentId), childName)
         } catch (_: Exception) {
             return SafDeletion.QueryUnknown("cleanup_parent_query_failed")
         }
@@ -2227,6 +2741,7 @@ public class SafCommitCoordinator(
                 if (child.documentUri != identity.documentUri ||
                     child.documentId != identity.documentId ||
                     child.displayName != document.displayName ||
+                    child.displayName != childName ||
                     child.isDirectory
                 ) {
                     return SafDeletion.IdentityMismatch(
@@ -2316,6 +2831,90 @@ public class SafCommitCoordinator(
         return SafCommitRecoveryOutcome.ReconciliationRequired(checkpoint, error, knownUris.distinct())
     }
 
+    private fun isCancellationCheckpoint(checkpoint: SafCommitCheckpoint): Boolean =
+        checkpoint.phase == SafCommitCheckpointPhase.CANCELLED ||
+            checkpoint.phase == SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_INTENT ||
+            checkpoint.phase == SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED ||
+            checkpoint.lastFailure?.categoryId == TransferStorageError.Cancelled.category.id
+
+    private fun isTerminalCancellationCheckpoint(checkpoint: SafCommitCheckpoint): Boolean =
+        checkpoint.phase == SafCommitCheckpointPhase.CANCELLED ||
+            checkpoint.phase == SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED
+
+    /** Publication is not undone by a late cancellation; only cleanup remains. */
+    private fun checkpointAlreadyPublished(checkpoint: SafCommitCheckpoint): Boolean =
+        checkpoint.phase in setOf(
+            SafCommitCheckpointPhase.PUBLISHED,
+            SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_INTENT,
+            SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_OBSERVED,
+            SafCommitCheckpointPhase.BACKUP_DELETE_INTENT,
+            SafCommitCheckpointPhase.BACKUP_DELETE_OBSERVED,
+            SafCommitCheckpointPhase.STAGING_DELETE_INTENT,
+            SafCommitCheckpointPhase.STAGING_DELETE_OBSERVED,
+            SafCommitCheckpointPhase.COMMITTED,
+        ) || (
+            checkpoint.phase == SafCommitCheckpointPhase.RECONCILIATION_REQUIRED &&
+                checkpoint.finalIdentity != null &&
+                checkpoint.copiedBytes == checkpoint.expectedSizeBytes &&
+                (checkpoint.stagingReleased || checkpoint.pendingCleanup.isNotEmpty())
+            )
+
+    /** Chooses cancellation only where it cannot erase an unresolved mutation. */
+    private fun cancelRecoveryAtBoundary(
+        record: SafCommitRecord,
+        checkpoint: SafCommitCheckpoint,
+        grant: SafTreeGrant,
+    ): SafCommitOutcome {
+        val potentialRename = when {
+            checkpoint.unresolvedRenamePhase != null -> checkpoint.unresolvedRenamePhase
+            checkpoint.phase == SafCommitCheckpointPhase.BACKUP_RENAME_INTENT -> SafRenamePhase.BACKUP_RENAME
+            checkpoint.phase == SafCommitCheckpointPhase.BACKUP_RENAMED &&
+                record.renameHistory.none { it.phase == SafRenamePhase.BACKUP_RENAME } -> SafRenamePhase.BACKUP_RENAME
+            checkpoint.phase in setOf(
+                SafCommitCheckpointPhase.FINAL_RENAME_INTENT,
+                SafCommitCheckpointPhase.FINAL_RENAMED,
+                SafCommitCheckpointPhase.RENAME_RECONCILIATION_INTENT,
+                SafCommitCheckpointPhase.FINAL_VERIFICATION_INTENT,
+                SafCommitCheckpointPhase.FINAL_VERIFIED,
+            ) -> SafRenamePhase.FINAL_PROMOTION.takeIf {
+                record.strategy == SafCommitStrategy.TEMP_THEN_RENAME
+            }
+            checkpoint.phase == SafCommitCheckpointPhase.RECONCILIATION_REQUIRED &&
+                record.renameHistory.any { it.phase == SafRenamePhase.FINAL_PROMOTION } -> SafRenamePhase.FINAL_PROMOTION
+            checkpoint.phase == SafCommitCheckpointPhase.RECONCILIATION_REQUIRED &&
+                checkpoint.returnedRenameUri != null && record.existingIdentity != null &&
+                record.backupIdentity == null && record.renameHistory.none { it.phase == SafRenamePhase.BACKUP_RENAME }
+                -> SafRenamePhase.BACKUP_RENAME
+            checkpoint.phase == SafCommitCheckpointPhase.RECONCILIATION_REQUIRED &&
+                checkpoint.returnedRenameUri != null && record.temporaryIdentity != null -> SafRenamePhase.FINAL_PROMOTION
+            else -> null
+        }
+        if (potentialRename != null) {
+            return cancelAfterRename(
+                record,
+                grant,
+                record.knownDocumentIdentities.map { it.documentUri } +
+                    listOfNotNull(checkpoint.returnedRenameUri),
+                returnedRenameIdentity = checkpoint.returnedRenameIdentity,
+                returnedRenameUri = checkpoint.returnedRenameUri,
+                unresolvedRenamePhase = potentialRename,
+            )
+        }
+        val knownUris = record.knownDocumentIdentities.map { it.documentUri }
+        return when (checkpoint.phase) {
+            SafCommitCheckpointPhase.TEMPORARY_CREATE_INTENT,
+            SafCommitCheckpointPhase.COPY_STARTED,
+            SafCommitCheckpointPhase.FLUSH_INTENT,
+            SafCommitCheckpointPhase.PROVIDER_VERIFICATION_INTENT,
+            SafCommitCheckpointPhase.VISIBLE_CREATE_INTENT,
+            SafCommitCheckpointPhase.VISIBLE_DELETE_INTENT,
+            SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_INTENT,
+            -> reconcileAndSave(record, grant, TransferStorageError.Cancelled, knownUris)
+
+            else -> cancelBeforePublication(record, grant)
+        }
+    }
+
     private fun toRecoveryOutcome(
         outcome: SafCommitOutcome,
         fallback: SafCommitCheckpoint,
@@ -2323,12 +2922,28 @@ public class SafCommitCoordinator(
         val persisted = runCatching { journal.load(fallback.commitId) }.getOrNull() ?: fallback
         return when (outcome) {
             is SafCommitOutcome.Committed -> SafCommitRecoveryOutcome.Committed(outcome.checkpoint ?: persisted)
-            is SafCommitOutcome.ReconciliationRequired -> SafCommitRecoveryOutcome.ReconciliationRequired(
-                outcome.checkpoint ?: persisted,
-                outcome.error,
-                outcome.knownUris,
-            )
-            is SafCommitOutcome.Failed -> SafCommitRecoveryOutcome.Failed(outcome.checkpoint ?: persisted, outcome.error)
+            is SafCommitOutcome.ReconciliationRequired -> {
+                val checkpoint = outcome.checkpoint ?: persisted
+                if (outcome.error == TransferStorageError.Cancelled &&
+                    isTerminalCancellationCheckpoint(checkpoint) &&
+                    !checkpointAlreadyPublished(checkpoint)
+                ) {
+                    SafCommitRecoveryOutcome.Cancelled(checkpoint)
+                } else {
+                    SafCommitRecoveryOutcome.ReconciliationRequired(checkpoint, outcome.error, outcome.knownUris)
+                }
+            }
+            is SafCommitOutcome.Failed -> {
+                val checkpoint = outcome.checkpoint ?: persisted
+                if (outcome.error == TransferStorageError.Cancelled &&
+                    isTerminalCancellationCheckpoint(checkpoint) &&
+                    !checkpointAlreadyPublished(checkpoint)
+                ) {
+                    SafCommitRecoveryOutcome.Cancelled(checkpoint)
+                } else {
+                    SafCommitRecoveryOutcome.Failed(checkpoint, outcome.error)
+                }
+            }
             is SafCommitOutcome.PendingUserDecision -> SafCommitRecoveryOutcome.ReadyToResume(persisted)
             is SafCommitOutcome.Skipped -> SafCommitRecoveryOutcome.Skipped(persisted)
             is SafCommitOutcome.SafeOverwriteUnsupported -> SafCommitRecoveryOutcome.Failed(
@@ -2493,6 +3108,7 @@ public class SafCommitCoordinator(
             checkpoint.expectedFinalName == record.expectedFinalName &&
             checkpoint.expectedSizeBytes == record.expectedSizeBytes &&
             checkpoint.expectedDigest == record.expectedDigest &&
+            checkpoint.verifiedDigest == record.verifiedDigest &&
             checkpoint.temporaryIdentity == record.temporaryIdentity &&
             checkpoint.existingIdentity == record.existingIdentity &&
             checkpoint.backupIdentity == record.backupIdentity &&
@@ -2504,6 +3120,7 @@ public class SafCommitCoordinator(
             checkpoint.stagingReleased == record.stagingReleased
 
     private fun recordFromCheckpoint(checkpoint: SafCommitCheckpoint): SafCommitRecord {
+        val pending = checkpoint.pendingCleanup.map { it.type }.toSet()
         val phaseState = when (checkpoint.phase) {
             SafCommitCheckpointPhase.READY,
             SafCommitCheckpointPhase.STAGING_VERIFICATION_INTENT,
@@ -2549,22 +3166,24 @@ public class SafCommitCoordinator(
 
             SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_INTENT,
             SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_OBSERVED,
-            SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_INTENT,
-            SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_OBSERVED,
             -> SafCommitState.PROVIDER_TEMPORARY_CLEANUP_PENDING
 
+            SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_INTENT,
+            SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_OBSERVED,
             SafCommitCheckpointPhase.BACKUP_DELETE_INTENT,
             SafCommitCheckpointPhase.BACKUP_DELETE_OBSERVED,
-            -> SafCommitState.BACKUP_CLEANUP_PENDING
-
             SafCommitCheckpointPhase.STAGING_DELETE_INTENT,
             SafCommitCheckpointPhase.STAGING_DELETE_OBSERVED,
-            -> SafCommitState.STAGING_CLEANUP_PENDING
+            -> stateForCleanup(pending)
+
+            SafCommitCheckpointPhase.CANCELLED,
+            SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_INTENT,
+            SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED,
+            -> SafCommitState.COMMIT_FAILED
 
             SafCommitCheckpointPhase.RECONCILIATION_REQUIRED -> SafCommitState.RECONCILIATION_REQUIRED
             SafCommitCheckpointPhase.COMMITTED -> SafCommitState.COMMITTED
         }
-        val pending = checkpoint.pendingCleanup.map { it.type }.toSet()
         val stagingReleased = checkpoint.stagingReleased
         return SafCommitRecord(
             sessionId = checkpoint.sessionId,
@@ -2590,7 +3209,149 @@ public class SafCommitCoordinator(
             renameHistory = checkpoint.renameHistory,
             pendingCleanup = pending,
             stagingReleased = stagingReleased,
+            verifiedDigest = checkpoint.verifiedDigest,
         )
+    }
+
+    /**
+     * Removes only an exact, incomplete provider document left by a cancelled
+     * copy. This path never opens staging, copies bytes, renames, publishes, or
+     * releases staging; normal recovery remains explicitly cancelled.
+     */
+    public fun retryCancelledTemporaryCleanup(
+        checkpoint: SafCommitCheckpoint,
+        grant: SafTreeGrant,
+    ): SafCommitRecoveryOutcome {
+        val latest = try {
+            journal.load(checkpoint.commitId)
+        } catch (_: Exception) {
+            return SafCommitRecoveryOutcome.Failed(
+                checkpoint,
+                TransferStorageError.StateConflict("journal_load_failed"),
+            )
+        } ?: return SafCommitRecoveryOutcome.Failed(
+            checkpoint,
+            TransferStorageError.NotFound("commit_checkpoint"),
+        )
+        if (!sameCheckpointCommit(checkpoint, latest) ||
+            latest.version != SafCommitCheckpoint.CURRENT_VERSION ||
+            !checkpointCleanupIdentitiesMatch(latest) ||
+            !checkpointIdentityShapeMatches(latest)
+        ) {
+            return SafCommitRecoveryOutcome.ReconciliationRequired(
+                latest,
+                TransferStorageError.StateConflict("cancelled_checkpoint_mismatch"),
+            )
+        }
+        if (grant.grantId != latest.approvedTree.grantId ||
+            grant.treeUri.toString() != latest.approvedTree.treeUri ||
+            grant.authority != latest.approvedTree.authority ||
+            grant.rootDocumentId != latest.approvedTree.rootDocumentId
+        ) {
+            return SafCommitRecoveryOutcome.ReconciliationRequired(
+                latest,
+                TransferStorageError.StateConflict("grant_context_mismatch"),
+            )
+        }
+        if (!isCancellationCheckpoint(latest)) {
+            return SafCommitRecoveryOutcome.Failed(
+                latest,
+                TransferStorageError.StateConflict("checkpoint_not_cancelled"),
+            )
+        }
+        val record = recordFromCheckpoint(latest)
+        if (checkpointAlreadyPublished(latest)) {
+            return SafCommitRecoveryOutcome.ReconciliationRequired(
+                latest,
+                TransferStorageError.StateConflict("published_commit_not_cancelled_temporary"),
+                record.knownDocumentIdentities.map { it.documentUri },
+            )
+        }
+        if (latest.unresolvedRenamePhase != null ||
+            record.renameHistory.any { it.phase == SafRenamePhase.FINAL_PROMOTION }
+        ) {
+            // A rename may have moved or duplicated the document. Never delete
+            // either side while its final-vs-temporary role is unsettled.
+            return SafCommitRecoveryOutcome.ReconciliationRequired(
+                latest,
+                TransferStorageError.Cancelled,
+                record.knownDocumentIdentities.map { it.documentUri },
+            )
+        }
+        val identity = when (record.strategy) {
+            SafCommitStrategy.TEMP_THEN_RENAME -> record.temporaryIdentity
+            SafCommitStrategy.VISIBLE_FINAL_COPY -> record.finalIdentity
+        } ?: return if (latest.phase == SafCommitCheckpointPhase.CANCELLED) {
+            SafCommitRecoveryOutcome.Cancelled(latest)
+        } else {
+            SafCommitRecoveryOutcome.ReconciliationRequired(
+                latest,
+                TransferStorageError.ContainmentUnknown("cancelled_temporary_identity_missing"),
+                record.knownDocumentIdentities.map { it.documentUri },
+            )
+        }
+        val cleanupName = when (record.strategy) {
+            SafCommitStrategy.TEMP_THEN_RENAME -> temporaryDocumentName(record.expectedFinalName, record.partialId)
+            SafCommitStrategy.VISIBLE_FINAL_COPY -> record.expectedFinalName
+        }
+        cleanupTargetIdentityError(record, grant, identity, cleanupName, "cancelled_temporary")?.let { error ->
+            return SafCommitRecoveryOutcome.ReconciliationRequired(latest, error, listOf(identity.documentUri))
+        }
+
+        authorizationError(record, grant, SafContainmentOperation.RECONCILE)?.let { error ->
+            return SafCommitRecoveryOutcome.ReconciliationRequired(latest, error, listOf(identity.documentUri))
+        }
+        val intent = checkpointFor(
+            record,
+            grant,
+            SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_INTENT,
+            returnedRenameIdentity = latest.returnedRenameIdentity,
+            returnedRenameUri = latest.returnedRenameUri,
+            failure = TransferStorageError.Cancelled,
+        )
+        if (!runCatching { journal.save(intent) }.getOrDefault(false)) {
+            return SafCommitRecoveryOutcome.ReconciliationRequired(
+                latest,
+                TransferStorageError.StateConflict("journal_cancel_delete_intent_failed"),
+                listOf(identity.documentUri),
+            )
+        }
+        cleanupTargetIdentityError(record, grant, identity, cleanupName, "cancelled_temporary")?.let { error ->
+            return SafCommitRecoveryOutcome.ReconciliationRequired(intent, error, listOf(identity.documentUri))
+        }
+
+        // This is an explicit cleanup API. Once deletion is requested, always
+        // persist its observation even if the transfer cancellation signal changes;
+        // a failed result save is retried through exact-identity observation.
+        val deletion = deleteExactIdentity(record, identity, grant, cleanupName)
+        val error = when (deletion) {
+            is SafDeletion.ConfirmedAbsent -> null
+            is SafDeletion.PermissionRevoked -> deletion.error
+            is SafDeletion.DeleteRequestFailed -> deletion.error
+            is SafDeletion.IdentityMismatch -> TransferStorageError.ContainmentUnknown("cancelled_temporary_identity_changed")
+            is SafDeletion.QueryUnknown -> TransferStorageError.StateConflict("cancelled_temporary_delete_unsettled")
+            is SafDeletion.StillPresent -> TransferStorageError.StateConflict("cancelled_temporary_still_present")
+        }
+        val observed = checkpointFor(
+            record,
+            grant,
+            SafCommitCheckpointPhase.CANCELLED_TEMPORARY_DELETE_OBSERVED,
+            returnedRenameIdentity = latest.returnedRenameIdentity,
+            returnedRenameUri = latest.returnedRenameUri,
+            failure = error ?: TransferStorageError.Cancelled,
+        )
+        if (!runCatching { journal.save(observed) }.getOrDefault(false)) {
+            return SafCommitRecoveryOutcome.ReconciliationRequired(
+                intent,
+                TransferStorageError.StateConflict("journal_cancel_delete_result_failed"),
+                listOf(identity.documentUri),
+            )
+        }
+        return if (error == null) {
+            SafCommitRecoveryOutcome.Cancelled(observed)
+        } else {
+            SafCommitRecoveryOutcome.ReconciliationRequired(observed, error, listOf(identity.documentUri))
+        }
     }
 
     public fun retryPendingCleanup(
@@ -2628,12 +3389,23 @@ public class SafCommitCoordinator(
                 TransferStorageError.StateConflict("cleanup_checkpoint_missing"),
                 current.knownDocumentIdentities.map { it.documentUri },
             )
-        if (!checkpointMatchesRecord(stored, current, grant)) {
+        if (!checkpointMatchesRecord(stored, current, grant) ||
+            !checkpointIdentityShapeMatches(stored) ||
+            !cleanupCheckpointAuthorizesFinal(stored, current) ||
+            stored.finalIdentity != final ||
+            stored.copiedBytes != stored.expectedSizeBytes
+        ) {
             return reconcileKnown(
                 current,
                 TransferStorageError.StateConflict("cleanup_checkpoint_mismatch"),
                 current.knownDocumentIdentities.map { it.documentUri },
             )
+        }
+        cleanupFinalIdentityError(current, grant, final)?.let {
+            return reconcileAndSave(current, grant, it, listOf(final.documentUri))
+        }
+        if (isCancelled()) {
+            return reconcileKnown(current, TransferStorageError.Cancelled, listOf(final.documentUri))
         }
 
         var outstanding = current.pendingCleanup.toMutableSet()
@@ -2650,6 +3422,21 @@ public class SafCommitCoordinator(
                 TransferStorageError.ContainmentUnknown("cleanup_identity_missing"),
                 current.knownDocumentIdentities.map { it.documentUri },
             )
+            if (identity == final) {
+                return reconcileKnown(
+                    current,
+                    TransferStorageError.ContainmentUnknown("cleanup_identity_is_authoritative_final"),
+                    listOf(final.documentUri),
+                )
+            }
+            val cleanupName = when (item) {
+                SafCleanupPending.BACKUP -> backupDocumentName(current.expectedFinalName, current.partialId)
+                SafCleanupPending.PROVIDER_TEMPORARY -> temporaryDocumentName(current.expectedFinalName, current.partialId)
+                SafCleanupPending.STAGING -> error("staging is handled separately")
+            }
+            cleanupTargetIdentityError(current, grant, identity, cleanupName, "cleanup_${item.id}")?.let {
+                return reconcileAndSave(current, grant, it, listOf(final.documentUri, identity.documentUri))
+            }
             val intentPhase = when (item) {
                 SafCleanupPending.BACKUP -> SafCommitCheckpointPhase.BACKUP_DELETE_INTENT
                 SafCleanupPending.PROVIDER_TEMPORARY -> SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_INTENT
@@ -2709,7 +3496,30 @@ public class SafCommitCoordinator(
                     knownUris = current.knownDocumentIdentities.map { it.documentUri },
                 )
             }
-            val deletion = deleteExactChildIdentity(current, identity, grant)
+            if (isCancelled()) {
+                return reconcileAndSave(settled, grant, TransferStorageError.Cancelled, listOf(final.documentUri, identity.documentUri))
+            }
+            cleanupFinalIdentityError(settled, grant, final)?.let {
+                return reconcileAndSave(settled, grant, it, listOf(final.documentUri, identity.documentUri))
+            }
+            cleanupTargetIdentityError(settled, grant, identity, cleanupName, "cleanup_${item.id}")?.let {
+                return reconcileAndSave(settled, grant, it, listOf(final.documentUri, identity.documentUri))
+            }
+            if (isCancelled()) {
+                return reconcileKnown(settled, TransferStorageError.Cancelled, listOf(final.documentUri, identity.documentUri))
+            }
+            val deletion = deleteExactChildIdentity(current, identity, grant, cleanupName)
+            if (isCancelled()) {
+                val unresolvedCleanup = settled.copy(
+                    state = stateForCleanup(outstanding + item),
+                    pendingCleanup = (outstanding + item).toSet(),
+                )
+                return reconcileCancelledProviderMutation(
+                    unresolvedCleanup,
+                    grant,
+                    listOf(identity.documentUri),
+                )
+            }
             var failure: TransferStorageError? = null
             when (deletion) {
                 is SafDeletion.ConfirmedAbsent -> outstanding.remove(item)
@@ -2729,8 +3539,15 @@ public class SafCommitCoordinator(
                 pendingCleanup = outstanding.toSet(),
             )
             if (!saveCheckpoint(settled, grant, observedPhase, failure = failure)) {
+                // The durable intent still includes this identity. Preserve it in
+                // the reconciliation snapshot so recovery performs a fresh exact
+                // URI/id query before deciding whether another delete is needed.
+                val unresolvedCleanup = settled.copy(
+                    state = stateForCleanup(outstanding + item),
+                    pendingCleanup = (outstanding + item).toSet(),
+                )
                 return journalFailure(
-                    settled,
+                    unresolvedCleanup,
                     grant,
                     observedPhase,
                     afterMutation = true,
@@ -2764,6 +3581,12 @@ public class SafCommitCoordinator(
                     knownUris = current.knownDocumentIdentities.map { it.documentUri },
                 )
             }
+            if (isCancelled()) {
+                return reconcileAndSave(settled, grant, TransferStorageError.Cancelled, listOf(final.documentUri))
+            }
+            cleanupFinalIdentityError(settled, grant, final)?.let {
+                return reconcileAndSave(settled, grant, it, listOf(final.documentUri))
+            }
             val observation = deleteStagingAndObserve(current.partialId)
             if (observation.confirmedAbsent) outstanding.remove(SafCleanupPending.STAGING)
             settled = settled.copy(
@@ -2789,57 +3612,8 @@ public class SafCommitCoordinator(
             resultPhase = SafCommitCheckpointPhase.STAGING_DELETE_OBSERVED
         }
 
-        authorizationError(
-            settled,
-            grant,
-            SafContainmentOperation.RECONCILE,
-            final.documentUri,
-            final.documentId,
-        )?.let { error ->
-            val unresolved = settled.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
-            saveCheckpoint(
-                unresolved,
-                grant,
-                SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
-                failure = error,
-            )
-            return reconcileKnown(unresolved, error, listOf(final.documentUri))
-        }
-        when (val finalLookup = gateway.query(final.documentUri)) {
-            is SafLookup.Found -> if (finalLookup.document.documentId != final.documentId) {
-                val error = TransferStorageError.ContainmentUnknown("final_identity_changed_after_cleanup")
-                val unresolved = settled.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
-                saveCheckpoint(
-                    unresolved,
-                    grant,
-                    SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
-                    failure = error,
-                )
-                return reconcileKnown(unresolved, error, listOf(final.documentUri))
-            }
-
-            SafLookup.Absent -> {
-                val error = TransferStorageError.NotFound("committed_final")
-                val unresolved = settled.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
-                saveCheckpoint(
-                    unresolved,
-                    grant,
-                    SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
-                    failure = error,
-                )
-                return reconcileKnown(unresolved, error, listOf(final.documentUri))
-            }
-
-            is SafLookup.Failed -> {
-                val unresolved = settled.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
-                saveCheckpoint(
-                    unresolved,
-                    grant,
-                    SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
-                    failure = finalLookup.error,
-                )
-                return reconcileKnown(unresolved, finalLookup.error, listOf(final.documentUri))
-            }
+        cleanupFinalIdentityError(settled, grant, final)?.let { error ->
+            return reconcileAndSave(settled, grant, error, listOf(final.documentUri))
         }
 
         val remaining = outstanding.toSet()
@@ -3052,6 +3826,13 @@ public class SafCommitCoordinator(
         grant: SafTreeGrant,
         stagedDigest: Sha256Digest,
     ): SafCommitOutcome {
+        if (isCancelled()) return cancelBeforePublication(record, grant)
+        val replacementIdentity = record.temporaryIdentity
+            ?: return reconcileKnown(record, TransferStorageError.ContainmentUnknown("overwrite_replacement_identity_missing"), listOf(replacement.documentUri))
+        val replacementName = temporaryDocumentName(record.expectedFinalName, record.partialId)
+        exactChildError(record, grant, replacementIdentity, replacementName, "overwrite_replacement")?.let {
+            return reconcileAndSave(record, grant, it, listOf(replacement.documentUri))
+        }
         // 4. Everything needed to finish is now present, and nothing the user
         // had has been touched yet.
         if (record.backupIdentity != null) {
@@ -3066,6 +3847,13 @@ public class SafCommitCoordinator(
             if (backupAuthorization != null) {
                 return reconcileKnown(record, backupAuthorization, listOf(backup.documentUri, replacement.documentUri))
             }
+            exactChildError(
+                record,
+                grant,
+                backup,
+                backupDocumentName(record.expectedFinalName, record.partialId),
+                "overwrite_backup",
+            )?.let { return reconcileAndSave(record, grant, it, listOf(backup.documentUri, replacement.documentUri)) }
             when (val lookup = gateway.query(backup.documentUri)) {
                 is SafLookup.Found -> if (lookup.document.documentId != backup.documentId) {
                     return reconcileKnown(
@@ -3112,6 +3900,9 @@ public class SafCommitCoordinator(
 
                 is SafLookup.Failed -> return reconcileKnown(record, looked.error, listOf(replacement.documentUri))
             }
+            exactChildError(record, grant, replacementIdentity, replacementName, "overwrite_replacement")?.let {
+                return reconcileAndSave(record, grant, it, listOf(backup.documentUri, replacement.documentUri))
+            }
             return promoteReplacementAfterBackup(
                 record.copy(state = SafCommitState.BACKUP_CREATED),
                 SafCreate.Created(replacement.documentUri, replacement.documentId, readyReplacement.displayName),
@@ -3157,7 +3948,12 @@ public class SafCommitCoordinator(
 
         // 6. Move the existing document aside rather than deleting it. This is
         // the last point at which nothing has been given up.
+        exactChildError(current, grant, replacementIdentity, replacementName, "overwrite_replacement")?.let {
+            return reconcileAndSave(current, grant, it, listOf(existingUri, replacement.documentUri))
+        }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         val backupName = backupDocumentName(record.expectedFinalName, record.partialId)
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         renameHistoryAppendError(current, grant, SafRenamePhase.BACKUP_RENAME)?.let {
             return reconcileKnown(current, it, listOf(existing.documentUri, replacement.documentUri))
         }
@@ -3170,6 +3966,7 @@ public class SafCommitCoordinator(
         )?.let {
             return route(current, it, replacement.documentUri)
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.BACKUP_RENAME_INTENT)) {
             return journalFailure(
                 current,
@@ -3179,6 +3976,11 @@ public class SafCommitCoordinator(
                 knownUris = listOf(existing.documentUri, replacement.documentUri),
             )
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
+        exactChildError(current, grant, replacementIdentity, replacementName, "overwrite_replacement")?.let {
+            return reconcileAndSave(current, grant, it, listOf(existing.documentUri, replacement.documentUri))
+        }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         val moved = when (val result = gateway.rename(existing.documentUri, backupName)) {
             is SafRename.Renamed -> result
             is SafRename.Failed -> {
@@ -3197,6 +3999,15 @@ public class SafCommitCoordinator(
                     listOf(existing.documentUri, replacement.documentUri),
                 )
             }
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOfNotNull(existing.documentUri, replacement.documentUri, moved.documentUri),
+                returnedRenameUri = moved.documentUri,
+                unresolvedRenamePhase = SafRenamePhase.BACKUP_RENAME,
+            )
         }
         current = current.copy(state = SafCommitState.BACKUP_CREATED)
         if (!saveCheckpoint(
@@ -3231,6 +4042,15 @@ public class SafCommitCoordinator(
                 knownUris = listOfNotNull(existing.documentUri, replacement.documentUri, moved.documentUri),
             )
         }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOfNotNull(existing.documentUri, replacement.documentUri, moved.documentUri),
+                returnedRenameUri = moved.documentUri,
+                unresolvedRenamePhase = SafRenamePhase.BACKUP_RENAME,
+            )
+        }
 
         // 7. Settle what that rename left. Only a unique result is authoritative:
         // a provider that copies rather than moves has left two documents and
@@ -3244,11 +4064,22 @@ public class SafCommitCoordinator(
             grant,
         )
         val backup = when (backupSettlement) {
-            is RenameSettlement.Unknown -> return reconcileKnown(
-                current.copy(renameHistory = current.renameHistory + backupSettlement.evidence),
-                backupSettlement.error,
-                backupSettlement.knownUris + replacement.documentUri + existing.documentUri,
-            )
+            is RenameSettlement.Unknown -> return if (backupSettlement.error == TransferStorageError.Cancelled) {
+                cancelAfterRename(
+                    current,
+                    grant,
+                    backupSettlement.knownUris + replacement.documentUri + existing.documentUri,
+                    returnedRenameIdentity = backupSettlement.evidence.returned,
+                    returnedRenameUri = backupSettlement.evidence.returned?.documentUri,
+                    unresolvedRenamePhase = SafRenamePhase.BACKUP_RENAME,
+                )
+            } else {
+                reconcileKnown(
+                    current.copy(renameHistory = current.renameHistory + backupSettlement.evidence),
+                    backupSettlement.error,
+                    backupSettlement.knownUris + replacement.documentUri + existing.documentUri,
+                )
+            }
 
             is RenameSettlement.Settled -> {
                 current = current.copy(renameHistory = current.renameHistory + backupSettlement.evidence)
@@ -3268,7 +4099,34 @@ public class SafCommitCoordinator(
                 backup.knownUris + replacement.documentUri,
             )
         val backupIdentity = SafStoredDocumentIdentity(backupUri, backupId)
+        exactChildError(current, grant, backupIdentity, backupName, "overwrite_backup")?.let {
+            return reconcileAndSave(
+                current,
+                grant,
+                it,
+                listOf(backupUri, replacement.documentUri, existing.documentUri),
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, replacement.documentUri, existing.documentUri),
+                returnedRenameIdentity = backupIdentity,
+                returnedRenameUri = moved.documentUri,
+                unresolvedRenamePhase = SafRenamePhase.BACKUP_RENAME,
+            )
+        }
         current = current.copy(backupIdentity = backupIdentity)
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, replacement.documentUri, existing.documentUri),
+                returnedRenameIdentity = backupIdentity,
+                returnedRenameUri = moved.documentUri,
+            )
+        }
         if (!saveCheckpoint(
                 current,
                 grant,
@@ -3309,8 +4167,36 @@ public class SafCommitCoordinator(
         stagedDigest: Sha256Digest,
     ): SafCommitOutcome {
         var current = record
+        if (isCancelled()) return cancelBeforePublication(current, grant)
+        val replacementIdentity = current.temporaryIdentity
+            ?: return reconcileAndSave(
+                current,
+                grant,
+                TransferStorageError.ContainmentUnknown("overwrite_replacement_identity_missing"),
+                listOf(backupUri, replacement.documentUri, existingUri),
+            )
+        val replacementName = temporaryDocumentName(current.expectedFinalName, current.partialId)
+        exactChildError(current, grant, replacementIdentity, replacementName, "overwrite_replacement")?.let {
+            return reconcileAndSave(current, grant, it, listOf(backupUri, replacement.documentUri, existingUri))
+        }
+        val backupIdentity = SafStoredDocumentIdentity(backupUri, backupId)
+        if (current.backupIdentity != backupIdentity) {
+            return reconcileAndSave(
+                current,
+                grant,
+                TransferStorageError.ContainmentUnknown("overwrite_backup_identity_mismatch"),
+                listOf(backupUri, replacement.documentUri, existingUri),
+            )
+        }
+        exactChildError(
+            current,
+            grant,
+            backupIdentity,
+            backupDocumentName(current.expectedFinalName, current.partialId),
+            "overwrite_backup",
+        )?.let { return reconcileAndSave(current, grant, it, listOf(backupUri, replacement.documentUri, existingUri)) }
         renameHistoryAppendError(current, grant, SafRenamePhase.FINAL_PROMOTION)?.let {
-            return reconcileKnown(current, it, listOf(backupUri, replacement.documentUri, existingUri))
+            return reconcileAndSave(current, grant, it, listOf(backupUri, replacement.documentUri, existingUri))
         }
         // 8. Promote the replacement to the final name.
         authorizationError(
@@ -3326,6 +4212,7 @@ public class SafCommitCoordinator(
                 listOf(backupUri, replacement.documentUri, existingUri).distinct(),
             )
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         current = current.copy(state = SafCommitState.RENAME_STARTED)
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.FINAL_RENAME_INTENT)) {
             return journalFailure(
@@ -3336,6 +4223,18 @@ public class SafCommitCoordinator(
                 knownUris = listOf(backupUri, replacement.documentUri, existingUri),
             )
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
+        exactChildError(current, grant, replacementIdentity, replacementName, "overwrite_replacement")?.let {
+            return reconcileAndSave(current, grant, it, listOf(backupUri, replacement.documentUri, existingUri))
+        }
+        exactChildError(
+            current,
+            grant,
+            backupIdentity,
+            backupDocumentName(current.expectedFinalName, current.partialId),
+            "overwrite_backup",
+        )?.let { return reconcileAndSave(current, grant, it, listOf(backupUri, replacement.documentUri, existingUri)) }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         val promoted = when (val result = gateway.rename(replacement.documentUri, record.expectedFinalName)) {
             is SafRename.Renamed -> result
             is SafRename.Failed -> return renameMutationFailed(
@@ -3344,6 +4243,15 @@ public class SafCommitCoordinator(
                 SafRenamePhase.FINAL_PROMOTION,
                 result.error,
                 listOf(backupUri, replacement.documentUri, existingUri),
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOfNotNull(backupUri, replacement.documentUri, existingUri, promoted.documentUri),
+                returnedRenameUri = promoted.documentUri,
+                unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
             )
         }
         current = current.copy(state = SafCommitState.RENAMED)
@@ -3379,6 +4287,15 @@ public class SafCommitCoordinator(
                 knownUris = listOfNotNull(backupUri, replacement.documentUri, existingUri, promoted.documentUri),
             )
         }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOfNotNull(backupUri, replacement.documentUri, existingUri, promoted.documentUri),
+                returnedRenameUri = promoted.documentUri,
+                unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+            )
+        }
 
         // 9. Settle that rename too.
         val finalSettlement = settleRename(
@@ -3390,13 +4307,33 @@ public class SafCommitCoordinator(
             grant,
         )
         val finalIdentity = when (finalSettlement) {
-            is RenameSettlement.Unknown -> return reconcileKnown(
-                current.copy(renameHistory = current.renameHistory + finalSettlement.evidence),
-                finalSettlement.error,
-                finalSettlement.knownUris + backupUri,
-            )
+            is RenameSettlement.Unknown -> return if (finalSettlement.error == TransferStorageError.Cancelled) {
+                cancelAfterRename(
+                    current,
+                    grant,
+                    finalSettlement.knownUris + backupUri,
+                    returnedRenameIdentity = finalSettlement.evidence.returned,
+                    returnedRenameUri = promoted.documentUri,
+                    unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+                )
+            } else {
+                reconcileKnown(
+                    current.copy(renameHistory = current.renameHistory + finalSettlement.evidence),
+                    finalSettlement.error,
+                    finalSettlement.knownUris + backupUri,
+                )
+            }
 
             is RenameSettlement.Settled -> {
+                if (finalSettlement.identity.reconciliation == SafRenameReconciliation.AMBIGUOUS_BOTH_RESOLVE) {
+                    return finishWithRetainedTemporary(
+                        current,
+                        grant,
+                        stagedDigest,
+                        finalSettlement.evidence,
+                        finalSettlement.identity,
+                    )
+                }
                 current = current.copy(renameHistory = current.renameHistory + finalSettlement.evidence)
                 finalSettlement.identity
             }
@@ -3414,10 +4351,39 @@ public class SafCommitCoordinator(
                 finalIdentity.knownUris + backupUri,
             )
         val finalStoredIdentity = SafStoredDocumentIdentity(finalUri, finalDocumentId)
+        exactChildError(current, grant, finalStoredIdentity, record.expectedFinalName, "overwrite_final")?.let {
+            return reconcileAndSave(
+                current,
+                grant,
+                it,
+                listOf(backupUri, replacement.documentUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, replacement.documentUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+                unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+            )
+        }
         current = current.copy(
             finalUri = finalUri,
             finalIdentity = finalStoredIdentity,
         )
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, replacement.documentUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
+        }
         if (!saveCheckpoint(
                 current,
                 grant,
@@ -3452,6 +4418,15 @@ public class SafCommitCoordinator(
                 returnedRenameIdentity = finalStoredIdentity,
                 returnedRenameUri = promoted.documentUri,
                 knownUris = listOf(backupUri, replacement.documentUri, finalUri),
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, replacement.documentUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
             )
         }
 
@@ -3459,34 +4434,99 @@ public class SafCommitCoordinator(
         // rename is a provider operation; it has to be shown to have produced the
         // bytes that were verified, not assumed to have.
         val verified = verifyProviderCopy(finalUri, finalDocumentId, record, grant, stagedDigest)
+        if (verified.outcome is VerifyResult.Failed &&
+            verified.outcome.error == TransferStorageError.Cancelled
+        ) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
+        }
+        val unverifiedFinal = current.copy(finalUri = null, finalIdentity = null)
         verified.closeError?.let {
-            return reconcileKnown(current, it, listOf(backupUri, finalUri).distinct())
+            return reconcileAndSave(
+                unverifiedFinal,
+                grant,
+                it,
+                listOf(backupUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
         }
         if (verified.outcome is VerifyResult.Failed) {
-            return reconcileKnown(
-                current,
+            return reconcileAndSave(
+                unverifiedFinal,
+                grant,
                 verified.outcome.error,
-                listOf(backupUri, finalUri).distinct(),
+                listOf(backupUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
             )
         }
         if (verified.outcome is VerifyResult.Mismatched) {
-            return reconcileKnown(
-                current,
+            return reconcileAndSave(
+                unverifiedFinal,
+                grant,
                 TransferStorageError.IntegrityMismatch("digest"),
-                listOf(backupUri, finalUri).distinct(),
+                listOf(backupUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
             )
         }
         if (verified.outcome !is VerifyResult.Matched) {
-            return reconcileKnown(
-                current,
+            return reconcileAndSave(
+                unverifiedFinal,
+                grant,
                 TransferStorageError.StateConflict("verification_digest_missing"),
-                listOf(backupUri, finalUri).distinct(),
+                listOf(backupUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, replacement.documentUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
+        }
+        exactChildError(current, grant, finalStoredIdentity, record.expectedFinalName, "overwrite_final")?.let {
+            return reconcileAndSave(
+                current.copy(finalUri = null, finalIdentity = null),
+                grant,
+                it,
+                listOf(backupUri, replacement.documentUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, replacement.documentUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
             )
         }
         current = current.copy(
             finalUri = finalUri,
             finalIdentity = finalStoredIdentity,
         )
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
+        }
         if (!saveCheckpoint(
                 current,
                 grant,
@@ -3503,6 +4543,15 @@ public class SafCommitCoordinator(
                 returnedRenameIdentity = finalStoredIdentity,
                 returnedRenameUri = promoted.documentUri,
                 knownUris = listOf(backupUri, finalUri),
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(backupUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
             )
         }
         current = current.copy(state = SafCommitState.PUBLISHED_OR_VISIBLE)
@@ -3567,14 +4616,41 @@ public class SafCommitCoordinator(
                     grant,
                     setOf(SafCleanupPending.BACKUP),
                 )
-                else -> reconcileKnown(current, it, listOf(backupUri, finalUri).distinct())
+                else -> reconcileAndSave(current, grant, it, listOf(backupUri, finalUri))
             }
+        }
+        if (isCancelled()) {
+            return reconcileAndSave(current, grant, TransferStorageError.Cancelled, listOf(backupUri, finalUri))
+        }
+        cleanupFinalIdentityError(current, grant, finalStoredIdentity)?.let {
+            return reconcileAndSave(current, grant, it, listOf(backupUri, finalUri))
+        }
+        exactChildError(
+            current,
+            grant,
+            backupIdentity,
+            backupDocumentName(current.expectedFinalName, current.partialId),
+            "overwrite_backup_cleanup",
+        )?.let { return reconcileAndSave(current, grant, it, listOf(backupUri, finalUri)) }
+        if (isCancelled()) {
+            return reconcileAndSave(current, grant, TransferStorageError.Cancelled, listOf(backupUri, finalUri))
         }
         val deletion = deleteExactChildIdentity(
             current,
-            SafStoredDocumentIdentity(backupUri, backupId),
+            backupIdentity,
             grant,
+            backupDocumentName(current.expectedFinalName, current.partialId),
         )
+        if (isCancelled()) {
+            return reconcileAndSave(
+                current,
+                grant,
+                TransferStorageError.Cancelled,
+                listOf(backupUri, finalUri),
+                returnedRenameIdentity = finalStoredIdentity,
+                returnedRenameUri = promoted.documentUri,
+            )
+        }
 
         // 13. Absence is settled by the follow-up query, never by the delete
         // request's own answer.
@@ -3589,8 +4665,12 @@ public class SafCommitCoordinator(
                         returnedRenameUri = promoted.documentUri,
                     )
                 ) {
+                    val unresolvedCleanup = current.copy(
+                        state = SafCommitState.BACKUP_CLEANUP_PENDING,
+                        pendingCleanup = setOf(SafCleanupPending.BACKUP, SafCleanupPending.STAGING),
+                    )
                     journalFailure(
-                        observed,
+                        unresolvedCleanup,
                         grant,
                         SafCommitCheckpointPhase.BACKUP_DELETE_OBSERVED,
                         afterMutation = true,
@@ -3686,6 +4766,39 @@ public class SafCommitCoordinator(
         knownUris = knownUris.distinct(),
     )
 
+    private fun reconcileAndSave(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+        error: TransferStorageError,
+        knownUris: List<String>,
+        returnedRenameIdentity: SafStoredDocumentIdentity? = null,
+        returnedRenameUri: String? = null,
+    ): SafCommitOutcome.ReconciliationRequired {
+        val unresolved = record.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
+        val prior = runCatching { journal.load(record.partialId) }.getOrNull()
+        val returnedIdentity = returnedRenameIdentity ?: prior?.returnedRenameIdentity
+        val returnedUri = returnedRenameUri ?: prior?.returnedRenameUri
+        val unresolvedPhase = prior?.unresolvedRenamePhase?.takeIf { phase ->
+            unresolved.renameHistory.none { it.phase == phase }
+        }
+        val checkpoint = checkpointFor(
+            unresolved,
+            grant,
+            SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
+            returnedRenameIdentity = returnedIdentity,
+            returnedRenameUri = returnedUri,
+            failure = error,
+            unresolvedRenamePhase = unresolvedPhase,
+        )
+        val saved = runCatching { journal.save(checkpoint) }.getOrDefault(false)
+        return SafCommitOutcome.ReconciliationRequired(
+            record = unresolved,
+            error = if (saved) error else TransferStorageError.StateConflict("journal_reconciliation_save_failed"),
+            knownUris = knownUris.distinct(),
+            checkpoint = checkpoint,
+        )
+    }
+
     private fun renameMutationFailed(
         record: SafCommitRecord,
         grant: SafTreeGrant,
@@ -3742,6 +4855,7 @@ public class SafCommitCoordinator(
         grant: SafTreeGrant,
         stagedDigest: Sha256Digest,
     ): VerifiedTemporary {
+        if (isCancelled()) return VerifiedTemporary.Stopped(cancelBeforePublication(record, grant))
         val parentUri = record.uriForTree(record.parentDocumentId)
         authorizationError(record, grant, SafContainmentOperation.CREATE_DESTINATION)?.let {
             return VerifiedTemporary.Stopped(route(record, it, created = null))
@@ -3757,15 +4871,31 @@ public class SafCommitCoordinator(
                 ),
             )
         }
+        if (isCancelled()) return VerifiedTemporary.Stopped(cancelBeforePublication(record, grant))
         val created = when (val result = gateway.create(parentUri, "application/octet-stream", tempName)) {
             is SafCreate.Created -> result
             is SafCreate.Failed -> {
-                saveCheckpoint(
-                    record,
-                    grant,
-                    SafCommitCheckpointPhase.TEMPORARY_CREATE_INTENT,
-                    failure = result.error,
-                )
+                if (!saveCheckpoint(
+                        record,
+                        grant,
+                        SafCommitCheckpointPhase.TEMPORARY_CREATE_INTENT,
+                        failure = result.error,
+                    )
+                ) {
+                    return VerifiedTemporary.Stopped(
+                        journalFailure(
+                            record,
+                            grant,
+                            SafCommitCheckpointPhase.TEMPORARY_CREATE_INTENT,
+                            afterMutation = true,
+                        ),
+                    )
+                }
+                if (isCancelled()) {
+                    return VerifiedTemporary.Stopped(
+                        reconcileCancelledProviderMutation(record, grant, emptyList()),
+                    )
+                }
                 return VerifiedTemporary.Stopped(onCreateFailed(record, result.error))
             }
         }
@@ -3775,6 +4905,11 @@ public class SafCommitCoordinator(
             temporaryUri = created.documentUri,
             temporaryIdentity = SafStoredDocumentIdentity(created.documentUri, created.documentId),
         )
+        if (isCancelled()) {
+            return VerifiedTemporary.Stopped(
+                reconcileCancelledProviderMutation(current, grant, listOf(created.documentUri)),
+            )
+        }
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.TEMPORARY_CREATED)) {
             return VerifiedTemporary.Stopped(
                 journalFailure(
@@ -3785,6 +4920,12 @@ public class SafCommitCoordinator(
                 ),
             )
         }
+        if (isCancelled()) return VerifiedTemporary.Stopped(cancelBeforePublication(current, grant))
+        val temporaryIdentity = requireNotNull(current.temporaryIdentity)
+        exactChildError(current, grant, temporaryIdentity, tempName, "temporary")?.let {
+            return VerifiedTemporary.Stopped(reconcileAndSave(current, grant, it, listOf(created.documentUri)))
+        }
+        if (isCancelled()) return VerifiedTemporary.Stopped(cancelBeforePublication(current, grant))
 
         // Copy, flush and close before anything is verified: the digest has to
         // come from a descriptor the provider is holding, not from the stream
@@ -3808,16 +4949,26 @@ public class SafCommitCoordinator(
         current = current.copy(copiedBytes = copiedBytes)
         phase.journalError?.let {
             return VerifiedTemporary.Stopped(
-                journalFailure(
-                    current,
-                    grant,
-                    SafCommitCheckpointPhase.COPY_STARTED,
-                    afterMutation = true,
-                ),
+                if (it == TransferStorageError.Cancelled) {
+                    reconcileCancelledProviderMutation(current, grant, listOf(created.documentUri))
+                } else {
+                    journalFailure(
+                        current,
+                        grant,
+                        SafCommitCheckpointPhase.COPY_STARTED,
+                        afterMutation = true,
+                        knownUris = listOf(created.documentUri),
+                    )
+                },
             )
         }
         phase.closeError?.let {
             return VerifiedTemporary.Stopped(onCopyFailed(current, it, created.documentUri))
+        }
+        if (phase.outcome is SafCopyOutcome.Failed &&
+            phase.outcome.error == TransferStorageError.Cancelled
+        ) {
+            return VerifiedTemporary.Stopped(cancelBeforePublication(current, grant))
         }
         if (phase.outcome is SafCopyOutcome.Failed) {
             return VerifiedTemporary.Stopped(
@@ -3845,6 +4996,7 @@ public class SafCommitCoordinator(
         current = current.copy(state = SafCommitState.PROVIDER_FLUSH_COMPLETED)
 
         current = current.copy(state = SafCommitState.PROVIDER_VERIFICATION_STARTED)
+        if (isCancelled()) return VerifiedTemporary.Stopped(cancelBeforePublication(current, grant))
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.PROVIDER_VERIFICATION_INTENT)) {
             return VerifiedTemporary.Stopped(
                 journalFailure(
@@ -3855,6 +5007,7 @@ public class SafCommitCoordinator(
                 ),
             )
         }
+        if (isCancelled()) return VerifiedTemporary.Stopped(cancelBeforePublication(current, grant))
         val verified = verifyProviderCopy(
             created.documentUri,
             created.documentId,
@@ -3867,7 +5020,11 @@ public class SafCommitCoordinator(
         }
         if (verified.outcome is VerifyResult.Failed) {
             return VerifiedTemporary.Stopped(
-                onCopyFailed(current, verified.outcome.error, created.documentUri),
+                if (verified.outcome.error == TransferStorageError.Cancelled) {
+                    cancelBeforePublication(current, grant)
+                } else {
+                    onCopyFailed(current, verified.outcome.error, created.documentUri)
+                },
             )
         }
         if (verified.outcome is VerifyResult.Mismatched) {
@@ -3888,6 +5045,10 @@ public class SafCommitCoordinator(
                 ),
             )
         }
+        exactChildError(current, grant, temporaryIdentity, tempName, "temporary")?.let {
+            return VerifiedTemporary.Stopped(reconcileAndSave(current, grant, it, listOf(created.documentUri)))
+        }
+        if (isCancelled()) return VerifiedTemporary.Stopped(cancelBeforePublication(current, grant))
         current = current.copy(state = SafCommitState.PROVIDER_VERIFIED)
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.PROVIDER_VERIFIED)) {
             return VerifiedTemporary.Stopped(
@@ -3923,6 +5084,13 @@ public class SafCommitCoordinator(
         stagedDigest: Sha256Digest,
     ): SafCommitOutcome {
         var current = record
+        if (isCancelled()) return cancelBeforePublication(current, grant)
+        val temporaryIdentity = current.temporaryIdentity
+            ?: return reconcileKnown(current, TransferStorageError.ContainmentUnknown("temporary_identity_missing"), listOf(created.documentUri))
+        val temporaryName = temporaryDocumentName(current.expectedFinalName, current.partialId)
+        exactChildError(current, grant, temporaryIdentity, temporaryName, "temporary")?.let {
+            return reconcileAndSave(current, grant, it, listOf(created.documentUri))
+        }
         renameHistoryAppendError(current, grant, SafRenamePhase.FINAL_PROMOTION)?.let {
             return reconcileKnown(current, it, listOf(created.documentUri))
         }
@@ -3939,6 +5107,7 @@ public class SafCommitCoordinator(
         )?.let {
             return route(current, it, created.documentUri)
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.FINAL_RENAME_INTENT)) {
             return journalFailure(
                 current,
@@ -3948,11 +5117,25 @@ public class SafCommitCoordinator(
                 knownUris = listOf(created.documentUri),
             )
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
+        exactChildError(current, grant, temporaryIdentity, temporaryName, "temporary")?.let {
+            return reconcileAndSave(current, grant, it, listOf(created.documentUri))
+        }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         val renamed = when (
             val result = gateway.rename(created.documentUri, record.expectedFinalName)
         ) {
             is SafRename.Renamed -> result
             is SafRename.Failed -> return onRenameFailed(current, grant, result.error, created.documentUri)
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOfNotNull(created.documentUri, renamed.documentUri),
+                returnedRenameUri = renamed.documentUri,
+                unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+            )
         }
         current = current.copy(state = SafCommitState.RENAMED)
         if (!saveCheckpoint(
@@ -3987,6 +5170,15 @@ public class SafCommitCoordinator(
                 knownUris = listOfNotNull(created.documentUri, renamed.documentUri),
             )
         }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOfNotNull(created.documentUri, renamed.documentUri),
+                returnedRenameUri = renamed.documentUri,
+                unresolvedRenamePhase = SafRenamePhase.FINAL_PROMOTION,
+            )
+        }
 
         // The provider may have returned the same identity, a new one, or
         // nothing. Which of those it was decides what exists now, so it is
@@ -4000,16 +5192,35 @@ public class SafCommitCoordinator(
             current,
             grant,
         )) {
-            is RenameSettlement.Unknown -> return onRenameUnresolved(
-                current,
-                grant,
-                settled,
-                created.documentUri,
-                renamed.documentUri,
-            )
+            is RenameSettlement.Unknown -> return if (settled.error == TransferStorageError.Cancelled) {
+                cancelAfterRename(
+                    current.copy(renameHistory = current.renameHistory + settled.evidence),
+                    grant,
+                    settled.knownUris,
+                    returnedRenameIdentity = settled.evidence.returned,
+                    returnedRenameUri = renamed.documentUri,
+                )
+            } else {
+                onRenameUnresolved(
+                    current,
+                    grant,
+                    settled,
+                    created.documentUri,
+                    renamed.documentUri,
+                )
+            }
 
             is RenameSettlement.Settled -> {
                 val identity = settled.identity
+                if (identity.reconciliation == SafRenameReconciliation.AMBIGUOUS_BOTH_RESOLVE) {
+                    return finishWithRetainedTemporary(
+                        current,
+                        grant,
+                        stagedDigest,
+                        settled.evidence,
+                        identity,
+                    )
+                }
                 if (identity.requiresReconciliation) {
                     return onRenameAmbiguous(current, grant, identity, settled.evidence, created.documentUri)
                 }
@@ -4019,6 +5230,15 @@ public class SafCommitCoordinator(
                     ?: return onRenameAmbiguous(current, grant, identity, settled.evidence, created.documentUri)
                 current = current.copy(renameHistory = current.renameHistory + settled.evidence)
                 val settledIdentity = SafStoredDocumentIdentity(finalUri, finalDocumentId)
+                if (isCancelled()) {
+                    return cancelAfterRename(
+                        current,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
                 if (!saveCheckpoint(
                         current,
                         grant,
@@ -4053,6 +5273,34 @@ public class SafCommitCoordinator(
                         returnedRenameIdentity = settledIdentity,
                         returnedRenameUri = renamed.documentUri,
                         knownUris = listOf(created.documentUri, finalUri),
+                    )
+                }
+                if (isCancelled()) {
+                    return cancelAfterRename(
+                        current,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
+                exactChildError(current, grant, settledIdentity, record.expectedFinalName, "final")?.let {
+                    return reconcileAndSave(
+                        current,
+                        grant,
+                        it,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
+                if (isCancelled()) {
+                    return cancelAfterRename(
+                        current,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
                     )
                 }
 
@@ -4066,34 +5314,99 @@ public class SafCommitCoordinator(
                     grant,
                     stagedDigest,
                 )
+                val knownFinal = current.copy(finalUri = finalUri, finalIdentity = settledIdentity)
+                if (finalVerification.outcome is VerifyResult.Failed &&
+                    finalVerification.outcome.error == TransferStorageError.Cancelled
+                ) {
+                    return cancelAfterRename(
+                        knownFinal,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
                 finalVerification.closeError?.let {
-                    return reconcileKnown(current, it, listOf(created.documentUri, finalUri).distinct())
+                    return reconcileAndSave(
+                        current,
+                        grant,
+                        it,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
                 }
                 if (finalVerification.outcome is VerifyResult.Failed) {
-                    return reconcileKnown(
+                    return reconcileAndSave(
                         current,
+                        grant,
                         finalVerification.outcome.error,
-                        listOf(created.documentUri, finalUri).distinct(),
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
                     )
                 }
                 if (finalVerification.outcome is VerifyResult.Mismatched) {
-                    return reconcileKnown(
+                    return reconcileAndSave(
                         current,
+                        grant,
                         TransferStorageError.IntegrityMismatch("digest"),
-                        listOf(created.documentUri, finalUri).distinct(),
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
                     )
                 }
                 if (finalVerification.outcome !is VerifyResult.Matched) {
-                    return reconcileKnown(
+                    return reconcileAndSave(
                         current,
+                        grant,
                         TransferStorageError.StateConflict("verification_digest_missing"),
-                        listOf(created.documentUri, finalUri).distinct(),
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
+                if (isCancelled()) {
+                    return cancelAfterRename(
+                        knownFinal,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
+                exactChildError(current, grant, settledIdentity, record.expectedFinalName, "final")?.let {
+                    return reconcileAndSave(
+                        current,
+                        grant,
+                        it,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
+                if (isCancelled()) {
+                    return cancelAfterRename(
+                        knownFinal,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
                     )
                 }
                 current = current.copy(
                     finalUri = finalUri,
                     finalIdentity = settledIdentity,
                 )
+                if (isCancelled()) {
+                    return cancelAfterRename(
+                        current,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
                 if (!saveCheckpoint(
                         current,
                         grant,
@@ -4110,6 +5423,15 @@ public class SafCommitCoordinator(
                         returnedRenameIdentity = settledIdentity,
                         returnedRenameUri = renamed.documentUri,
                         knownUris = listOf(created.documentUri, finalUri),
+                    )
+                }
+                if (isCancelled()) {
+                    return cancelAfterRename(
+                        current,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
                     )
                 }
                 current = current.copy(
@@ -4134,9 +5456,261 @@ public class SafCommitCoordinator(
                         knownUris = listOf(created.documentUri, finalUri),
                     )
                 }
+                if (isCancelled()) {
+                    return cancelAfterRename(
+                        current,
+                        grant,
+                        listOf(created.documentUri, finalUri),
+                        returnedRenameIdentity = settledIdentity,
+                        returnedRenameUri = renamed.documentUri,
+                    )
+                }
                 return finish(current, finalUri, grant)
             }
         }
+    }
+
+    /**
+     * Safely accepts providers that implement rename as a copy and leave the
+     * exact, conspicuously named temporary behind. The returned final must be
+     * the exact child at the final name and pass a fresh size/digest read before
+     * the old identity can become a cleanup target.
+     */
+    private fun finishWithRetainedTemporary(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+        stagedDigest: Sha256Digest,
+        evidence: SafRenameEvidence,
+        renameIdentity: SafRenameIdentity,
+    ): SafCommitOutcome {
+        val temporary = evidence.before
+        val final = evidence.returned ?: return onRenameAmbiguous(
+            record,
+            grant,
+            renameIdentity,
+            evidence,
+            evidence.before.documentUri,
+        )
+        val temporaryName = temporaryDocumentName(record.expectedFinalName, record.partialId)
+        fun unresolved(error: TransferStorageError, uris: List<String>) = onRenameUnresolved(
+            record.copy(temporaryIdentity = temporary, temporaryUri = temporary.documentUri),
+            grant,
+            RenameSettlement.Unknown(error, uris.distinct(), evidence),
+            temporary.documentUri,
+            final.documentUri,
+        )
+
+        val temporaryCandidate = when (val lookup = findRecoveryChild(record, grant, temporaryName)) {
+            is SafLookup.Found -> lookup.document
+            SafLookup.Absent -> return unresolved(
+                TransferStorageError.ContainmentUnknown("retained_temporary_not_reachable"),
+                listOf(temporary.documentUri, final.documentUri),
+            )
+            is SafLookup.Failed -> return unresolved(lookup.error, listOf(temporary.documentUri, final.documentUri))
+        }
+        val finalCandidate = when (val lookup = findRecoveryChild(record, grant, record.expectedFinalName)) {
+            is SafLookup.Found -> lookup.document
+            SafLookup.Absent -> return unresolved(
+                TransferStorageError.ContainmentUnknown("renamed_final_not_reachable"),
+                listOf(temporary.documentUri, final.documentUri),
+            )
+            is SafLookup.Failed -> return unresolved(lookup.error, listOf(temporary.documentUri, final.documentUri))
+        }
+        if (temporaryCandidate.documentUri != temporary.documentUri ||
+            temporaryCandidate.documentId != temporary.documentId ||
+            temporaryCandidate.displayName != temporaryName ||
+            temporaryCandidate.isDirectory ||
+            finalCandidate.documentUri != final.documentUri ||
+            finalCandidate.documentId != final.documentId ||
+            finalCandidate.displayName != record.expectedFinalName ||
+            finalCandidate.isDirectory
+        ) {
+            return unresolved(
+                TransferStorageError.ContainmentUnknown("rename_candidates_not_exact"),
+                listOf(temporaryCandidate.documentUri, finalCandidate.documentUri),
+            )
+        }
+        val renameHistory = if (record.renameHistory.any { it.phase == SafRenamePhase.FINAL_PROMOTION }) {
+            record.renameHistory
+        } else {
+            record.renameHistory + evidence
+        }
+        if (!renameHistoryMatchesCommit(
+                history = renameHistory,
+                scope = SafRenameScope.fromRecord(record, grant),
+                strategy = record.strategy,
+                duplicatePolicy = record.duplicatePolicy,
+                existingIdentity = record.existingIdentity,
+            )
+        ) {
+            return unresolved(
+                TransferStorageError.ContainmentUnknown("rename_history_malformed"),
+                listOf(temporary.documentUri, final.documentUri),
+            )
+        }
+        var current = record.copy(
+            renameHistory = renameHistory,
+            temporaryUri = temporary.documentUri,
+            temporaryIdentity = temporary,
+            verifiedDigest = stagedDigest,
+        )
+        if (!saveCheckpoint(
+                current,
+                grant,
+                SafCommitCheckpointPhase.FINAL_RENAMED,
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        ) {
+            return journalFailure(
+                current,
+                grant,
+                SafCommitCheckpointPhase.FINAL_RENAMED,
+                afterMutation = true,
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+                knownUris = listOf(temporary.documentUri, final.documentUri),
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(temporary.documentUri, final.documentUri),
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        }
+        if (!saveCheckpoint(
+                current,
+                grant,
+                SafCommitCheckpointPhase.FINAL_VERIFICATION_INTENT,
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        ) {
+            return journalFailure(
+                current,
+                grant,
+                SafCommitCheckpointPhase.FINAL_VERIFICATION_INTENT,
+                afterMutation = true,
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+                knownUris = listOf(temporary.documentUri, final.documentUri),
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(temporary.documentUri, final.documentUri),
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        }
+        val verification = verifyProviderCopy(final.documentUri, final.documentId, current, grant, stagedDigest)
+        verification.closeError?.let { error ->
+            return unresolved(error, listOf(temporary.documentUri, final.documentUri))
+        }
+        if (verification.outcome !is VerifyResult.Matched) {
+            val error = when (val outcome = verification.outcome) {
+                is VerifyResult.Failed -> outcome.error
+                is VerifyResult.Mismatched -> TransferStorageError.IntegrityMismatch("retained_rename_final")
+                else -> TransferStorageError.StateConflict("retained_rename_final_unverified")
+            }
+            if (error == TransferStorageError.Cancelled) {
+                return cancelAfterRename(
+                    current,
+                    grant,
+                    listOf(temporary.documentUri, final.documentUri),
+                    returnedRenameIdentity = final,
+                    returnedRenameUri = final.documentUri,
+                )
+            }
+            return unresolved(error, listOf(temporary.documentUri, final.documentUri))
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(temporary.documentUri, final.documentUri),
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        }
+        exactChildError(current, grant, temporary, temporaryName, "retained_temporary")?.let {
+            return unresolved(it, listOf(temporary.documentUri, final.documentUri))
+        }
+        exactChildError(current, grant, final, record.expectedFinalName, "retained_final")?.let {
+            return unresolved(it, listOf(temporary.documentUri, final.documentUri))
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(temporary.documentUri, final.documentUri),
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        }
+        val cleanup = buildSet {
+            add(SafCleanupPending.STAGING)
+            if (temporary != final) add(SafCleanupPending.PROVIDER_TEMPORARY)
+            if (record.backupIdentity != null) add(SafCleanupPending.BACKUP)
+        }
+        current = current.copy(
+            state = SafCommitState.PUBLISHED_OR_VISIBLE,
+            finalUri = final.documentUri,
+            finalIdentity = final,
+            copiedBytes = record.expectedSizeBytes,
+            pendingCleanup = cleanup,
+        )
+        if (!saveCheckpoint(
+                current,
+                grant,
+                SafCommitCheckpointPhase.FINAL_VERIFIED,
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        ) {
+            return journalFailure(
+                current,
+                grant,
+                SafCommitCheckpointPhase.FINAL_VERIFIED,
+                afterMutation = true,
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+                knownUris = listOf(temporary.documentUri, final.documentUri),
+            )
+        }
+        if (isCancelled()) {
+            return cancelAfterRename(
+                current,
+                grant,
+                listOf(temporary.documentUri, final.documentUri),
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        }
+        if (!saveCheckpoint(
+                current,
+                grant,
+                SafCommitCheckpointPhase.PUBLISHED,
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+            )
+        ) {
+            return journalFailure(
+                current,
+                grant,
+                SafCommitCheckpointPhase.PUBLISHED,
+                afterMutation = true,
+                returnedRenameIdentity = final,
+                returnedRenameUri = final.documentUri,
+                knownUris = listOf(temporary.documentUri, final.documentUri),
+            )
+        }
+        return finishAndRetryCleanup(current, final.documentUri, grant)
     }
 
     // -- Strategy B ---------------------------------------------------------
@@ -4160,6 +5734,7 @@ public class SafCommitCoordinator(
                 TransferStorageError.Unsupported("saf_visible_final_copy"),
             )
         }
+        if (isCancelled()) return cancelBeforePublication(record, grant)
 
         val parentUri = record.uriForTree(record.parentDocumentId)
         authorizationError(record, grant, SafContainmentOperation.CREATE_DESTINATION)?.let {
@@ -4173,6 +5748,7 @@ public class SafCommitCoordinator(
                 afterMutation = false,
             )
         }
+        if (isCancelled()) return cancelBeforePublication(record, grant)
         val created = when (
             val result = gateway.create(
                 parentUri,
@@ -4182,12 +5758,23 @@ public class SafCommitCoordinator(
         ) {
             is SafCreate.Created -> result
             is SafCreate.Failed -> {
-                saveCheckpoint(
-                    record,
-                    grant,
-                    SafCommitCheckpointPhase.VISIBLE_CREATE_INTENT,
-                    failure = result.error,
-                )
+                if (!saveCheckpoint(
+                        record,
+                        grant,
+                        SafCommitCheckpointPhase.VISIBLE_CREATE_INTENT,
+                        failure = result.error,
+                    )
+                ) {
+                    return journalFailure(
+                        record,
+                        grant,
+                        SafCommitCheckpointPhase.VISIBLE_CREATE_INTENT,
+                        afterMutation = true,
+                    )
+                }
+                if (isCancelled()) {
+                    return reconcileCancelledProviderMutation(record, grant, emptyList())
+                }
                 return onCreateFailed(record, result.error)
             }
         }
@@ -4197,6 +5784,9 @@ public class SafCommitCoordinator(
             finalUri = created.documentUri,
             finalIdentity = SafStoredDocumentIdentity(created.documentUri, created.documentId),
         )
+        if (isCancelled()) {
+            return reconcileCancelledProviderMutation(current, grant, listOf(created.documentUri))
+        }
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.VISIBLE_CREATED)) {
             return journalFailure(
                 current,
@@ -4206,6 +5796,12 @@ public class SafCommitCoordinator(
                 knownUris = listOf(created.documentUri),
             )
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
+        val visibleIdentity = requireNotNull(current.finalIdentity)
+        exactChildError(current, grant, visibleIdentity, record.expectedFinalName, "visible_final")?.let {
+            return reconcileAndSave(current, grant, it, listOf(created.documentUri))
+        }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
 
         current = current.copy(state = SafCommitState.COPY_STARTED)
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.COPY_STARTED)) {
@@ -4224,15 +5820,24 @@ public class SafCommitCoordinator(
         }
         current = current.copy(copiedBytes = copiedBytes)
         phase.journalError?.let {
-            return journalFailure(
-                current,
-                grant,
-                SafCommitCheckpointPhase.COPY_STARTED,
-                afterMutation = true,
-                knownUris = listOf(created.documentUri),
-            )
+            return if (it == TransferStorageError.Cancelled) {
+                reconcileCancelledProviderMutation(current, grant, listOf(created.documentUri))
+            } else {
+                journalFailure(
+                    current,
+                    grant,
+                    SafCommitCheckpointPhase.COPY_STARTED,
+                    afterMutation = true,
+                    knownUris = listOf(created.documentUri),
+                )
+            }
         }
         phase.closeError?.let { return onCopyFailed(current, it, created.documentUri) }
+        if (phase.outcome is SafCopyOutcome.Failed &&
+            phase.outcome.error == TransferStorageError.Cancelled
+        ) {
+            return cancelBeforePublication(current, grant)
+        }
         if (phase.outcome is SafCopyOutcome.Failed) {
             return onCopyFailed(current, phase.outcome.error, created.documentUri)
         }
@@ -4253,6 +5858,7 @@ public class SafCommitCoordinator(
         current = current.copy(state = SafCommitState.PROVIDER_FLUSH_COMPLETED)
 
         current = current.copy(state = SafCommitState.PROVIDER_VERIFICATION_STARTED)
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.PROVIDER_VERIFICATION_INTENT)) {
             return journalFailure(
                 current,
@@ -4262,6 +5868,7 @@ public class SafCommitCoordinator(
                 knownUris = listOf(created.documentUri),
             )
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         val verified = verifyProviderCopy(
             created.documentUri,
             created.documentId,
@@ -4271,7 +5878,11 @@ public class SafCommitCoordinator(
         )
         verified.closeError?.let { return onCopyFailed(current, it, created.documentUri) }
         if (verified.outcome is VerifyResult.Failed) {
-            return onCopyFailed(current, verified.outcome.error, created.documentUri)
+            return if (verified.outcome.error == TransferStorageError.Cancelled) {
+                cancelBeforePublication(current, grant)
+            } else {
+                onCopyFailed(current, verified.outcome.error, created.documentUri)
+            }
         }
         if (verified.outcome is VerifyResult.Mismatched) {
             return onCopyFailed(
@@ -4287,6 +5898,11 @@ public class SafCommitCoordinator(
                 created.documentUri,
             )
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
+        exactChildError(current, grant, visibleIdentity, record.expectedFinalName, "visible_final")?.let {
+            return reconcileAndSave(current, grant, it, listOf(created.documentUri))
+        }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
         current = current.copy(state = SafCommitState.PROVIDER_VERIFIED)
         if (!saveCheckpoint(current, grant, SafCommitCheckpointPhase.PROVIDER_VERIFIED)) {
             return journalFailure(
@@ -4297,6 +5913,7 @@ public class SafCommitCoordinator(
                 knownUris = listOf(created.documentUri),
             )
         }
+        if (isCancelled()) return cancelBeforePublication(current, grant)
 
         current = current.copy(
             state = SafCommitState.PUBLISHED_OR_VISIBLE,
@@ -4311,6 +5928,9 @@ public class SafCommitCoordinator(
                 knownUris = listOf(created.documentUri),
             )
         }
+        // Publication is now durably recorded after full verification. A late
+        // cancellation may stop a retry, but it must not relabel a complete
+        // visible file as an interrupted copy or delete it as one.
         return finish(current, created.documentUri, grant)
     }
 
@@ -4329,6 +5949,9 @@ public class SafCommitCoordinator(
         targetDocumentId: String,
         grant: SafTreeGrant,
     ): SafCopyPhase {
+        if (isCancelled()) {
+            return unflushed(SafCopyOutcome.Failed(TransferStorageError.Cancelled, 0L))
+        }
         val staged = when (val opened = staging.open(record.partialId)) {
             is SafOpen.Opened -> opened.handle as? SafReadHandle ?: run {
                 val closeError = closeHandle(opened.handle, "read")
@@ -4344,6 +5967,10 @@ public class SafCommitCoordinator(
             is SafOpen.Refused -> return unflushed(SafCopyOutcome.Failed(opened.error, 0L))
         }
 
+        if (isCancelled()) {
+            val closeError = closeHandle(staged, "read")
+            return unflushed(SafCopyOutcome.Failed(TransferStorageError.Cancelled, 0L), closeError)
+        }
         authorizationError(
             record,
             grant,
@@ -4353,6 +5980,10 @@ public class SafCommitCoordinator(
         )?.let {
             val closeError = closeHandle(staged, "read")
             return unflushed(SafCopyOutcome.Failed(it, 0L), closeError)
+        }
+        if (isCancelled()) {
+            val closeError = closeHandle(staged, "read")
+            return unflushed(SafCopyOutcome.Failed(TransferStorageError.Cancelled, 0L), closeError)
         }
         val target = when (val opened = gateway.openWrite(targetUri)) {
             is SafOpen.Opened -> opened.handle as? SafWriteHandle ?: run {
@@ -4369,19 +6000,47 @@ public class SafCommitCoordinator(
 
             is SafOpen.Refused -> {
                 val closeError = closeHandle(staged, "read")
-                return unflushed(SafCopyOutcome.Failed(opened.error, 0L), closeError)
+                val journalError = if (saveCheckpoint(
+                        record,
+                        grant,
+                        SafCommitCheckpointPhase.COPY_STARTED,
+                        failure = opened.error,
+                    )
+                ) {
+                    null
+                } else {
+                    TransferStorageError.StateConflict("journal_copy_result_failed")
+                }
+                return SafCopyPhase(
+                    outcome = SafCopyOutcome.Failed(opened.error, 0L),
+                    flush = FlushDurability.FlushUnsupported,
+                    closeError = closeError,
+                    journalError = journalError,
+                )
             }
+        }
+        if (isCancelled()) {
+            val closeError = closeBoth(target, staged)
+            return SafCopyPhase(
+                outcome = SafCopyOutcome.Failed(TransferStorageError.Cancelled, 0L),
+                flush = FlushDurability.FlushUnsupported,
+                closeError = closeError,
+                journalError = TransferStorageError.Cancelled,
+            )
         }
 
         var closeError: TransferStorageError? = null
         val phase = try {
-            val outcome = SafCopyStreamer.copy(
+            var outcome = SafCopyStreamer.copy(
                 read = staged,
                 write = target,
                 totalBytes = record.expectedSizeBytes,
                 buffer = ByteArray(copyBufferBytes),
                 isCancelled = isCancelled,
             )
+            if (outcome is SafCopyOutcome.Copied && isCancelled()) {
+                outcome = SafCopyOutcome.Failed(TransferStorageError.Cancelled, outcome.bytes)
+            }
             // Flushed before the handle is closed, or not at all. The intent is
             // durable before asking the provider to flush.
             var journalError: TransferStorageError? = null
@@ -4397,8 +6056,33 @@ public class SafCommitCoordinator(
                 } else if (!saveCheckpoint(copiedRecord, grant, SafCommitCheckpointPhase.FLUSH_INTENT)) {
                     journalError = TransferStorageError.StateConflict("journal_flush_intent_failed")
                     FlushDurability.FlushUnsupported
+                } else if (isCancelled()) {
+                    if (!saveCheckpoint(
+                            copiedRecord,
+                            grant,
+                            SafCommitCheckpointPhase.CANCELLED,
+                            failure = TransferStorageError.Cancelled,
+                        )
+                    ) {
+                        journalError = TransferStorageError.StateConflict("journal_cancel_save_failed")
+                    }
+                    return SafCopyPhase(
+                        SafCopyOutcome.Failed(TransferStorageError.Cancelled, copiedBytes),
+                        FlushDurability.FlushUnsupported,
+                        journalError = journalError,
+                    )
                 } else {
                     val result = target.flush()
+                    if (isCancelled()) {
+                        // Flush may have changed provider state. The caller records
+                        // reconciliation rather than replacing this unresolved
+                        // mutation with a terminal cancellation checkpoint.
+                        return SafCopyPhase(
+                            SafCopyOutcome.Failed(TransferStorageError.Cancelled, copiedBytes),
+                            result,
+                            journalError = TransferStorageError.Cancelled,
+                        )
+                    }
                     val flushPhase = if (result == FlushDurability.FlushAttemptedGuaranteeUnknown) {
                         SafCommitCheckpointPhase.FLUSH_COMPLETED
                     } else {
@@ -4510,6 +6194,7 @@ public class SafCommitCoordinator(
         verification: VerifyResult,
         buffer: ByteArray,
     ): VerifyResult {
+        if (isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
         if (verification !is VerifyResult.Matched &&
             verification !is VerifyResult.VerifiedWithoutExpected
         ) {
@@ -4540,6 +6225,7 @@ public class SafCommitCoordinator(
 
     /** Hashes the staging bytes in a fresh bounded pass and closes their sole owner. */
     private fun verifyStagedBytes(record: SafCommitRecord): VerifyPhase {
+        if (isCancelled()) return VerifyPhase(VerifyResult.Failed(TransferStorageError.Cancelled))
         val handle = when (val opened = staging.open(record.partialId)) {
             is SafOpen.Opened -> opened.handle as? SafReadHandle ?: run {
                 val closeError = closeHandle(opened.handle, "read")
@@ -4561,6 +6247,8 @@ public class SafCommitCoordinator(
                 totalBytes = record.expectedSizeBytes,
                 expected = record.expectedDigest,
                 buffer = buffer,
+                newDigester = verificationDigesterFactory,
+                isCancelled = isCancelled,
             )
             outcome = verifyExactLength(handle, verification, buffer)
         } catch (error: Exception) {
@@ -4591,6 +6279,7 @@ public class SafCommitCoordinator(
         grant: SafTreeGrant,
         stagedDigest: Sha256Digest,
     ): VerifyPhase {
+        if (isCancelled()) return VerifyPhase(VerifyResult.Failed(TransferStorageError.Cancelled))
         authorizationError(
             record,
             grant,
@@ -4600,6 +6289,7 @@ public class SafCommitCoordinator(
         )?.let {
             return VerifyPhase(VerifyResult.Failed(it))
         }
+        if (isCancelled()) return VerifyPhase(VerifyResult.Failed(TransferStorageError.Cancelled))
         when (val looked = gateway.query(documentUri)) {
             is SafLookup.Absent -> return VerifyPhase(
                 VerifyResult.Failed(TransferStorageError.NotFound("staged_copy")),
@@ -4625,6 +6315,7 @@ public class SafCommitCoordinator(
             }
         }
 
+        if (isCancelled()) return VerifyPhase(VerifyResult.Failed(TransferStorageError.Cancelled))
         authorizationError(
             record,
             grant,
@@ -4634,6 +6325,7 @@ public class SafCommitCoordinator(
         )?.let {
             return VerifyPhase(VerifyResult.Failed(it))
         }
+        if (isCancelled()) return VerifyPhase(VerifyResult.Failed(TransferStorageError.Cancelled))
         val handle = when (val opened = gateway.openRead(documentUri)) {
             is SafOpen.Opened -> opened.handle as? SafReadHandle ?: run {
                 val closeError = closeHandle(opened.handle, "read")
@@ -4657,6 +6349,8 @@ public class SafCommitCoordinator(
                 totalBytes = record.expectedSizeBytes,
                 expected = stagedDigest,
                 buffer = buffer,
+                newDigester = verificationDigesterFactory,
+                isCancelled = isCancelled,
             )
             outcome = verifyExactLength(handle, verification, buffer)
         } catch (error: Exception) {
@@ -4807,11 +6501,13 @@ public class SafCommitCoordinator(
         val finalIdentity = record.finalIdentity
             ?: record.temporaryIdentity?.takeIf { it.documentUri == finalUri }
             ?: return reconcile(record, TransferStorageError.ContainmentUnknown("final_identity_missing"))
-        val possibleProviderTemporary = record.temporaryIdentity?.takeIf {
-            it.documentUri != finalIdentity.documentUri && it.documentId != finalIdentity.documentId
-        }
+        val possibleProviderTemporary = record.temporaryIdentity?.takeIf { it != finalIdentity }
         val pendingBefore = record.pendingCleanup + pendingCleanup + SafCleanupPending.STAGING +
             if (possibleProviderTemporary == null) emptySet() else setOf(SafCleanupPending.PROVIDER_TEMPORARY)
+        // Every call site enters after an exact final-identity size/digest pass (or
+        // recovery has just repeated that pass). `finish` releases only private
+        // staging; provider-temporary and backup deletion is deferred to
+        // retryPendingCleanup, which revalidates the final immediately before delete.
         val beforeDelete = record.copy(
             state = stateForCleanup(pendingBefore),
             finalUri = finalUri,
@@ -4827,22 +6523,8 @@ public class SafCommitCoordinator(
                 knownUris = listOf(finalUri),
             )
         }
-        when (val published = gateway.query(finalIdentity.documentUri)) {
-            is SafLookup.Found -> if (published.document.documentId != finalIdentity.documentId) {
-                return reconcileKnown(
-                    beforeDelete,
-                    TransferStorageError.ContainmentUnknown("final_identity_changed_after_publication"),
-                    listOf(finalUri),
-                )
-            }
-
-            SafLookup.Absent -> return reconcileKnown(
-                beforeDelete,
-                TransferStorageError.NotFound("published_final"),
-                listOf(finalUri),
-            )
-
-            is SafLookup.Failed -> return reconcileKnown(beforeDelete, published.error, listOf(finalUri))
+        if (isCancelled()) {
+            return reconcileKnown(beforeDelete, TransferStorageError.Cancelled, listOf(finalUri))
         }
         if (!beforeDelete.stagingReleased && SafCleanupPending.STAGING in pendingBefore &&
             !saveCheckpoint(beforeDelete, grant, SafCommitCheckpointPhase.STAGING_DELETE_INTENT)
@@ -4854,6 +6536,11 @@ public class SafCommitCoordinator(
                 afterMutation = true,
                 knownUris = listOf(finalUri),
             )
+        }
+        if (!beforeDelete.stagingReleased && SafCleanupPending.STAGING in pendingBefore) {
+            if (isCancelled()) {
+                return reconcileAndSave(beforeDelete, grant, TransferStorageError.Cancelled, listOf(finalUri))
+            }
         }
         val stagingObservation = if (beforeDelete.stagingReleased) {
             StagingCleanupObservation(confirmedAbsent = true)
@@ -4961,6 +6648,43 @@ public class SafCommitCoordinator(
             grant.rootDocumentId == record.rootDocumentId &&
             grant.authority == grant.treeUri.authority
 
+    private fun cleanupCheckpointAuthorizesFinal(
+        checkpoint: SafCommitCheckpoint,
+        record: SafCommitRecord,
+    ): Boolean {
+        val final = record.finalIdentity ?: return false
+        val finalContextMatches = when (record.strategy) {
+            SafCommitStrategy.VISIBLE_FINAL_COPY ->
+                record.renameHistory.none { it.phase == SafRenamePhase.FINAL_PROMOTION }
+
+            SafCommitStrategy.TEMP_THEN_RENAME ->
+                record.renameHistory.lastOrNull { it.phase == SafRenamePhase.FINAL_PROMOTION }
+                    ?.knownIdentities?.contains(final) == true
+        }
+        val publicationPhase = checkpoint.phase in setOf(
+            SafCommitCheckpointPhase.FINAL_VERIFIED,
+            SafCommitCheckpointPhase.PUBLICATION_INTENT,
+            SafCommitCheckpointPhase.PUBLISHED,
+            SafCommitCheckpointPhase.BACKUP_DELETE_INTENT,
+            SafCommitCheckpointPhase.BACKUP_DELETE_OBSERVED,
+            SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_INTENT,
+            SafCommitCheckpointPhase.PROVIDER_TEMPORARY_DELETE_OBSERVED,
+            SafCommitCheckpointPhase.STAGING_DELETE_INTENT,
+            SafCommitCheckpointPhase.STAGING_DELETE_OBSERVED,
+            SafCommitCheckpointPhase.COMMITTED,
+        ) || (
+            checkpoint.phase == SafCommitCheckpointPhase.RECONCILIATION_REQUIRED &&
+                checkpointAlreadyPublished(checkpoint)
+            )
+        return publicationPhase &&
+            finalContextMatches &&
+            checkpoint.finalIdentity == final &&
+            checkpoint.copiedBytes == checkpoint.expectedSizeBytes &&
+            checkpoint.verifiedDigest != null &&
+            (checkpoint.expectedDigest == null || checkpoint.expectedDigest == checkpoint.verifiedDigest) &&
+            checkpoint.verifiedDigest == record.verifiedDigest
+    }
+
     private fun cleanupStateAuthorizes(record: SafCommitRecord): Boolean = when (record.state) {
         SafCommitState.BACKUP_CLEANUP_PENDING ->
             record.finalIdentity != null && SafCleanupPending.BACKUP in record.pendingCleanup
@@ -5009,10 +6733,11 @@ public class SafCommitCoordinator(
         phase: SafRenamePhase,
         before: SafStoredDocumentIdentity,
         returned: SafStoredDocumentIdentity,
+        reconciliation: SafRenameReconciliation? = null,
     ): SafRenameEvidence = SafRenameEvidence(
         before = before,
         returned = returned,
-        reconciliation = if (before == returned) {
+        reconciliation = reconciliation ?: if (before == returned) {
             SafRenameReconciliation.RESOLVED_TO_ORIGINAL
         } else {
             SafRenameReconciliation.RESOLVED_TO_RETURNED
@@ -5093,6 +6818,7 @@ public class SafCommitCoordinator(
             return unknown(TransferStorageError.StateConflict("rename_authority_changed"))
         }
 
+        if (isCancelled()) return unknown(TransferStorageError.Cancelled)
         authorizationError(
             record,
             grant,
@@ -5100,6 +6826,7 @@ public class SafCommitCoordinator(
             beforeUri,
             beforeId,
         )?.let { return unknown(it) }
+        if (isCancelled()) return unknown(TransferStorageError.Cancelled)
 
         val originalResolves = when (val looked = gateway.query(beforeUri)) {
             is SafLookup.Found -> {
@@ -5114,6 +6841,7 @@ public class SafCommitCoordinator(
             SafLookup.Absent -> false
             is SafLookup.Failed -> return unknown(looked.error)
         }
+        if (isCancelled()) return unknown(TransferStorageError.Cancelled)
 
         val returnedResolves = when {
             returnedUri == null -> false
@@ -5123,6 +6851,7 @@ public class SafCommitCoordinator(
                     ?: return unknown(
                         TransferStorageError.ContainmentUnknown("rename_returned_identity_missing"),
                     )
+                if (isCancelled()) return unknown(TransferStorageError.Cancelled)
                 authorizationError(
                     record,
                     grant,
@@ -5130,6 +6859,7 @@ public class SafCommitCoordinator(
                     returnedUri,
                     returnedId,
                 )?.let { return unknown(it) }
+                if (isCancelled()) return unknown(TransferStorageError.Cancelled)
                 when (val looked = gateway.query(returnedUri)) {
                     is SafLookup.Found -> {
                         if (looked.document.documentId != returnedId) {
@@ -5145,6 +6875,7 @@ public class SafCommitCoordinator(
                 }
             }
         }
+        if (isCancelled()) return unknown(TransferStorageError.Cancelled)
 
         val identity = SafRenameIdentityResolver.resolve(
             beforeDocumentUri = beforeUri,
@@ -5303,6 +7034,89 @@ public class SafCommitCoordinator(
      * name while the old ones are still there. That is not an overwrite, it is a
      * collision, and it is refused rather than attempted.
      */
+    /**
+     * A provider mutation completed, but cancellation arrived before its ordinary
+     * result checkpoint. Persist exact returned identities in reconciliation;
+     * never call that state an ordinary cancellation with no provider evidence.
+     */
+    private fun reconcileCancelledProviderMutation(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+        knownUris: List<String>,
+    ): SafCommitOutcome.ReconciliationRequired {
+        val unresolved = record.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
+        val checkpoint = checkpointFor(
+            unresolved,
+            grant,
+            SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
+            failure = TransferStorageError.Cancelled,
+        )
+        val saved = runCatching { journal.save(checkpoint) }.getOrDefault(false)
+        return SafCommitOutcome.ReconciliationRequired(
+            record = unresolved,
+            error = if (saved) TransferStorageError.Cancelled
+            else TransferStorageError.StateConflict("journal_cancel_after_mutation_failed"),
+            knownUris = knownUris.distinct(),
+            checkpoint = checkpoint,
+        )
+    }
+
+    /** Records a user cancellation without releasing staging or restarting work. */
+    private fun cancelBeforePublication(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+    ): SafCommitOutcome {
+        val cancelled = record.copy(state = SafCommitState.COMMIT_FAILED)
+        val checkpoint = checkpointFor(
+            cancelled,
+            grant,
+            SafCommitCheckpointPhase.CANCELLED,
+            failure = TransferStorageError.Cancelled,
+        )
+        val saved = runCatching { journal.save(checkpoint) }.getOrDefault(false)
+        return if (saved) {
+            SafCommitOutcome.Failed(cancelled, TransferStorageError.Cancelled, checkpoint)
+        } else {
+            SafCommitOutcome.ReconciliationRequired(
+                record = cancelled.copy(state = SafCommitState.RECONCILIATION_REQUIRED),
+                error = TransferStorageError.StateConflict("journal_cancel_save_failed"),
+                knownUris = cancelled.knownDocumentIdentities.map { it.documentUri },
+                checkpoint = checkpoint,
+            )
+        }
+    }
+
+    /** A rename already ran; retain all identities and stop before verification/publication. */
+    private fun cancelAfterRename(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+        knownUris: List<String>,
+        returnedRenameIdentity: SafStoredDocumentIdentity? = null,
+        returnedRenameUri: String? = null,
+        unresolvedRenamePhase: SafRenamePhase? = null,
+    ): SafCommitOutcome.ReconciliationRequired {
+        val unresolved = record.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
+        val checkpoint = checkpointFor(
+            unresolved,
+            grant,
+            SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
+            returnedRenameIdentity = returnedRenameIdentity,
+            returnedRenameUri = returnedRenameUri,
+            failure = TransferStorageError.Cancelled,
+            unresolvedRenamePhase = unresolvedRenamePhase?.takeIf { phase ->
+                unresolved.renameHistory.none { it.phase == phase }
+            },
+        )
+        val saved = runCatching { journal.save(checkpoint) }.getOrDefault(false)
+        return SafCommitOutcome.ReconciliationRequired(
+            record = unresolved,
+            error = if (saved) TransferStorageError.Cancelled
+            else TransferStorageError.StateConflict("journal_cancel_save_failed"),
+            knownUris = knownUris.distinct(),
+            checkpoint = checkpoint,
+        )
+    }
+
     private fun commitOverwrite(
         record: SafCommitRecord,
         existingUri: String,
