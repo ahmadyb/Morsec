@@ -1,6 +1,5 @@
 package app.morsecode.core.storage.transfer
 
-import app.morsecode.core.transfer.identity.PartialIdentity
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
