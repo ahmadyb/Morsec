@@ -8,7 +8,9 @@ import kotlinx.coroutines.CancellationException
  * made by this operation, while the journal remains an explicit CAS API.
  */
 internal class SafCommitJournalCursor(private val journal: SafCommitJournal) {
-    private val revisions = ThreadLocal.withInitial { linkedMapOf<PartialIdentity, Long>() }
+    private val revisions = object : ThreadLocal<LinkedHashMap<PartialIdentity, Long>>() {
+        override fun initialValue(): LinkedHashMap<PartialIdentity, Long> = linkedMapOf()
+    }
     private val lastWriteFailure = ThreadLocal<TransferStorageError?>()
 
     private fun rememberRevision(commitId: PartialIdentity, revision: Long) {

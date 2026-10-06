@@ -1,0 +1,1544 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "acb834a1278778076f87fd6d213c1405",
+    "entities": [
+      {
+        "tableName": "transfer_sessions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sessionId` TEXT NOT NULL, `peer_id` TEXT NOT NULL, `peer_name` TEXT NOT NULL, `peer_endpoint` TEXT NOT NULL, `peer_transport` TEXT NOT NULL, `peer_device_kind` TEXT NOT NULL, `peer_detail` TEXT NOT NULL, `peer_app_version` TEXT, `peer_supports_resume` INTEGER NOT NULL, `peer_supports_encryption` INTEGER NOT NULL, `broadcast_id` TEXT, `phase` TEXT NOT NULL, `pause_all` INTEGER NOT NULL, `started_at` INTEGER NOT NULL, `ended_at` INTEGER NOT NULL, `failure_reason` TEXT, PRIMARY KEY(`sessionId`))",
+        "fields": [
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerId",
+            "columnName": "peer_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerName",
+            "columnName": "peer_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerEndpoint",
+            "columnName": "peer_endpoint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerTransport",
+            "columnName": "peer_transport",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerDeviceKind",
+            "columnName": "peer_device_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerDetail",
+            "columnName": "peer_detail",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerAppVersion",
+            "columnName": "peer_app_version",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "peerSupportsResume",
+            "columnName": "peer_supports_resume",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerSupportsEncryption",
+            "columnName": "peer_supports_encryption",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "broadcastId",
+            "columnName": "broadcast_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pauseAll",
+            "columnName": "pause_all",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedEpochMillis",
+            "columnName": "started_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endedEpochMillis",
+            "columnName": "ended_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureReason",
+            "columnName": "failure_reason",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "sessionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transfer_sessions_peer_id",
+            "unique": false,
+            "columnNames": [
+              "peer_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_sessions_peer_id` ON `${TABLE_NAME}` (`peer_id`)"
+          },
+          {
+            "name": "index_transfer_sessions_broadcast_id",
+            "unique": false,
+            "columnNames": [
+              "broadcast_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_sessions_broadcast_id` ON `${TABLE_NAME}` (`broadcast_id`)"
+          },
+          {
+            "name": "index_transfer_sessions_phase",
+            "unique": false,
+            "columnNames": [
+              "phase"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_sessions_phase` ON `${TABLE_NAME}` (`phase`)"
+          }
+        ]
+      },
+      {
+        "tableName": "transfer_items",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`transfer_id` TEXT NOT NULL, `session_id` TEXT NOT NULL, `batch_id` TEXT NOT NULL, `direction` TEXT NOT NULL, `display_name` TEXT NOT NULL, `relative_path` TEXT NOT NULL, `mime_type` TEXT, `kind` TEXT NOT NULL, `total_bytes` INTEGER NOT NULL, `last_modified` INTEGER NOT NULL, `is_folder_archive` INTEGER NOT NULL, `state` TEXT NOT NULL, `confirmed_bytes` INTEGER NOT NULL, `bytes_per_second` INTEGER NOT NULL, `sha256_hex` TEXT, `failure_reason` TEXT, `retry_count` INTEGER NOT NULL, `queued_at` INTEGER NOT NULL, `finished_at` INTEGER NOT NULL, `result_uri` TEXT, `recipient_peer_id` TEXT, `source_uri` TEXT, `target_dir` TEXT, `queue_position` INTEGER NOT NULL, PRIMARY KEY(`transfer_id`), FOREIGN KEY(`session_id`) REFERENCES `transfer_sessions`(`sessionId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "transferId",
+            "columnName": "transfer_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "batchId",
+            "columnName": "batch_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relative_path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mime_type",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalBytes",
+            "columnName": "total_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastModifiedEpochMillis",
+            "columnName": "last_modified",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isFolderArchive",
+            "columnName": "is_folder_archive",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confirmedBytes",
+            "columnName": "confirmed_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytesPerSecond",
+            "columnName": "bytes_per_second",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sha256Hex",
+            "columnName": "sha256_hex",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "failureReason",
+            "columnName": "failure_reason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "retryCount",
+            "columnName": "retry_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "queuedEpochMillis",
+            "columnName": "queued_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "finishedEpochMillis",
+            "columnName": "finished_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resultUriString",
+            "columnName": "result_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "recipientPeerId",
+            "columnName": "recipient_peer_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceUriString",
+            "columnName": "source_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "targetDirectory",
+            "columnName": "target_dir",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "queuePosition",
+            "columnName": "queue_position",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "transfer_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transfer_items_session_id",
+            "unique": false,
+            "columnNames": [
+              "session_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_items_session_id` ON `${TABLE_NAME}` (`session_id`)"
+          },
+          {
+            "name": "index_transfer_items_batch_id",
+            "unique": false,
+            "columnNames": [
+              "batch_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_items_batch_id` ON `${TABLE_NAME}` (`batch_id`)"
+          },
+          {
+            "name": "index_transfer_items_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_items_state` ON `${TABLE_NAME}` (`state`)"
+          },
+          {
+            "name": "index_transfer_items_direction",
+            "unique": false,
+            "columnNames": [
+              "direction"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_items_direction` ON `${TABLE_NAME}` (`direction`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "transfer_sessions",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "session_id"
+            ],
+            "referencedColumns": [
+              "sessionId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "history_entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`history_id` TEXT NOT NULL, `transfer_id` TEXT NOT NULL, `session_id` TEXT, `direction` TEXT NOT NULL, `display_name` TEXT NOT NULL, `mime_type` TEXT, `kind` TEXT NOT NULL, `total_bytes` INTEGER NOT NULL, `peer_id` TEXT, `peer_name` TEXT, `state` TEXT NOT NULL, `failure_reason` TEXT, `sha256_hex` TEXT, `finished_at` INTEGER NOT NULL, `result_uri` TEXT, `broadcast_id` TEXT, PRIMARY KEY(`history_id`))",
+        "fields": [
+          {
+            "fieldPath": "historyId",
+            "columnName": "history_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transferId",
+            "columnName": "transfer_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mime_type",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalBytes",
+            "columnName": "total_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerId",
+            "columnName": "peer_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "peerName",
+            "columnName": "peer_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureReason",
+            "columnName": "failure_reason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sha256Hex",
+            "columnName": "sha256_hex",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "finishedEpochMillis",
+            "columnName": "finished_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resultUriString",
+            "columnName": "result_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "broadcastId",
+            "columnName": "broadcast_id",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "history_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_history_entries_direction",
+            "unique": false,
+            "columnNames": [
+              "direction"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_history_entries_direction` ON `${TABLE_NAME}` (`direction`)"
+          },
+          {
+            "name": "index_history_entries_finished_at",
+            "unique": false,
+            "columnNames": [
+              "finished_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_history_entries_finished_at` ON `${TABLE_NAME}` (`finished_at`)"
+          },
+          {
+            "name": "index_history_entries_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_history_entries_state` ON `${TABLE_NAME}` (`state`)"
+          }
+        ]
+      },
+      {
+        "tableName": "recent_devices",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`peer_id` TEXT NOT NULL, `display_name` TEXT NOT NULL, `transport` TEXT NOT NULL, `device_kind` TEXT NOT NULL, `detail` TEXT NOT NULL, `last_seen` INTEGER NOT NULL, `last_summary` TEXT, `interaction_count` INTEGER NOT NULL, PRIMARY KEY(`peer_id`))",
+        "fields": [
+          {
+            "fieldPath": "peerId",
+            "columnName": "peer_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transport",
+            "columnName": "transport",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deviceKind",
+            "columnName": "device_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "detail",
+            "columnName": "detail",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSeenEpochMillis",
+            "columnName": "last_seen",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSummary",
+            "columnName": "last_summary",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "interactionCount",
+            "columnName": "interaction_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "peer_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_recent_devices_peer_id",
+            "unique": true,
+            "columnNames": [
+              "peer_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_recent_devices_peer_id` ON `${TABLE_NAME}` (`peer_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "log_entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `timestamp` INTEGER NOT NULL, `level` TEXT NOT NULL, `tag` TEXT NOT NULL, `message` TEXT NOT NULL, `error_id` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "level",
+            "columnName": "level",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "tag",
+            "columnName": "tag",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "message",
+            "columnName": "message",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "errorId",
+            "columnName": "error_id",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_log_entries_timestamp",
+            "unique": false,
+            "columnNames": [
+              "timestamp"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_log_entries_timestamp` ON `${TABLE_NAME}` (`timestamp`)"
+          },
+          {
+            "name": "index_log_entries_level",
+            "unique": false,
+            "columnNames": [
+              "level"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_log_entries_level` ON `${TABLE_NAME}` (`level`)"
+          }
+        ]
+      },
+      {
+        "tableName": "crash_reports",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `occurred_at` INTEGER NOT NULL, `component` TEXT NOT NULL, `exception_type` TEXT NOT NULL, `message` TEXT, `stack_trace` TEXT NOT NULL, `app_version` TEXT NOT NULL, `version_code` INTEGER NOT NULL, `sdk_int` INTEGER NOT NULL, `device_model` TEXT NOT NULL, `recovery_note` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurredEpochMillis",
+            "columnName": "occurred_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "component",
+            "columnName": "component",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exceptionType",
+            "columnName": "exception_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "message",
+            "columnName": "message",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "stackTrace",
+            "columnName": "stack_trace",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "appVersion",
+            "columnName": "app_version",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "versionCode",
+            "columnName": "version_code",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "androidSdkInt",
+            "columnName": "sdk_int",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deviceModel",
+            "columnName": "device_model",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryNote",
+            "columnName": "recovery_note",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_crash_reports_occurred_at",
+            "unique": false,
+            "columnNames": [
+              "occurred_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_crash_reports_occurred_at` ON `${TABLE_NAME}` (`occurred_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "browser_sessions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`session_id` TEXT NOT NULL, `token_digest` TEXT NOT NULL, `user_agent` TEXT, `remote_address` TEXT NOT NULL, `state` TEXT NOT NULL, `requested_at` INTEGER NOT NULL, `accepted_at` INTEGER NOT NULL, `revoked_at` INTEGER NOT NULL, `last_activity` INTEGER NOT NULL, `bytes_downloaded` INTEGER NOT NULL, `bytes_uploaded` INTEGER NOT NULL, `request_count` INTEGER NOT NULL, PRIMARY KEY(`session_id`))",
+        "fields": [
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "tokenDigest",
+            "columnName": "token_digest",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userAgent",
+            "columnName": "user_agent",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "remoteAddress",
+            "columnName": "remote_address",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requestedEpochMillis",
+            "columnName": "requested_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "acceptedEpochMillis",
+            "columnName": "accepted_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revokedEpochMillis",
+            "columnName": "revoked_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastActivityEpochMillis",
+            "columnName": "last_activity",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytesDownloaded",
+            "columnName": "bytes_downloaded",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytesUploaded",
+            "columnName": "bytes_uploaded",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requestCount",
+            "columnName": "request_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "session_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_browser_sessions_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_browser_sessions_state` ON `${TABLE_NAME}` (`state`)"
+          },
+          {
+            "name": "index_browser_sessions_token_digest",
+            "unique": false,
+            "columnNames": [
+              "token_digest"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_browser_sessions_token_digest` ON `${TABLE_NAME}` (`token_digest`)"
+          }
+        ]
+      },
+      {
+        "tableName": "saf_grants",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `tree_uri` TEXT NOT NULL, `display_name` TEXT NOT NULL, `granted_at` INTEGER NOT NULL, `read_write` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "treeUri",
+            "columnName": "tree_uri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grantedEpochMillis",
+            "columnName": "granted_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "readWrite",
+            "columnName": "read_write",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_saf_grants_tree_uri",
+            "unique": true,
+            "columnNames": [
+              "tree_uri"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_saf_grants_tree_uri` ON `${TABLE_NAME}` (`tree_uri`)"
+          }
+        ]
+      },
+      {
+        "tableName": "web_transfers",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`upload_id` TEXT NOT NULL, `session_id` TEXT NOT NULL, `file_name` TEXT NOT NULL, `target_dir` TEXT NOT NULL, `total_bytes` INTEGER NOT NULL, `received_bytes` INTEGER NOT NULL, `partial_path` TEXT NOT NULL, `state` TEXT NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`upload_id`))",
+        "fields": [
+          {
+            "fieldPath": "uploadId",
+            "columnName": "upload_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "browserSessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "file_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetDirectory",
+            "columnName": "target_dir",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalBytes",
+            "columnName": "total_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "receivedBytes",
+            "columnName": "received_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "partialPath",
+            "columnName": "partial_path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedEpochMillis",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "upload_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_web_transfers_upload_id",
+            "unique": false,
+            "columnNames": [
+              "upload_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_web_transfers_upload_id` ON `${TABLE_NAME}` (`upload_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "transfer_snapshots",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`transfer_id` TEXT NOT NULL, `session_id` TEXT NOT NULL, `batch_id` TEXT NOT NULL, `recipient_id` TEXT, `direction` TEXT NOT NULL, `snapshot_state` TEXT NOT NULL, `snapshot_version` INTEGER NOT NULL, `confirmed_bytes` INTEGER NOT NULL, `optimistic_bytes` INTEGER NOT NULL, `last_acknowledged_sequence` INTEGER, `retry_count` INTEGER NOT NULL, `failure_code` TEXT, `failure_detail` TEXT, `failure_retryable` INTEGER, `failure_origin` TEXT, `failure_category` TEXT, `remote_paused` INTEGER NOT NULL, `queue_order` INTEGER NOT NULL, `file_id` TEXT NOT NULL, `display_name` TEXT NOT NULL, `relative_path` TEXT NOT NULL, `mime_type` TEXT NOT NULL, `total_bytes` INTEGER NOT NULL, `last_modified_epoch_millis` INTEGER, `is_folder_archive` INTEGER NOT NULL, `expected_sha256_hex` TEXT, `chunk_size` INTEGER NOT NULL, `protocol_version` INTEGER NOT NULL, `verification_expected_digest_hex` TEXT, `verification_observed_digest_hex` TEXT, `verification_started_snapshot_version` INTEGER, `row_revision` INTEGER NOT NULL, PRIMARY KEY(`transfer_id`))",
+        "fields": [
+          {
+            "fieldPath": "transferId",
+            "columnName": "transfer_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "batchId",
+            "columnName": "batch_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipientId",
+            "columnName": "recipient_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "snapshotState",
+            "columnName": "snapshot_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "snapshotVersion",
+            "columnName": "snapshot_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confirmedBytes",
+            "columnName": "confirmed_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "optimisticBytes",
+            "columnName": "optimistic_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastAcknowledgedSequence",
+            "columnName": "last_acknowledged_sequence",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "retryCount",
+            "columnName": "retry_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureCode",
+            "columnName": "failure_code",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "failureDetail",
+            "columnName": "failure_detail",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "failureRetryable",
+            "columnName": "failure_retryable",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "failureOrigin",
+            "columnName": "failure_origin",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "failureCategory",
+            "columnName": "failure_category",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "remotePaused",
+            "columnName": "remote_paused",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "queueOrder",
+            "columnName": "queue_order",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileId",
+            "columnName": "file_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relative_path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mime_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalBytes",
+            "columnName": "total_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastModifiedEpochMillis",
+            "columnName": "last_modified_epoch_millis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isFolderArchive",
+            "columnName": "is_folder_archive",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedSha256Hex",
+            "columnName": "expected_sha256_hex",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "chunkSize",
+            "columnName": "chunk_size",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "protocolVersion",
+            "columnName": "protocol_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "verificationExpectedDigestHex",
+            "columnName": "verification_expected_digest_hex",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "verificationObservedDigestHex",
+            "columnName": "verification_observed_digest_hex",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "verificationStartedSnapshotVersion",
+            "columnName": "verification_started_snapshot_version",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "rowRevision",
+            "columnName": "row_revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "transfer_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transfer_snapshots_session_id_snapshot_state",
+            "unique": false,
+            "columnNames": [
+              "session_id",
+              "snapshot_state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_snapshots_session_id_snapshot_state` ON `${TABLE_NAME}` (`session_id`, `snapshot_state`)"
+          }
+        ]
+      },
+      {
+        "tableName": "transfer_partials",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`commit_id` TEXT NOT NULL, `staging_identity` TEXT NOT NULL, `session_id` TEXT NOT NULL, `transfer_id` TEXT NOT NULL, `checkpoint_version` INTEGER NOT NULL, `journal_revision` INTEGER NOT NULL, `rename_history_count` INTEGER NOT NULL, `pending_cleanup_count` INTEGER NOT NULL, `strategy_id` TEXT NOT NULL, `duplicate_policy` TEXT NOT NULL, `grant_id` TEXT NOT NULL, `tree_uri` TEXT NOT NULL, `authority` TEXT NOT NULL, `root_document_id` TEXT NOT NULL, `parent_document_id` TEXT NOT NULL, `expected_final_name` TEXT NOT NULL, `expected_size_bytes` INTEGER NOT NULL, `expected_digest_hex` TEXT, `checkpoint_phase` TEXT NOT NULL, `temporary_uri` TEXT, `temporary_document_id` TEXT, `existing_uri` TEXT, `existing_document_id` TEXT, `backup_uri` TEXT, `backup_document_id` TEXT, `returned_rename_uri` TEXT, `returned_rename_identity_uri` TEXT, `returned_rename_document_id` TEXT, `final_uri` TEXT, `final_document_id` TEXT, `copied_bytes` INTEGER NOT NULL, `staging_released` INTEGER NOT NULL, `last_failure_category` TEXT, `last_failure_code` TEXT, `unresolved_rename_phase` TEXT, `verified_digest_hex` TEXT, PRIMARY KEY(`commit_id`))",
+        "fields": [
+          {
+            "fieldPath": "commitId",
+            "columnName": "commit_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stagingIdentity",
+            "columnName": "staging_identity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transferId",
+            "columnName": "transfer_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "checkpointVersion",
+            "columnName": "checkpoint_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "journalRevision",
+            "columnName": "journal_revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "renameHistoryCount",
+            "columnName": "rename_history_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pendingCleanupCount",
+            "columnName": "pending_cleanup_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategyId",
+            "columnName": "strategy_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "duplicatePolicy",
+            "columnName": "duplicate_policy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grantId",
+            "columnName": "grant_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "treeUri",
+            "columnName": "tree_uri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authority",
+            "columnName": "authority",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rootDocumentId",
+            "columnName": "root_document_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentDocumentId",
+            "columnName": "parent_document_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedFinalName",
+            "columnName": "expected_final_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedSizeBytes",
+            "columnName": "expected_size_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedDigestHex",
+            "columnName": "expected_digest_hex",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "checkpointPhase",
+            "columnName": "checkpoint_phase",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "temporaryUri",
+            "columnName": "temporary_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "temporaryDocumentId",
+            "columnName": "temporary_document_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "existingUri",
+            "columnName": "existing_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "existingDocumentId",
+            "columnName": "existing_document_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "backupUri",
+            "columnName": "backup_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "backupDocumentId",
+            "columnName": "backup_document_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "returnedRenameUri",
+            "columnName": "returned_rename_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "returnedRenameIdentityUri",
+            "columnName": "returned_rename_identity_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "returnedRenameDocumentId",
+            "columnName": "returned_rename_document_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "finalUri",
+            "columnName": "final_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "finalDocumentId",
+            "columnName": "final_document_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "copiedBytes",
+            "columnName": "copied_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stagingReleased",
+            "columnName": "staging_released",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastFailureCategory",
+            "columnName": "last_failure_category",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastFailureCode",
+            "columnName": "last_failure_code",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "unresolvedRenamePhase",
+            "columnName": "unresolved_rename_phase",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "verifiedDigestHex",
+            "columnName": "verified_digest_hex",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "commit_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transfer_partials_staging_identity",
+            "unique": true,
+            "columnNames": [
+              "staging_identity"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_transfer_partials_staging_identity` ON `${TABLE_NAME}` (`staging_identity`)"
+          },
+          {
+            "name": "index_transfer_partials_session_id_checkpoint_phase",
+            "unique": false,
+            "columnNames": [
+              "session_id",
+              "checkpoint_phase"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_partials_session_id_checkpoint_phase` ON `${TABLE_NAME}` (`session_id`, `checkpoint_phase`)"
+          },
+          {
+            "name": "index_transfer_partials_transfer_id",
+            "unique": false,
+            "columnNames": [
+              "transfer_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_partials_transfer_id` ON `${TABLE_NAME}` (`transfer_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "saf_rename_history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`commit_id` TEXT NOT NULL, `sequence` INTEGER NOT NULL, `phase` TEXT NOT NULL, `before_uri` TEXT NOT NULL, `before_document_id` TEXT NOT NULL, `returned_uri` TEXT, `returned_document_id` TEXT, `reconciliation_id` TEXT, PRIMARY KEY(`commit_id`, `sequence`), FOREIGN KEY(`commit_id`) REFERENCES `transfer_partials`(`commit_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "commitId",
+            "columnName": "commit_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sequence",
+            "columnName": "sequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "beforeUri",
+            "columnName": "before_uri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "beforeDocumentId",
+            "columnName": "before_document_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "returnedUri",
+            "columnName": "returned_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "returnedDocumentId",
+            "columnName": "returned_document_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "reconciliationId",
+            "columnName": "reconciliation_id",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "commit_id",
+            "sequence"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_saf_rename_history_commit_id_phase",
+            "unique": true,
+            "columnNames": [
+              "commit_id",
+              "phase"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_saf_rename_history_commit_id_phase` ON `${TABLE_NAME}` (`commit_id`, `phase`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "transfer_partials",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "commit_id"
+            ],
+            "referencedColumns": [
+              "commit_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "saf_pending_cleanup",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`commit_id` TEXT NOT NULL, `sequence` INTEGER NOT NULL, `cleanup_type` TEXT NOT NULL, `document_uri` TEXT, `document_id` TEXT, `staging_identity` TEXT, PRIMARY KEY(`commit_id`, `sequence`), FOREIGN KEY(`commit_id`) REFERENCES `transfer_partials`(`commit_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "commitId",
+            "columnName": "commit_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sequence",
+            "columnName": "sequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cleanupType",
+            "columnName": "cleanup_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentUri",
+            "columnName": "document_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "documentId",
+            "columnName": "document_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "stagingIdentity",
+            "columnName": "staging_identity",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "commit_id",
+            "sequence"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_saf_pending_cleanup_commit_id_cleanup_type",
+            "unique": true,
+            "columnNames": [
+              "commit_id",
+              "cleanup_type"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_saf_pending_cleanup_commit_id_cleanup_type` ON `${TABLE_NAME}` (`commit_id`, `cleanup_type`)"
+          },
+          {
+            "name": "index_saf_pending_cleanup_commit_id_document_uri_document_id",
+            "unique": true,
+            "columnNames": [
+              "commit_id",
+              "document_uri",
+              "document_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_saf_pending_cleanup_commit_id_document_uri_document_id` ON `${TABLE_NAME}` (`commit_id`, `document_uri`, `document_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "transfer_partials",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "commit_id"
+            ],
+            "referencedColumns": [
+              "commit_id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'acb834a1278778076f87fd6d213c1405')"
+    ]
+  }
+}

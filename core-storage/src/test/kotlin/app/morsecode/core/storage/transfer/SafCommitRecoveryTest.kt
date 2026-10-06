@@ -301,14 +301,14 @@ class SafCommitRecoveryTest {
             grant,
             SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
         )
-        assertTrue(journal.save(checkpoint))
+        assertFalse(journal.save(checkpoint))
 
         val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.ReconciliationRequired)
+        assertTrue(recovered is SafCommitRecoveryOutcome.Failed)
         assertEquals(
-            TransferStorageError.ContainmentUnknown("checkpoint_identity_malformed"),
-            (recovered as SafCommitRecoveryOutcome.ReconciliationRequired).error,
+            TransferStorageError.StateConflict("checkpoint_malformed"),
+            (recovered as SafCommitRecoveryOutcome.Failed).error,
         )
         assertEquals(0, gateway.providerCallCount)
         assertFalse(staging.deleted)
@@ -342,14 +342,14 @@ class SafCommitRecoveryTest {
             grant,
             SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
         )
-        assertTrue(journal.save(checkpoint))
+        assertFalse(journal.save(checkpoint))
 
         val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.ReconciliationRequired)
+        assertTrue(recovered is SafCommitRecoveryOutcome.Failed)
         assertEquals(
-            TransferStorageError.ContainmentUnknown("checkpoint_identity_malformed"),
-            (recovered as SafCommitRecoveryOutcome.ReconciliationRequired).error,
+            TransferStorageError.StateConflict("checkpoint_malformed"),
+            (recovered as SafCommitRecoveryOutcome.Failed).error,
         )
         assertEquals(0, gateway.providerCallCount)
         assertFalse(staging.deleted)
@@ -421,11 +421,15 @@ class SafCommitRecoveryTest {
             grant,
             SafCommitCheckpointPhase.PROVIDER_VERIFIED,
         )
-        assertTrue(journal.save(checkpoint))
+        assertFalse(journal.save(checkpoint))
 
         val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.ReconciliationRequired)
+        assertTrue(recovered is SafCommitRecoveryOutcome.Failed)
+        assertEquals(
+            TransferStorageError.StateConflict("checkpoint_malformed"),
+            (recovered as SafCommitRecoveryOutcome.Failed).error,
+        )
         assertEquals(0, gateway.countOf("openWrite:"))
         assertEquals(0, gateway.countOf("rename:"))
         assertEquals(0, gateway.countOf("deleteAndReconcile:"))

@@ -307,8 +307,8 @@ if (v2Raw) {
       if (keys.length !== 1) throw new Error(`${table} must have exactly one parent ownership foreign key`);
       const key = keys[0];
       if (key.table !== 'transfer_partials' || key.onDelete !== 'CASCADE' ||
-          JSON.stringify(key.childColumns) !== JSON.stringify(['commit_id']) ||
-          JSON.stringify(key.parentColumns) !== JSON.stringify(['commit_id'])) {
+          JSON.stringify(key.columns) !== JSON.stringify(['commit_id']) ||
+          JSON.stringify(key.referencedColumns) !== JSON.stringify(['commit_id'])) {
         throw new Error(`${table} ownership foreign key is not a commit-scoped child-only cascade`);
       }
     }

@@ -226,7 +226,7 @@ class MorseDatabaseMigrationTest {
         val legacy = context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null)
         legacy.execSQL("PRAGMA foreign_keys = ON")
         for (entity in schema.entities) {
-            legacy.execSQL(entity.createSql.replace(roomTableNameToken, "`${entity.tableName}`"))
+            legacy.execSQL(entity.createSql.replace(roomTableNameToken, entity.tableName))
             for (indexSql in entity.indexSql) {
                 legacy.execSQL(indexSql.replace(roomTableNameToken, "`${entity.tableName}`"))
             }

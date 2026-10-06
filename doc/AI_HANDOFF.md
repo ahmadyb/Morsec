@@ -37,13 +37,19 @@ rewrite history, force-push, merge, or create a PR. Push directly to the fixed b
 
 Only the explicitly approved Room v2 persistence group is in scope. Worktree additions
 include the v2 transfer entities/migration/store, a production Room `SafCommitJournal`,
-validation/CAS cursor and tests, schema verifier/CI wiring, and documentation. This work is still **incomplete and unverified**. First hosted run
+validation/CAS cursor and tests, schema verifier/CI wiring, and documentation. This work is still **incomplete and unverified**. Two hosted runs have been attempted:
 [37464589550](https://github.com/ahmadyb/Morsec/actions/runs/37464589550) on
-`afb3eae95329761b340d10a41723e88ae4f2e108` ran KSP and produced a 50,652-byte Room v2
-schema export, but JVM tests/compilation and strict schema verification failed. The
-annotation transport truncated the schema chunk, so it has not yet been committed. No
-passing Room tests, lint, APK assembly, or exact-SHA green CI is available. The sandbox
-currently has no `java`, `javac`, or `gradle`; hosted CI remains necessary.
+`afb3eae95329761b340d10a41723e88ae4f2e108` found compile/test failures; the next run,
+[37465900006](https://github.com/ahmadyb/Morsec/actions/runs/37465900006) on
+`cc149dfc4dd697967a9687348a1120e3f0695b80`, compiled and assembled both APKs but failed
+12 tests, lint with one API-level error, and strict schema verification. That run generated
+the authentic Room/KSP `2.json`; its 50,652 bytes were reconstructed byte-for-byte from
+the compressed check annotations. The v1 hash is unchanged, and the strict local schema
+verifier now passes 11/11 after correcting its Room foreign-key JSON field names. The
+export is present in the worktree but is not yet committed. Targeted fixes for the test,
+lint, and recovery failures are in the current worktree and still need a CI rerun. There is
+no exact-SHA green CI or zero-error lint evidence. The sandbox currently has no `java`,
+`javac`, or `gradle`; hosted CI remains necessary.
 
 Before continuing, preserve all of the following:
 
@@ -68,16 +74,21 @@ file to compare byte-for-byte.
 Current code has explicit `Migration(1,2)`, Room schema version 2, bounded SAF parent/
 child tables with child-only ownership cascades, `RoomTransferSnapshotStore`, and
 `RoomSafCommitJournal`. Transfer snapshots use validated typed Room columns; no
-serialized snapshot object is persisted. The first hosted run found seven failing
-`core-transfer` tests, test/source compilation errors in the Room adapter and SAF journal,
-and a strict v2-schema verification failure. The current worktree contains targeted fixes:
-restore compatible codec decoding while retaining safe reason tokens; bound schema annotation
-chunks below GitHub's 4-KiB limit and tee strict-schema diagnostics; run the Room DAO test
-query inside `runBlocking`; and use stable local vals for cross-module nullable properties.
-These fixes are not yet verified by a rerun. Static checks passed before these latest edits;
-rerun them, then push and check the exact-SHA workflow. Only after the next run should the
-remaining migration/reopen/typed-validation/revision behavior, lint and APK results be
-assessed; update this handoff with exact evidence and continue until exact-SHA green CI.
+serialized snapshot object is persisted. Run 1 found seven `core-transfer` test failures
+and compilation errors; run 2 fixed compilation and ran 2,579 tests, with 12 failures
+(two module/variant reports for six failing test cases): Room migration test table-name
+placeholder quoting; a Room journal fixture that tried to overwrite its own deliberately
+corrupted parent; four recovery cases whose invalid checkpoints are now rejected before
+provider access; and same-identity rename evidence where a stored identity may exist
+without a returned URI. The v2 verifier failure was a verifier bug (Room exports FK
+columns as `columns`/`referencedColumns`); after correction the authentic local schema
+passes 11/11. Run 2 also found one lint NewApi error from `ThreadLocal.withInitial` on
+minSdk 23; this is replaced with the API-23-safe constructor. Targeted fixes for all these
+findings are in the current worktree and await CI. Its debug and instrumentation APKs did
+assemble (18.94 MiB and 1.10 MiB), but the run was red and does not satisfy completion.
+Static checks passed before the latest fixes; rerun them, then push and check the exact-SHA
+workflow. Continue until tests, strict schema compare, zero-error lint, both APKs, migration
+and reopen coverage all pass on a green exact SHA.
 
 `CURRENT_MILESTONE` must stay 2 and `TRANSFER_ENGINE` must remain gated. Do not start a
 restoration coordinator, cleanup worker, LAN/Nearby/Wi-Fi Direct, transfer networking,

@@ -87,10 +87,6 @@ public object SafCommitCheckpointValidator {
                     } == true
                 ) return malformed()
             }
-            if (checkpoint.returnedRenameIdentity != null &&
-                checkpoint.returnedRenameUri != checkpoint.returnedRenameIdentity.documentUri
-            ) return malformed()
-
             val pending = checkpoint.pendingCleanup
             if (pending.size > 3 || pending.map { it.type }.distinct().size != pending.size) return malformed()
             val cleanupIdentities = mutableSetOf<SafStoredDocumentIdentity>()

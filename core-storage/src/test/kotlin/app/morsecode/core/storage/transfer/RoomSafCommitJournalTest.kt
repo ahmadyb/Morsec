@@ -315,6 +315,10 @@ class RoomSafCommitJournalTest {
             )
         }
 
+        // The last injected row was malformed; restore the validated preimage before
+        // exercising a complete replacement. A production write must not repair or
+        // overwrite corrupted state implicitly.
+        runBlocking { database.transferPartialDao().upsert(parent) }
         val withCleanup = checkpointWithOwnedChildren(base)
         assertEquals(SafCommitJournalWrite.Saved(2L), journal.write(withCleanup, 1L))
         val cleanup = runBlocking {
