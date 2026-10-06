@@ -30,16 +30,19 @@ The accepted SAF destination implementation was the starting point at
 `arena/01a10ca1-morsec`. The pre-existing local HEAD
 `7fab62ffd6387855bd3fb80c03683dd93c496a36` was an ancestor; after verifying the
 rescue checksums, the branch was reconciled with a non-destructive `git reset --mixed`,
-which preserved the Room v2 worktree changes. The latest pushed Room v2 commit is
-`420a56e15fd91ca856555da7e357124cf9b5774f` (`Commit authentic Room v2 schema and
-persistence fixes`). Current tracked worktree edits are the focused migration-test SQL
-placeholder correction and this handoff synchronization. Do not switch branches, rewrite history,
-force-push, merge, or create a PR. Push directly to the fixed branch.
+which preserved the Room v2 worktree changes. The focused migration-test SQL-placeholder
+correction was committed and pushed as
+`5b2c14fabe27cfb026d16e1267bf4677665d9007` (`Fix Room migration schema fixture
+quoting`). Exact-SHA Android CI run
+[37468340772](https://github.com/ahmadyb/Morsec/actions/runs/37468340772) is green on
+that commit. This handoff is being synchronized after that run; the synchronization is
+documentation-only. Do not switch branches, rewrite history, force-push, merge, or create a
+PR. Push directly to the fixed branch.
 
 Only the explicitly approved Room v2 persistence group is in scope. The implementation
 includes the v2 transfer entities/migration/store, a production Room `SafCommitJournal`,
-validation/CAS cursor and tests, schema verifier/CI wiring, and documentation. Three
-hosted runs have been attempted. Run
+validation/CAS cursor and tests, the committed authentic schema export, schema verifier/CI
+wiring, and documentation. Four hosted runs have been attempted. Run
 [37464589550](https://github.com/ahmadyb/Morsec/actions/runs/37464589550) on
 `afb3eae95329761b340d10a41723e88ae4f2e108` found compile/test failures. Run
 [37465900006](https://github.com/ahmadyb/Morsec/actions/runs/37465900006) on
@@ -49,12 +52,21 @@ authentic Room/KSP `2.json`; its 50,652 bytes were reconstructed byte-for-byte f
 check annotations. Run [37467189323](https://github.com/ahmadyb/Morsec/actions/runs/37467189323)
 on `420a56e15fd91ca856555da7e357124cf9b5774f` completed red solely because the same
 migration test failed in the Debug and Release unit-test variants (2,579 tests total, 2
-failures, 0 skipped). The emitted SQL had doubled backticks around `transfer_sessions` in
-an index `ON` clause. KSP schema generation and committed-schema comparison passed, lint
-passed with 0 errors, and both APKs assembled (debug 18.94 MiB; instrumentation 1.10 MiB).
-A focused replacement fix is now in the worktree, not yet CI-verified. There is not yet a
-green exact-SHA run for the current fix. The sandbox has no `java` or installed Gradle;
-hosted CI remains necessary.
+failures, 0 skipped). The emitted SQL had doubled backticks in an index `ON` clause. The
+narrow fix in `5b2c14fabe27cfb026d16e1267bf4677665d9007` uses the bare table name when
+substituting Room's already-backticked `${TABLE_NAME}` token.
+
+Exact-SHA run [37468340772](https://github.com/ahmadyb/Morsec/actions/runs/37468340772)
+on `5b2c14fabe27cfb026d16e1267bf4677665d9007` is green. It executed `checkMilestoneHygiene`,
+`test`, `:core-data:kspDebugKotlin --rerun` (`--no-build-cache`), the seven module
+`:lintDebug` tasks in the workflow, `:app:assembleDebug`, and
+`:app:assembleDebugAndroidTest` (Gradle 8.13, JDK 17, API 36). All 2,579 JVM tests passed
+(0 failed, 0 skipped, 143 reports); modules: app 588, core-data 56, core-design 100,
+core-model 40, core-storage 1,356, core-transfer 439. KSP regenerated v2 and the committed
+schema comparison passed byte-for-byte. Lint had 0 errors and 45 warnings across 7
+reports. Both APKs assembled (debug 18.94 MiB; instrumentation 1.10 MiB), and the
+`morsecode-debug-apk` artifact is available on the run page. The sandbox has no `java` or
+installed Gradle, so JVM/Android validation is performed by hosted CI.
 
 Before continuing, preserve all of the following:
 
@@ -73,9 +85,9 @@ SHA-256 `b0bca4243d2f0ba4631e3338e611d3bcaff8ba456de83b79ea0106ae187ac488`); it 
 unchanged. The authentic KSP-generated v2 export is committed at
 `core-data/schemas/app.morsecode.core.data.db.MorseDatabase/2.json` (50,652 bytes,
 SHA-256 `7e6acfd9c03b0214dcaddc2f5d1ceb175588f5cfcf93cca5437617be24b2b074`). The strict
-local verifier passes 11/11, and run 37467189323 regenerated and compared the committed
-export successfully. Never hand-author v2 or regenerate over v1; keep CI's byte-for-byte
-KSP comparison.
+local verifier passes 11/11, and green run 37468340772 regenerated and compared the
+committed export successfully. Never hand-author v2 or regenerate over v1; keep CI's
+byte-for-byte KSP comparison.
 
 Current code has explicit `Migration(1,2)`, Room schema version 2, bounded SAF parent/
 child tables with child-only ownership cascades, `RoomTransferSnapshotStore`, and
@@ -83,21 +95,20 @@ child tables with child-only ownership cascades, `RoomTransferSnapshotStore`, an
 serialized snapshot object is persisted. Run 1 found compilation errors and seven
 `core-transfer` failures. Run 2 fixed compilation but recorded 12 test failures (six
 distinct cases duplicated across variants): migration fixture quoting; a journal fixture
-that overwrote its deliberately corrupted parent; four recovery expectations that did not
-account for typed malformed-checkpoint rejection before provider access; and same-identity
-rename evidence. Run 3 confirmed those fixes: the only two reported failures were the same
-migration test in Debug/Release. Its legacy schema bootstrap substitutes the Room table
-placeholder into index SQL; the template already includes SQL backticks, so the extra
-backticks introduced by the fixture caused malformed SQL. The worktree fix now substitutes
-the bare entity table name for index SQL as it already does for table-creation SQL. CI must
-still execute that fix; no local Kotlin/Android test run is possible without Java/Gradle.
+that overwrote its deliberately corrupted parent; and four recovery cases, including
+invalid identity/scope rejection before provider access and a same-identity final-rename
+checkpoint with a null returned URI. Run 3 confirmed those fixes and isolated the final
+fixture placeholder bug; the bare-name replacement passed on run 4. Thus the authentic-v1
+migration/existing-row preservation test, fresh-v2 validation/DAO/reopen test, typed
+validation/conflict tests, and complete JVM suite pass on the green exact SHA.
 
-Local checks after this correction: reference verifier 31/31, token parity 195/195,
+Local checks after the correction: reference verifier 31/31, token parity 195/195,
 protocol limits 21/21, strict Room schema 11/11, Node syntax check and `git diff --check`
-pass; v1 hash remains unchanged. Run 3 had zero lint errors (45 warnings) and assembled
-the debug and instrumentation APKs (18.94 MiB and 1.10 MiB). Continue until the migration
-and reopen tests, all JVM tests, strict schema compare, lint, and both APKs pass on a green
-exact-SHA workflow.
+pass; v1 hash remains unchanged. Run 4 had 0 lint errors and 45 warnings (27 unused
+resources, 11 plural candidates, 4 configuration screen-width checks, 2 selected-photo
+access checks, and 1 old target API); both APKs assembled. The workflow also reported a
+non-blocking Actions Node.js 20 deprecation notice. No local Kotlin/Android test run is
+possible without Java/Gradle; hosted CI is the verified build/test path.
 
 `CURRENT_MILESTONE` must stay 2 and `TRANSFER_ENGINE` must remain gated. Do not start a
 restoration coordinator, cleanup worker, LAN/Nearby/Wi-Fi Direct, transfer networking,
