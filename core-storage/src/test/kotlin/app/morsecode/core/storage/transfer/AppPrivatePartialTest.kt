@@ -7,6 +7,7 @@ import java.nio.file.Files
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -203,6 +204,20 @@ class AppPrivatePartialTest {
         assertFalse(name.contains('/'))
         assertFalse(name.contains('\\'))
         assertFalse(name.contains(".."))
+    }
+
+    @Test
+    fun `identity encoding is injective for punctuation-bearing staging keys`() {
+        val store = store()
+        val colonIdentity = PartialIdentity("saf:grant")
+        val atIdentity = PartialIdentity("saf@grant")
+
+        val colonName = store.fileNameFor(colonIdentity)
+        val atName = store.fileNameFor(atIdentity)
+
+        assertNotEquals(colonName, atName)
+        assertTrue(colonName.startsWith("morsec-~1-"))
+        assertTrue(atName.startsWith("morsec-~1-"))
     }
 
     // --- verification over a real file ---------------------------------------

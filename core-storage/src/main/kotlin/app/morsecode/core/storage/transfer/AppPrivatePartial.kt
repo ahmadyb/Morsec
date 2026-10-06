@@ -1,5 +1,6 @@
 package app.morsecode.core.storage.transfer
 
+import android.util.Base64
 import java.io.Closeable
 import java.io.File
 import java.io.IOException
@@ -113,14 +114,22 @@ public class AppPrivatePartial internal constructor(
  */
 public class AppPrivatePartialStore(private val directory: File) {
 
-    /** Allowed characters in a staged file name. Everything else becomes '-'. */
-    private val safeNameCharacter = Regex("""[A-Za-z0-9._-]""")
-
+    /**
+     * Encodes the complete identity rather than replacing punctuation. The
+     * identity alphabet contains both ':' and '@'; replacing both with '-'
+     * would let distinct checkpoints address and delete the same staged file.
+     * The version marker also keeps the encoded namespace disjoint from the
+     * earlier lossy sanitizer, whose output could not contain '~'.
+     */
     public fun fileNameFor(identity: PartialIdentity): String {
-        val body = identity.value.map { char ->
-            if (safeNameCharacter.matches(char.toString())) char else '-'
-        }.joinToString("")
-        return "morsec-$body.part"
+        require(SafCommitCheckpointValidator.validateCommitId(identity) == null) {
+            "staging identity is outside the bounded commit-key format"
+        }
+        val encoded = Base64.encodeToString(
+            identity.value.toByteArray(Charsets.UTF_8),
+            Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
+        )
+        return "morsec-~1-$encoded.part"
     }
 
     public fun fileFor(identity: PartialIdentity): File =
