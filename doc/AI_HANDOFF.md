@@ -23,7 +23,7 @@ recorded first below.
 
 ---
 
-## Current authoritative state — 2026-10-06: callable SAF process-restoration group (implementation complete; exact-SHA CI green; handoff synchronization in progress)
+## Current authoritative state — 2026-10-06: callable SAF process-restoration group (implementation complete; exact-SHA CI green)
 
 This is the current, narrower authorization and supersedes older handoff statements that
 said a restoration coordinator was not approved. Work only on the explicitly invoked
@@ -95,10 +95,10 @@ Milestone 3 SAF process-restoration and safe-cleanup orchestration group, then s
   Its Robolectric policy disables only the optional elapsed-time cap; every operation-count
   bound remains active. The latest local, tracking, and server refs were equal to
   `11706e45f2e88da34959a5d0b74f0787e8018711`, and the worktree was clean. Local Gradle
-  remains unavailable (no Java/JAVA_HOME). This document-only handoff synchronization will
-  be pushed to the assigned branch and will trigger another full exact-SHA workflow run;
-  consult the final delivery report for that run's head SHA and result. Preserve rescue
-  artifacts until the synchronization SHA is green. No PR or other branch.
+  remains unavailable (no Java/JAVA_HOME). This handoff sync is documentation-only; the
+  full branch workflow is rerun on its pushed commit, and the final delivery report records
+  that exact head SHA and run. Preserve rescue artifacts until that synchronization SHA is
+  green. No PR or other branch.
 - `doc/transfer-restoration.md` records the runtime boundary. The older
   `MORSEC_OFFLINE_PATCH/` and `MORSEC_ROOM_V2_RESCUE_2026-10-06/` paths named below were
   absent in this checkout; do not overwrite or delete any rescue artifacts if they appear.
