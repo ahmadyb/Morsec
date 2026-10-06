@@ -9,13 +9,13 @@ GitHub repository:
 https://github.com/ahmadyb/Morsec
 
 Working branch for this Arena session:
-arena/01a10ca1-morsec
+arena/268e777f-morsec
 
-Accepted parent SHA:
-`43e575b1c9e2aea6b70bd03f0ac76ac642e14210`. This session is fixed to
-`arena/01a10ca1-morsec`; do not switch branches, modify the prior Arena branch, or
-push anywhere else. Preserve the live worktree and untracked files. Never use
-`git reset --hard`, rewrite history, or run `git clean` without explicit path-by-path review.
+Accepted Milestone 3 implementation SHA:
+`0abcc3603df37f5ce1f0aa47fa3c1d551c0a61e9`. This session is fixed to
+`arena/268e777f-morsec`; do not switch branches, create another branch, or push anywhere
+else. Preserve any live rescue artifacts. Never rewrite history, force-push, or run
+`git clean` without explicit path-by-path review.
 
 Older session notes below name prior Arena branches and heads; they are historical
 records, not branch instructions. The current authoritative scope and latest status are
@@ -23,11 +23,36 @@ recorded first below.
 
 ---
 
-## Current authoritative state — 2026-10-06: callable SAF process-restoration group (implementation complete; exact-SHA CI green)
+## Current authoritative state — 2026-10-06: Milestone 3 complete; next milestone unapproved
 
-This is the current, narrower authorization and supersedes older handoff statements that
-said a restoration coordinator was not approved. Work only on the explicitly invoked
-Milestone 3 SAF process-restoration and safe-cleanup orchestration group, then stop.
+The authorized repository-level Milestone 3 transfer foundation, Android storage, Room v2
+persistence, and callable SAF restoration are complete. Formal closure is documentation-only.
+No additional functional work is authorized; do not begin Milestone 4 or transport, service,
+or transfer UI work. The next milestone remains unapproved.
+
+### Final accepted state
+
+- Branch: `arena/268e777f-morsec`; accepted implementation SHA:
+  `0abcc3603df37f5ce1f0aa47fa3c1d551c0a61e9`.
+- Exact-SHA Android CI: [37514300366](https://github.com/ahmadyb/Morsec/actions/runs/37514300366).
+- Tests: 2,627 passed, 0 failed, 0 skipped — app 588, `core-data` 56, `core-design` 100,
+  `core-model` 40, `core-storage` 1,404, `core-transfer` 439.
+- Lint: 0 errors, 45 warnings. Debug APK: 19.00 MiB. Instrumentation APK: 1.10 MiB.
+- Room remains database version 2. The v1 schema (29,767 bytes,
+  `b0bca4243d2f0ba4631e3338e611d3bcaff8ba456de83b79ea0106ae187ac488`) and v2 schema
+  (50,652 bytes, `7e6acfd9c03b0214dcaddc2f5d1ceb175588f5cfcf93cca5437617be24b2b074`) remain
+  frozen; no schema v3 or migration was added.
+- Callable restoration is complete and verified. It is explicitly invoked; no automatic
+  restoration service, worker, or startup recovery exists. Room close/discard/reopen tests
+  model reconstruction and do not claim Android OS process-death instrumentation.
+- No networking, notifications, foreground service, or transfer UI work has started.
+  `CURRENT_MILESTONE` intentionally remains 2 and `TRANSFER_ENGINE` remains unavailable.
+
+### Implementation scope and earlier CI iteration history
+
+The accepted restoration scope supersedes older handoff statements that said a restoration
+coordinator was not approved. The historical CI entries below document intermediate
+validation attempts; the final accepted result is the exact-SHA run recorded above.
 
 - Repository: `https://github.com/ahmadyb/Morsec`.
 - Fixed Arena branch: `arena/268e777f-morsec`; accepted starting SHA:
@@ -93,12 +118,10 @@ Milestone 3 SAF process-restoration and safe-cleanup orchestration group, then s
   temporary cleanup pending, then explicitly invokes restoration again to reconcile that
   exact identity and finish committed without a second provider create, write, or rename.
   Its Robolectric policy disables only the optional elapsed-time cap; every operation-count
-  bound remains active. The latest local, tracking, and server refs were equal to
-  `11706e45f2e88da34959a5d0b74f0787e8018711`, and the worktree was clean. Local Gradle
-  remains unavailable (no Java/JAVA_HOME). This handoff sync is documentation-only; the
-  full branch workflow is rerun on its pushed commit, and the final delivery report records
-  that exact head SHA and run. Preserve rescue artifacts until that synchronization SHA is
-  green. No PR or other branch.
+  bound remains active. At that intermediate checkpoint, local, tracking, and server refs
+  were equal to `11706e45f2e88da34959a5d0b74f0787e8018711` and the worktree was clean; local
+  Gradle remained unavailable. This checkpoint was superseded by the final accepted SHA and
+  exact-SHA CI run recorded above. No PR or other branch was used.
 - `doc/transfer-restoration.md` records the runtime boundary. The older
   `MORSEC_OFFLINE_PATCH/` and `MORSEC_ROOM_V2_RESCUE_2026-10-06/` paths named below were
   absent in this checkout; do not overwrite or delete any rescue artifacts if they appear.

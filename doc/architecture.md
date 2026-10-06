@@ -26,7 +26,7 @@ Companion documents:
 | `:app` | Android application | Single activity, Compose navigation graph, ViewModels, Hilt graph root, foreground services, permissions, notifications, WebShare asset hosting | **M1** |
 | `:core-model` | Kotlin/JVM | Domain models, enums, the transfer state machine, formatters, `NetworkPorts`, `FeatureReadiness`, DI qualifiers | **M1** |
 | `:core-design` | Android library | Mockup design tokens (colours, metrics, type) and the reusable Compose component set | **M1** |
-| `:core-data` | Android library | Room database (entities, DAOs, mappers), DataStore settings, repositories, logging + redaction, crash recorder | **M1** |
+| `:core-data` | Android library | Room database (entities, DAOs, mappers), DataStore settings, repositories, logging + redaction, crash recorder | **M1 + M3 persistence** |
 | `:core-storage` | Android library | MediaStore / SAF / legacy-storage adapters, the runtime permission matrix, installed-apps reader, explicit SAF checkpoint restoration | **M1 + M3 storage** |
 | `:core-transfer` | Kotlin/JVM | Protocol framing, checksums, resume, the queue scheduler, snapshot persistence contracts — the pure engine; wiring it to a transport is M5 | **M3 core**, M5 wiring |
 | `:transport-lan` | Android library | UDP discovery beacons, TCP control and data channels | M6 |
@@ -35,11 +35,22 @@ Companion documents:
 | `:media` | Android library | Media3 playback, MediaSession, metadata helpers | M10 |
 | `webshare-ui` | npm (not Gradle) | TypeScript/CSS browser client; its production bundle is embedded into `:app` assets | M12 |
 
-`core-transfer` now holds the pure transfer engine — framing, checksums, resume, the
-queue scheduler and the persistence contracts — delivered by Milestone 3 and covered by
-435 JVM tests. See [`transfer-protocol.md`](transfer-protocol.md). The engine is **not yet
-wired to a transport**: `FeatureReadiness.TRANSFER_ENGINE` stays pinned to milestone 5, and
-turning it on for users is milestone 5 work, not this milestone's.
+`core-transfer` holds the pure transfer foundation — framing, checksums, resume, the
+queue scheduler and persistence contracts — delivered by Milestone 3 and covered by 439
+JVM tests. See [`transfer-protocol.md`](transfer-protocol.md). The repository-level
+Milestone 3 delivery also includes Android storage, Room v2 persistence, and explicitly
+callable SAF restoration; these do not add Android or Room dependencies to `:core-transfer`.
+This foundation is not a user-accessible transfer feature: `FeatureReadiness.TRANSFER_ENGINE`
+remains pinned to milestone 5 for product integration and activation.
+
+Final exact-SHA Android CI run [37514300366](https://github.com/ahmadyb/Morsec/actions/runs/37514300366)
+verified commit `0abcc3603df37f5ce1f0aa47fa3c1d551c0a61e9`: 2,627 JVM tests passed, zero
+failed and zero skipped (app 588, `core-data` 56, `core-design` 100, `core-model` 40,
+`core-storage` 1,404, `core-transfer` 439). Lint reported zero errors and 45 warnings;
+the debug APK (19.00 MiB) and instrumentation APK (1.10 MiB) assembled. Room remained
+version 2 with 13 tables and a byte-identical committed schema export.
+`FeatureReadiness.CURRENT_MILESTONE` intentionally remains 2 and `TRANSFER_ENGINE` remains
+unavailable until its product integration milestone.
 
 Its only declared dependencies are `:core-model` and JUnit. It declares no coroutines, no
 serialization and no injection, because it needs none of them: the reducer is a synchronous

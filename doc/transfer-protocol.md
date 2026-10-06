@@ -6,7 +6,7 @@ Milestone 3.
 Everything described here lives in `:core-transfer`, which is a **Kotlin/JVM**
 module: no Android class, no Room, no Hilt, no coroutine, no socket, no clock and
 no `Thread.sleep` appears anywhere in its sources. That is not an aesthetic
-choice — it is what lets the 435 tests that cover this document run on the JVM in
+choice — it is what lets the 439 tests that cover this document run on the JVM in
 milliseconds, and what lets the same engine be driven by a LAN socket, by Nearby
 Connections or by a test harness without changing a line of it. Its only declared
 dependencies are `:core-model` and JUnit.
@@ -409,16 +409,21 @@ and no stack trace reaches a log line, a UI row or a peer.
 
 ## 11. What this document does not cover
 
-Everything below is out of scope for Milestone 3 and has no source in
-`:core-transfer`:
+This section describes the boundary of the pure JVM `:core-transfer` module, not the
+scope of repository-level Milestone 3. None of the following Android, transport, or
+application concerns belongs in `:core-transfer`. Separately, repository-level Milestone 3
+delivered Android storage, Room v2 persistence, and explicitly callable SAF restoration;
+those adapters do not add Android or Room dependencies to the pure module.
 
 - sockets, LAN/UDP discovery, Nearby Connections, Wi-Fi Direct
 - foreground services, notifications, wake locks
-- Android stream adapters, the Room implementation, Compose repositories, UI
-  integration
+- Android storage adapters and the Room implementation (outside this module, but delivered
+  separately as the repository's Milestone 3 storage/persistence work)
+- Compose repositories and transfer UI
 - Media3 and the WebShare server and client
 
 `FeatureReadiness.TRANSFER_ENGINE` remains pinned to milestone 5, and
-`FeatureReadiness.CURRENT_MILESTONE` remains 2, as a production-readiness gate.
-Nothing in this milestone turns the engine on for users; it makes the engine
-real, correct and testable so that milestone 5 has something to wire up.
+`FeatureReadiness.CURRENT_MILESTONE` remains intentionally 2. Milestone 3 delivered the
+transfer/storage/persistence foundation, not an activated user-facing transfer feature.
+Milestone 5 remains the product integration and activation gate; this document does not
+claim that a transport, service, or transfer UI is implemented.

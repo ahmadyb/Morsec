@@ -1,6 +1,6 @@
 # ADR-0003 — Android transfer storage adapters and durable persistence
 
-- **Status:** accepted (2026-10-02), amended for SAF destination closure (2026-10-05), Room v2 persistence (2026-10-06), and explicitly invoked SAF process restoration (2026-10-06; verification pending)
+- **Status:** accepted (2026-10-02), amended for SAF destination closure (2026-10-05), Room v2 persistence (2026-10-06), and explicitly invoked SAF process restoration (2026-10-06; verified by exact-SHA CI run [37514300366](https://github.com/ahmadyb/Morsec/actions/runs/37514300366) on `0abcc3603df37f5ce1f0aa47fa3c1d551c0a61e9`)
 - **Applies to:** `:core-storage` (Android source/destination adapters and SAF journal),
   `:core-data` (Room entities, migration, snapshot adapter, clock), and `:core-transfer`
   (pure persistence contracts, codec, digest value, and typed errors)
@@ -95,7 +95,25 @@ Direct, transfer UI, Media3, and WebShare. `CURRENT_MILESTONE` remains 2 and
 `TRANSFER_ENGINE` remains gated. The implementation and test coverage are described in
 [`../transfer-restoration.md`](../transfer-restoration.md). Close/discard/reopen Room tests
 model persisted-state reconstruction and do not claim Android OS process-death testing.
-Exact-SHA hosted validation remains the completion gate.
+
+### Verification closure — 2026-10-06
+
+The callable SAF restoration amendment was verified by exact-SHA Android CI run
+[37514300366](https://github.com/ahmadyb/Morsec/actions/runs/37514300366) on
+`0abcc3603df37f5ce1f0aa47fa3c1d551c0a61e9`.
+
+- Discovery and execution are bounded; unfinished work and explicit retry guidance are
+  returned to the caller, but no retry is scheduled.
+- Same-checkpoint concurrency protection is process-local. No multi-process locking claim
+  is made.
+- Revision conflicts reload the checkpoint, revalidate scope, resolve the exact grant,
+  and reclassify within a configured bound.
+- Exact-identity cleanup is settled only after querying and observing the stored target's
+  absence; a deletion request alone is not success.
+- Room close/discard/reopen reconstruction tests passed. They model persisted-state
+  reconstruction and do not claim Android OS process-death instrumentation.
+- The implementation does not start automatic restoration, a worker, or a service; it
+  does not restart network transfers or enable `TRANSFER_ENGINE`.
 
 ## Context
 

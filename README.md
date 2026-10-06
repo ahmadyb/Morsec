@@ -53,11 +53,12 @@ polices.
 
 ## Building
 
-Requires JDK 17, Android SDK Platform 36 and Gradle 8.13. The wrapper JAR is a binary artifact
-and is not committed; regenerate it once, then use `./gradlew` as normal:
+Requires JDK 17, Android SDK Platform 36 and Gradle 8.13. The Gradle wrapper scripts
+(`gradlew`, `gradlew.bat`) and wrapper JAR (`gradle/wrapper/gradle-wrapper.jar`) are
+committed. Use the committed wrapper directly:
 
 ```bash
-gradle wrapper --gradle-version 8.13     # creates gradlew, gradlew.bat and gradle-wrapper.jar
+./gradlew --version
 ./gradlew checkMilestoneHygiene          # rejects TODO/stub markers in delivered sources
 ./gradlew test                           # unit tests (core-model, core-design, core-data, core-transfer)
 ./gradlew :app:assembleDebug             # debug APK -> app/build/outputs/apk/debug/
@@ -73,7 +74,7 @@ see [`doc/release.md`](doc/release.md).
 | --- | --- | --- |
 | 1 | Structure, tokens, navigation, DI, persistence, storage readers, static screens, platform doctor | **delivered** |
 | 2–4 | Depth inside the milestone‑1 areas: full Files browsing/selection and the per-file action matrix, History search and filters, Settings completeness, Logs/Crashes export | **delivered** as milestone 2 — viewer, music, video, duplex and broadcast screens plus the parity/navigation/responsive/accessibility audit; see [`doc/qa/milestone-2-screen-parity.md`](doc/qa/milestone-2-screen-parity.md) |
-| 5 | Transfer engine — sessions, chunking, hashing, resume, verification (`TRANSFER_ENGINE`) | next |
+| 5 | Product integration and activation of the delivered transfer foundation (`TRANSFER_ENGINE`) | next |
 | 6 | LAN transport — multicast discovery, TCP control/data, foreground service (`LAN_TRANSPORT`) | planned |
 | 7 | Nearby Connections transport + the doctor's Play services checks (`NEARBY_TRANSPORT`, `DOCTOR_NEARBY`) | planned |
 | 8 | Background service, notification controls, process-death recovery (`BACKGROUND_SERVICE`) | planned |
@@ -81,6 +82,12 @@ see [`doc/release.md`](doc/release.md).
 | 10 | Image viewer, Media3 music and video playback (`MEDIA_PLAYBACK`) | planned |
 | 11 | Embedded WebShare HTTP server + local JSON API (`WEBSHARE_SERVER`) | planned |
 | 12 | TypeScript WebShare client (`WEBSHARE_CLIENT`) | planned |
+
+Milestone 3 delivered the pure Kotlin transfer core, Android storage adapters, Room v2
+persistence, and explicitly callable SAF restoration. This is a foundation, not a
+user-accessible transfer feature. `CURRENT_MILESTONE` intentionally remains 2 and
+`TRANSFER_ENGINE` remains unavailable until milestone 5 product integration and activation.
+No transport, service, or transfer UI was enabled by the Milestone 3 delivery.
 
 The area names in brackets are the `FeatureArea` entries in `core-model`; `CURRENT_MILESTONE` is
 bumped only when a milestone is actually delivered, and `tools/verify/token-parity.mjs` fails if
