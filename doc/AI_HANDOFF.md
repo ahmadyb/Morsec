@@ -68,13 +68,26 @@ Milestone 3 SAF process-restoration and safe-cleanup orchestration group, then s
   and both APK assemblies (debug 19.00 MiB, instrumentation 1.10 MiB). It reported 2,627
   JVM tests (app 588, core-data 56, core-design 100, core-model 40, core-storage 1,404,
   core-transfer 439); the same production-factory test failed in Debug and Release because
-  its generated `sessionId` exceeded the existing 64-byte model limit. The focused pending
-  fixture correction removes the unnecessary `factory-` component from the generated
-  staging identity so derived session/transfer ids remain within their existing bounds.
-  The worktree correction has not yet been committed or CI-verified; no green result is
-  claimed. Keep rescue artifacts, publish only to the assigned branch, and require exact
-  local/tracking/server SHA equality plus green exact-SHA CI before completion. No PR or
-  other branch.
+  its generated `sessionId` exceeded the existing 64-byte model limit. Commit `5c4350c`
+  removed the unnecessary `factory-` component from the generated staging identity; derived
+  session/transfer IDs then measured 60/61 UTF-8 bytes.
+- Third exact-SHA Android CI run
+  [37511734621](https://github.com/ahmadyb/Morsec/actions/runs/37511734621) on
+  `5c4350cda6c978a37b44e520e9537e5fa36c03be` passed milestone hygiene, reference/design/
+  protocol verifiers, KSP/schema comparison, lint (0 errors/45 warnings across 7 reports),
+  and both APK assemblies. Its 2,627 JVM tests had two failures, both Debug/Release copies
+  of the production-factory test: it expected one restoration call to finish cleanup, but
+  the existing SAF protocol correctly returned `RETRY_PROVIDER_TEMPORARY_CLEANUP` after
+  verifying/publishing the final and releasing staging. That provider-temporary identity is
+  deliberately settled by a later explicit `resumeOrReconcile` invocation; no automatic
+  retry occurs. The pending test correction now asserts the first report is delivered with
+  only provider-temporary cleanup pending, then explicitly invokes restore again and expects
+  committed/no pending cleanup while asserting there was no second create, write, or rename. It
+  disables only the optional elapsed-time cap for deterministic Robolectric integration;
+  all count/mutation/cleanup/observation bounds remain enabled. This worktree correction is
+  not yet committed or CI-verified. No green result is claimed. Keep rescue artifacts,
+  publish only to the assigned branch, and require exact local/tracking/server SHA equality
+  plus green exact-SHA CI before completion. No PR or other branch.
 - `doc/transfer-restoration.md` records the runtime boundary. The older
   `MORSEC_OFFLINE_PATCH/` and `MORSEC_ROOM_V2_RESCUE_2026-10-06/` paths named below were
   absent in this checkout; do not overwrite or delete any rescue artifacts if they appear.

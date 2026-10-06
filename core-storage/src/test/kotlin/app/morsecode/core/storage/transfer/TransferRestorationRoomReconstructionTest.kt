@@ -632,15 +632,35 @@ class TransferRestorationRoomReconstructionTest {
         val coordinator = TransferRestorationCoordinatorFactory.createForProduction(
             context = context,
             database = database,
+            policy = RestorationExecutionPolicy(maximumElapsedNanos = null),
             ioDispatcher = Dispatchers.IO,
         )
         assertEquals(initialCreateCalls, requireNotNull(provider).callCount("android:createDocument"))
-        val report = coordinator.restore()
-
-        assertEquals(RestorationClassification.RESUMED_AND_COMMITTED, report.outcomes.single().classification)
+        val firstReport = coordinator.restore()
+        val firstOutcome = firstReport.outcomes.single()
+        assertEquals(RestorationClassification.RETRY_PROVIDER_TEMPORARY_CLEANUP, firstOutcome.classification)
+        assertTrue(firstOutcome.delivered)
+        assertEquals(setOf(SafCleanupPending.PROVIDER_TEMPORARY), firstOutcome.pendingCleanup)
         assertEquals(1, requireNotNull(provider).callCount("android:createDocument"))
         assertEquals(1, requireNotNull(provider).callCount("android:renameDocument"))
+        assertEquals(1, requireNotNull(provider).writeOpenCount)
         assertTrue(requireNotNull(provider).callCount("android:isChildDocument") > 0)
+        assertTrue(stagingStore.lengthOrNull(id) == null)
+
+        // Provider-temporary cleanup is a later explicit pass: resumeOrReconcile
+        // revalidates the final, observes this exact renamed-away identity as
+        // absent, and must not recreate, recopy, or rename the delivered file.
+        val cleanupReport = coordinator.restore()
+        assertEquals(
+            RestorationClassification.RESUMED_AND_COMMITTED,
+            cleanupReport.outcomes.single().classification,
+        )
+        assertTrue(cleanupReport.outcomes.single().delivered)
+        assertTrue(cleanupReport.outcomes.single().pendingCleanup.isEmpty())
+        assertTrue(requireNotNull(provider).contains("$parentId/restored.bin"))
+        assertEquals(1, requireNotNull(provider).callCount("android:createDocument"))
+        assertEquals(1, requireNotNull(provider).callCount("android:renameDocument"))
+        assertEquals(1, requireNotNull(provider).writeOpenCount)
         assertTrue(stagingStore.lengthOrNull(id) == null)
         assertEquals(SafCommitCheckpointPhase.COMMITTED, journal.read(id)
             .let { (it as SafCommitJournalRead.Found).entry.checkpoint.phase })

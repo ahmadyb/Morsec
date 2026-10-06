@@ -94,6 +94,8 @@ class FakeSafProvider : ContentProvider() {
     private val documents = LinkedHashMap<String, Doc>()
     private val contents = LinkedHashMap<String, File>()
     private val calls = LinkedHashMap<String, Int>()
+    var writeOpenCount: Int = 0
+        private set
     private lateinit var storageDir: File
 
     /**
@@ -134,6 +136,7 @@ class FakeSafProvider : ContentProvider() {
     fun reset(rootDocumentId: String, treeUri: Uri) {
         treeBaseUri = treeUri
         documents.clear(); contents.clear(); calls.clear(); malformed.clear()
+        writeOpenCount = 0
         nullCursor = false; throwOnQuery = false; throwSecurityOnQuery = false
         nullCursorOnQueryNumber = null; throwOnQueryNumber = null
         throwSecurityOnQueryNumber = null; omitDocumentIdOnQuery = false; queryCount = 0
@@ -259,6 +262,7 @@ class FakeSafProvider : ContentProvider() {
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
+        if ('w' in mode) writeOpenCount++
         if (throwSecurityOnOpen) throw SecurityException("revoked")
         failOpenWith?.let { throw it }
         if (nullOnOpen) return null
