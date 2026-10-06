@@ -336,33 +336,56 @@ failing peer can poison, which is what `BroadcastIsolationTest` asserts.
 
 ## 9. Persistence
 
-`TransferSnapshotCodec` is a versioned, Room-independent `key=value` line format.
+`TransferSnapshotCodec` remains a bounded, versioned, Room-independent
+`key=value` codec in `:core-transfer`. It is exercised by pure-core codec tests;
+**the durable Room adapter does not store its output or any serialized snapshot
+object.** Room stores the snapshot as typed columns and reconstructs a domain
+value through an explicit mapper.
 
-It is hand-rolled rather than generated, for three reasons:
+The codec's stand-alone guarantees are:
 
-- **Bounded.** Every field is length-checked on the way in, so a corrupt row
-  cannot make the decoder allocate something huge.
-- **Rejecting.** An unknown key, a duplicated key or a newer version is a typed
-  error, not a default. A snapshot written by a future build describes state this
-  build does not understand, and guessing is how a resumable offset becomes a
-  corrupt file.
-- **Uncoupled.** No annotation, no generated code, no Android class.
-  `TransferSnapshotStore` is the seam a `:core-data` Room adapter implements;
-  nothing in `:core-transfer` can tell the difference.
+- **Bounded.** Every field is length-checked on decode, so malformed input cannot
+  cause an unbounded allocation.
+- **Rejecting.** Unknown keys, duplicate keys and unsupported versions are typed
+  failures, not defaults.
+- **Uncoupled.** No Room annotation or Android class appears in `:core-transfer`.
+  `TransferSnapshotStore` is the seam implemented by `:core-data`.
 
-Values are escaped, so a stored value can never forge a line or a key. A failure
-is restored from its code and classification rather than as its original subtype,
-so a newer build can read an older build's rows.
+The Room mapper applies the same strictness to persisted columns: enum tokens,
+protocol versions, field bounds, digest representation, failure-field
+completeness, booleans, identity ownership and cross-field snapshot invariants
+are validated before a domain value is returned. Failure rows retain only a
+bounded redacted code/detail and classification, never an exception or stack.
 
 The store contract's atomicity rules are part of the interface, not advice:
 
-- `saveTransition` applies the state move *and* the durable parts of its effects
-  in one transaction. A crash between writing the new state and writing its
-  checkpoint must leave the **old** state on disk, never a new state over an old
-  offset.
+- `saveTransition` applies the state move *and* durable effects in one
+  transaction. A crash must leave either the complete old row or the complete
+  replacement, never a mixed state/checkpoint.
 - `saveCheckpoint` may be called once per acknowledged chunk, so it must be cheap
   and idempotent for a given offset.
 - Restoring must never promote optimistic bytes to confirmed bytes.
+
+The v2 Room adapter is `:core-data`'s `RoomTransferSnapshotStore`. It persists
+descriptor metadata, reducer state, verification/failure fields, optimistic and
+confirmed progress, and an adapter-owned monotonic `row_revision` as typed
+columns—no serialized blob. Snapshot transitions compare the full previous
+domain value, require the next reducer version, and atomically replace the row;
+exact retries are idempotent, while stale/gapped replacements are typed
+conflicts. Per-ack checkpoints update only `confirmed_bytes` and the CAS revision,
+rejecting regression or an offset beyond the descriptor size.
+
+The Room schema uses one persisted SHA-256 representation: exactly 64 lowercase
+hexadecimal characters, parsed to a 32-byte `Sha256Digest` with defensive
+copies. Default digest/error/entity `toString()` output is redacted; raw digest
+bytes are never emitted to logs. The v1 schema remains immutable and v2 is
+installed through explicit `Migration(1, 2)`. `transfer_sessions` has no
+recovery-data foreign key: history retention is blocked while a snapshot or SAF
+checkpoint still owns recovery data. Rename-history and pending-cleanup rows,
+in contrast, are
+checkpoint-owned children with foreign keys that cascade only when that exact
+checkpoint parent is deleted. Opening the database does not start provider
+recovery, a service, or a cleanup worker.
 
 ---
 

@@ -224,7 +224,7 @@ class TransferSnapshotCodecTest {
     @Test fun `an unknown key is rejected rather than ignored`() {
         val encoded = TransferSnapshotCodec.serialize(Tf.queued()) + "futureKey=1\n"
         assertInvalid(encoded)
-        assertTrue(error(encoded).detail.contains("unknown snapshot key futureKey"))
+        assertEquals("snapshot_unknown_key", (error(encoded) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `a duplicated key is rejected rather than last-write-wins`() {
@@ -233,13 +233,13 @@ class TransferSnapshotCodecTest {
             "confirmedBytes=0\nconfirmedBytes=4096",
         )
         assertInvalid(encoded)
-        assertTrue(error(encoded).detail.contains("duplicate snapshot key confirmedBytes"))
+        assertEquals("snapshot_duplicate_key", (error(encoded) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `a line with no key is rejected`() {
         val encoded = TransferSnapshotCodec.serialize(Tf.queued()) + "novalue\n"
         assertInvalid(encoded)
-        assertTrue(error(encoded).detail.contains("no key"))
+        assertEquals("snapshot_line_missing_key", (error(encoded) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `a line with no value is not a key-only line`() {
@@ -253,7 +253,7 @@ class TransferSnapshotCodecTest {
             .filterNot { it.startsWith("totalBytes=") }
             .joinToString("\n") + "\n"
         assertInvalid(encoded)
-        assertTrue(error(encoded).detail.contains("missing snapshot field totalBytes"))
+        assertEquals("snapshot_fields_incomplete", (error(encoded) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `an empty string is rejected`() {
@@ -277,13 +277,13 @@ class TransferSnapshotCodecTest {
     @Test fun `a version that is not a number is rejected`() {
         val encoded = replaceValue("v", "one")
         assertInvalid(encoded)
-        assertTrue(error(encoded).detail.contains("not a number"))
+        assertEquals("snapshot_version_invalid", (error(encoded) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `a corrupt byte count is rejected`() {
         val encoded = replaceValue("totalBytes", "not-a-number")
         assertInvalid(encoded)
-        assertTrue(error(encoded).detail.contains("not a number"))
+        assertEquals("snapshot_field_invalid", (error(encoded) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `a negative byte count is rejected by the snapshot itself`() {
@@ -299,7 +299,7 @@ class TransferSnapshotCodecTest {
     @Test fun `a digest that is not hex is rejected`() {
         val encoded = replaceValue("sha256", "not-hex")
         assertInvalid(encoded)
-        assertTrue(error(encoded).detail.contains("SHA-256"))
+        assertEquals("snapshot_field_invalid", (error(encoded) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `an unknown transfer state is rejected`() {

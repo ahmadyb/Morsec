@@ -12,18 +12,78 @@ Working branch for this Arena session:
 arena/01a10ca1-morsec
 
 Accepted parent SHA:
-`7fab62ffd6387855bd3fb80c03683dd93c496a36`. This session is fixed to
+`43e575b1c9e2aea6b70bd03f0ac76ac642e14210`. This session is fixed to
 `arena/01a10ca1-morsec`; do not switch branches, modify the prior Arena branch, or
-push anywhere else. Preserve the live worktree and untracked files. Never reset,
-rewrite history, or use `git clean` without explicit review.
+push anywhere else. Preserve the live worktree and untracked files. Never use
+`git reset --hard`, rewrite history, or run `git clean` without explicit path-by-path review.
 
-Older session notes below name a prior Arena branch and prior heads; they are
-historical records, not branch instructions. The authoritative active scope and
-latest status are in the current section below.
+Older session notes below name prior Arena branches and heads; they are historical
+records, not branch instructions. The current authoritative scope and latest status are
+recorded first below.
 
 ---
 
-## Current authoritative state — 2026-10-05: SAF destination closure accepted
+## Current authoritative state — 2026-10-06: Room v2 persistence group
+
+The accepted SAF destination implementation is the starting point at
+`43e575b1c9e2aea6b70bd03f0ac76ac642e14210`. The fixed Arena branch is
+`arena/01a10ca1-morsec`; its fetched `origin/arena/01a10ca1-morsec` ref was verified
+at that SHA. The prior local HEAD
+`7fab62ffd6387855bd3fb80c03683dd93c496a36` was its ancestor; after verifying the
+rescue checksums, the branch ref was advanced with a non-destructive `git reset --mixed`,
+which preserved the Room v2 worktree changes.
+The current HEAD is the accepted SHA. Do not switch branches,
+rewrite history, force-push, merge, or create a PR. Push directly to the fixed branch.
+
+Only the explicitly approved Room v2 persistence group is in scope. Worktree additions
+include the v2 transfer entities/migration/store, a production Room `SafCommitJournal`,
+validation/CAS cursor and tests, schema verifier/CI wiring, and documentation. This work
+is still **incomplete and unverified**: no Room v2 KSP export has been committed; no tests,
+Gradle build, lint, APK assembly, or exact-SHA CI for the persistence group has run. Do not
+claim otherwise. The sandbox currently has no `java`, `javac`, or `gradle`; hosted CI is
+needed unless a toolchain is made available.
+
+Before continuing, preserve all of the following:
+
+- `MORSEC_OFFLINE_PATCH/` — prior SAF rescue artifact; do not alter or delete it.
+- `git stash list` was empty after reconciliation, and a read-only reflog/object check
+  found no stash entry. No stash was applied, created, or dropped. Do not assume one is
+  present; the checksummed rescue directory below is the available recovery copy.
+- `MORSEC_ROOM_V2_RESCUE_2026-10-06/` — SHA-256 recorded copy of the pre-reconciliation
+  tracked patch and untracked sources.
+- Any new or unexpected worktree changes. Never use `git reset --hard` or unreviewed
+  `git clean`.
+
+The v1 schema remains at
+`core-data/schemas/app.morsecode.core.data.db.MorseDatabase/1.json` (29,767 bytes,
+SHA-256 `b0bca4243d2f0ba4631e3338e611d3bcaff8ba456de83b79ea0106ae187ac488`). It has not
+been edited. `tools/verify/room-schema.mjs --baseline-only` passes; strict mode correctly
+fails because authentic `2.json` is not yet present. Do not hand-author or regenerate over
+`1.json`. Generate `2.json` only with Room/KSP in CI (cache disabled), retrieve the KSP
+bytes from CI annotations/artifacts, inspect and commit them, then require CI's regenerated
+file to compare byte-for-byte.
+
+Current code has explicit `Migration(1,2)`, Room schema version 2, bounded SAF parent/
+child tables with child-only ownership cascades, `RoomTransferSnapshotStore`, and
+`RoomSafCommitJournal`. Transfer snapshots use validated typed Room columns; no
+serialized snapshot object is persisted. The verifier and CI still need to be exercised;
+code/tests may contain compile/runtime issues. On 2026-10-06 the static checks were rerun:
+`refs.mjs` 31/31, `token-parity.mjs` 195/195, `transfer-limits.mjs` 21/21, and
+`room-schema.mjs --baseline-only` 7/7; Node syntax checks and `git diff --check` also passed.
+This does not replace compilation or tests. Next: execute `:core-transfer`, `:core-data`,
+and `:core-storage` tests (then full `./gradlew test`), confirm migration/reopen/typed-
+validation/revision behavior, generate and verify schema v2, run lint and assemble both APKs,
+update this handoff with exact evidence, push the final changes to the active Arena branch,
+and obtain green exact-SHA CI.
+
+`CURRENT_MILESTONE` must stay 2 and `TRANSFER_ENGINE` must remain gated. Do not start a
+restoration coordinator, cleanup worker, LAN/Nearby/Wi-Fi Direct, transfer networking,
+foreground service, notification, wake lock, transfer UI, Media3, WebShare, Room v3, or
+automatic startup recovery. Stop after the persistence group.
+
+---
+
+## Historical state — 2026-10-05: SAF destination closure accepted
 
 Complete only the SAF destination closure pass on the fixed branch
 `arena/01a10ca1-morsec`, based on accepted parent

@@ -12,8 +12,8 @@ import app.morsecode.core.transfer.model.VerificationInfo
  * Persistence contracts for the transfer core.
  *
  * These are interfaces, not an implementation, and they carry no Room annotation,
- * no Android class and no coroutine type. A future `:core-data` adapter
- * implements them over Room; nothing in `:core-transfer` can tell the difference,
+ * no Android class and no coroutine type. The `:core-data` Room adapter implements
+ * them; nothing in `:core-transfer` can tell the difference,
  * which is what keeps the reducer testable on the JVM and keeps the engine
  * portable.
  *
@@ -26,8 +26,8 @@ import app.morsecode.core.transfer.model.VerificationInfo
  *  * [saveCheckpoint] may be called once per acknowledged chunk, so it must be
  *    cheap and idempotent for a given offset.
  *  * Restoring a snapshot must never promote optimistic bytes to confirmed bytes.
- *    That rule is enforced by `TransferSnapshotCodec`, which round-trips the two
- *    numbers separately.
+ *    A conforming adapter persists and validates the two positions separately
+ *    rather than inferring one from the other.
  */
 
 /** How long a finished delivery's row is kept. */
@@ -64,6 +64,20 @@ public sealed class StoreResult {
 }
 
 /**
+ * A read distinguishes an absent row from one that exists but cannot be trusted.
+ *
+ * Returning `null` for both cases is unsafe for resumable storage: the caller
+ * could mistake a corrupt checkpoint for a new transfer and touch a provider.
+ */
+public sealed class StoreReadResult<out T> {
+    public data object Missing : StoreReadResult<Nothing>()
+
+    public data class Found<T>(public val value: T) : StoreReadResult<T>()
+
+    public data class Failed(public val error: TransferError) : StoreReadResult<Nothing>()
+}
+
+/**
  * The seam a durable adapter implements.
  *
  * Every method is synchronous from the caller's point of view: the engine asks
@@ -74,11 +88,11 @@ public sealed class StoreResult {
  */
 public interface TransferSnapshotStore {
 
-    /** Loads a whole session with all of its deliveries, or null when absent. */
-    public fun loadSession(sessionId: SessionId): SessionSnapshot?
+    /** Loads a whole session, distinguishing absence from an invalid persisted row. */
+    public fun loadSession(sessionId: SessionId): StoreReadResult<SessionSnapshot>
 
-    /** Loads one delivery, or null when absent. */
-    public fun loadTransfer(transferId: TransferId): TransferSnapshot?
+    /** Loads one delivery, distinguishing absence from an invalid persisted row. */
+    public fun loadTransfer(transferId: TransferId): StoreReadResult<TransferSnapshot>
 
     /**
      * Persists one accepted transition atomically.
@@ -102,8 +116,8 @@ public interface TransferSnapshotStore {
         result: VerificationInfo,
     ): StoreResult
 
-    /** Deliveries that can still be resumed after a restart. */
-    public fun listResumable(sessionId: SessionId): List<TransferSnapshot>
+    /** Deliveries that can still be resumed after a restart, or a typed refusal. */
+    public fun listResumable(sessionId: SessionId): StoreReadResult<List<TransferSnapshot>>
 
     /** Drops a terminal delivery according to [policy]. */
     public fun removeTerminal(

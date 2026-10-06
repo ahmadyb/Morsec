@@ -208,27 +208,33 @@ one by one in `TransferReducerInvariantTest`.
 
 ### Android storage adapters and persistence boundary (M3)
 
-The pure core names the adapter work — `RequestSourceStream`,
+The pure transfer core names adapter work — `RequestSourceStream`,
 `RequestDestinationPartial`, `PersistConfirmedOffset`, `BeginVerification`,
-`CommitVerifiedDestination`, `DeletePartialDestination` — and performs none of it. The
-Android storage adapters and the versioned SAF checkpoint protocol live here; a production
-journal and Room persistence for that checkpoint remain unimplemented:
+`CommitVerifiedDestination`, and `DeletePartialDestination` — and performs none
+of it. Android destinations and the versioned SAF checkpoint protocol live in
+`:core-storage`; durable transfer snapshots and the Room schema live in
+`:core-data`.
 
 | Module | Owns |
 | --- | --- |
-| `:core-storage` | Android source adapters (MediaStore, SAF, app-private, legacy), destination/partial strategies, incremental verification, the versioned SAF checkpoint model and coordinator/recovery protocol, the journal abstraction, duplicate-policy resolver and cleanup planner |
-| `:core-data` | the existing Room schema (still version 1) and injected `Clock`; no SAF journal adapter or Room v2 recovery migration |
-| `:core-transfer` | unchanged, plus one added `RestorationDecision` vocabulary |
+| `:core-storage` | Android source/destination adapters (MediaStore, SAF, app-private, legacy), verification, SAF checkpoint/recovery protocol, `SafCommitJournal`, the production Room-backed journal adapter and its Hilt factory, duplicate-policy resolution, and cleanup planning. It never passes Room entities to provider code. |
+| `:core-data` | Room schema v2, explicit migration 1→2, `RoomTransferSnapshotStore`, transfer/SAF Room entities and DAOs, database/DAO bindings, and injected `Clock`. |
+| `:core-transfer` | Pure-JVM transfer contracts, reducer, versioned snapshot codec, 32-byte SHA-256 value type, and typed persistence errors; no Android, `Uri`, Room, stream, or provider dependency. |
 
-The direction is one-way: `core-storage` and `core-data` depend on `core-transfer`;
-`core-transfer` depends on neither and gains no Android, `Uri`, Room or stream type.
+The dependency direction is acyclic: `:core-storage` depends on `:core-data` and
+`:core-transfer`; `:core-data` depends on `:core-transfer`; `:core-transfer`
+depends on neither. `:core-storage` maps checkpoints to/from Room entities in its
+own adapter layer; `:core-data` owns the table definitions and migration. Room v1
+is immutable evidence, and production registers the additive `Migration(1, 2)`
+without destructive fallback.
 
-**The SAF checkpoint model is not production durability.** This package defines
-`SafCommitJournal` and executes recovery against that abstraction; the only journal
-implementation inspected is `InMemorySafCommitJournal` in test sources. There is no
-production journal or `:core-data` adapter, and the Room database remains version 1.
-Checkpoint model version 2 is unrelated to Room schema version 2. Do not claim process-death
-durability from the versioned model or the test fake.
+`SafCommitCheckpoint.CURRENT_VERSION` (checkpoint-format version 2) is distinct
+from the Room database's version 2. The Room journal validates checkpoint rows
+before returning them; neither opening the DB nor constructing the singleton
+journal starts provider recovery, a service, or a worker. Process-restart
+persistence is demonstrated by close/reopen tests, not by automatic recovery. Table
+ownership, transaction/revision rules, schema history, redaction, and verification
+requirements are documented in [`room-v2-persistence.md`](room-v2-persistence.md).
 
 Thirteen decisions govern the parts where a plausible default silently loses data — Room
 schema bootstrap without bot commits, session ownership with **no** foreign key,
@@ -365,8 +371,9 @@ Provider document ids are opaque: ancestry never comes from string-prefix matchi
 containment parser decodes once, inspects a second decode for traversal, and never
 repeatedly decodes or compares encodings to establish ancestry. A provider that cannot
 answer the required query or rename question yields a typed unknown/refusal, not a
-silent downgrade. This Part C work does not start Room v2 or add a Room migration,
-adapter, cleanup service, transport, foreground service, notification or UI.
+silent downgrade. The separately scoped Room v2 persistence group adds only the
+migration and durable journal/snapshot adapters; it does not add a cleanup service,
+transport, foreground service, notification, or UI integration.
 
 ## Dependency injection
 

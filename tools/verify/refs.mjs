@@ -424,7 +424,7 @@ function splitTopLevel(argText) {
 function parameterNames(argText) {
   const names = new Set();
   for (const part of splitTopLevel(argText || '')) {
-    const m = /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|internal|private|protected|override|val|var|vararg|crossinline|noinline|out|in)\s+)*(\w+)\s*:/.exec(part);
+    const m = /^\s*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:(?:public|internal|private|protected|override|val|var|vararg|crossinline|noinline|out|in)\s+)*(\w+)\s*:/.exec(part);
     if (m) names.add(m[1]);
   }
   return names;
@@ -577,7 +577,8 @@ for (const f of kotlinFiles) {
     for (; end < text.length && end < m.index + 800; end++) {
       const c = text[end];
       if (c === '(' || c === '[' || c === '<') depth++;
-      else if (c === ')' || c === ']' || c === '>') depth--;
+      else if (c === ')' && depth === 0 && /^\s*\{/.test(text.slice(end + 1))) break;
+      else if (c === ')' || c === ']' || (c === '>' && text[end - 1] !== '-')) depth--;
       else if (depth === 0 && (c === '{' || c === '=')) break;
       else if (depth === 0 && c === '\n' && text[end + 1] === '\n') break;
     }

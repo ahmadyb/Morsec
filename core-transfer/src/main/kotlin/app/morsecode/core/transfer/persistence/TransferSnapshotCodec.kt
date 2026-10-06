@@ -88,6 +88,9 @@ public object TransferSnapshotCodec {
         KEY_VERIFICATION_OBSERVED, KEY_VERIFICATION_STARTED,
     )
 
+    /** Hard cap before splitting/decoding untrusted persisted text. */
+    public const val MAX_SERIALIZED_BYTES: Int = 64 * 1024
+
     /** Serialises one snapshot; the result never contains a newline or a NUL. */
     public fun serialize(snapshot: TransferSnapshot): String = buildString {
         append(KEY_VERSION).append('=').append(VERSION).append('\n')
@@ -142,24 +145,26 @@ public object TransferSnapshotCodec {
      * restart must not turn "we wrote this" into "they received this".
      */
     public fun deserialize(raw: String): SnapshotDecodeResult {
+        if (raw.length > MAX_SERIALIZED_BYTES ||
+            raw.toByteArray(Charsets.UTF_8).size > MAX_SERIALIZED_BYTES
+        ) {
+            return invalid("snapshot_too_large")
+        }
         val fields = LinkedHashMap<String, String>()
         for (line in raw.split('\n')) {
             if (line.isEmpty()) continue
             val split = line.indexOf('=')
-            if (split <= 0) {
-                return invalid("a snapshot line has no key: ${line.take(32)}")
-            }
+            if (split <= 0) return invalid("snapshot_line_missing_key")
             val key = line.substring(0, split)
-            if (key !in KNOWN_KEYS) {
-                return invalid("unknown snapshot key $key")
-            }
+            if (key !in KNOWN_KEYS) return invalid("snapshot_unknown_key")
             if (fields.put(key, unescape(line.substring(split + 1))) != null) {
-                return invalid("duplicate snapshot key $key")
+                return invalid("snapshot_duplicate_key")
             }
         }
+        if (fields.keys != KNOWN_KEYS) return invalid("snapshot_fields_incomplete")
         return try {
             val version = require(fields, KEY_VERSION).toIntOrNull()
-                ?: return invalid("snapshot version is not a number")
+                ?: return invalid("snapshot_version_invalid")
             if (version > VERSION || version < ProtocolLimits.SNAPSHOT_VERSION_MIN) {
                 return SnapshotDecodeResult.Invalid(
                     TransferError.SnapshotVersionUnsupported(version, VERSION),
@@ -177,75 +182,96 @@ public object TransferSnapshotCodec {
                         actual = requireInt(fields, KEY_PROTOCOL_VERSION),
                     ),
                 )
+            val kind = when (require(fields, KEY_KIND)) {
+                "file" -> false
+                "folder" -> true
+                else -> return invalid("unknown_descriptor_kind")
+            }
             val descriptor = TransferFileDescriptor(
                 fileId = FileId(require(fields, KEY_FILE_ID)),
                 displayName = require(fields, KEY_DISPLAY_NAME),
                 relativePath = RelativeTransferPath(require(fields, KEY_RELATIVE_PATH)),
-                mimeType = fields[KEY_MIME_TYPE] ?: "",
+                mimeType = require(fields, KEY_MIME_TYPE),
                 totalBytes = requireLong(fields, KEY_TOTAL_BYTES),
                 lastModifiedEpochMillis = requireLongOrNull(fields, KEY_LAST_MODIFIED),
-                isFolderArchive = (fields[KEY_KIND] ?: "file") == "folder",
+                isFolderArchive = kind,
                 expectedSha256 = requireDigestOrNull(fields, KEY_SHA256),
                 chunkSize = ChunkSize(requireInt(fields, KEY_CHUNK_SIZE)),
                 protocolVersion = protocolVersion,
             )
-            val state = TransferState.fromId(require(fields, KEY_STATE))
-            if (state == TransferState.FAILED_RETRYABLE && fields[KEY_STATE] != state.id) {
-                return invalid("unknown transfer state ${fields[KEY_STATE]}")
-            }
-            val failureCode = fields[KEY_ERROR_CODE] ?: ""
+            val stateId = require(fields, KEY_STATE)
+            val state = TransferState.entries.firstOrNull { it.id == stateId }
+                ?: return invalid("unknown_transfer_state")
+            val directionId = require(fields, KEY_DIRECTION)
+            val direction = SessionDirection.entries.firstOrNull { it.name == directionId }
+                ?: return invalid("unknown_session_direction")
+            val failureCode = require(fields, KEY_ERROR_CODE)
+            val failureDetail = require(fields, KEY_ERROR_DETAIL)
+            val failureRetryable = requireBoolean(fields, KEY_ERROR_RETRYABLE)
+            val failureOriginId = require(fields, KEY_ERROR_ORIGIN)
+            val failureCategoryId = require(fields, KEY_ERROR_CATEGORY)
             val failure = if (failureCode.isEmpty()) {
+                if (failureDetail.isNotEmpty() || failureRetryable ||
+                    failureOriginId.isNotEmpty() || failureCategoryId.isNotEmpty()
+                ) {
+                    return invalid("inconsistent_failure_fields")
+                }
                 null
             } else {
+                if (!failureCode.matches(Regex("[a-z0-9_]{1,64}"))) {
+                    return invalid("invalid_failure_code")
+                }
+                val origin = ErrorOrigin.entries.firstOrNull { it.id == failureOriginId }
+                    ?: return invalid("unknown_failure_origin")
+                val category = ErrorCategory.entries.firstOrNull { it.id == failureCategoryId }
+                    ?: return invalid("unknown_failure_category")
                 TransferError.restore(
                     code = failureCode,
-                    detail = fields[KEY_ERROR_DETAIL] ?: "",
-                    retryable = (fields[KEY_ERROR_RETRYABLE] ?: "false").toBoolean(),
-                    origin = ErrorOrigin.fromId(fields[KEY_ERROR_ORIGIN]),
-                    category = ErrorCategory.fromId(fields[KEY_ERROR_CATEGORY]),
+                    detail = failureDetail,
+                    retryable = failureRetryable,
+                    origin = origin,
+                    category = category,
                 )
             }
+            val verificationExpected = require(fields, KEY_VERIFICATION_EXPECTED)
+            val verificationObserved = require(fields, KEY_VERIFICATION_OBSERVED)
+            val verificationStarted = require(fields, KEY_VERIFICATION_STARTED)
             val verification = if (
-                (fields[KEY_VERIFICATION_EXPECTED] ?: "").isEmpty() &&
-                (fields[KEY_VERIFICATION_OBSERVED] ?: "").isEmpty() &&
-                (fields[KEY_VERIFICATION_STARTED] ?: "").isEmpty()
+                verificationExpected.isEmpty() && verificationObserved.isEmpty() && verificationStarted.isEmpty()
             ) {
                 null
             } else {
                 VerificationInfo(
                     expectedDigest = requireDigestOrNull(fields, KEY_VERIFICATION_EXPECTED),
                     observedDigest = requireDigestOrNull(fields, KEY_VERIFICATION_OBSERVED),
-                    startedSnapshotVersion = requireLongOrNull(
-                        fields,
-                        KEY_VERIFICATION_STARTED,
-                    ) ?: 0L,
+                    startedSnapshotVersion = verificationStarted.toLongOrNull()
+                        ?: throw IllegalArgumentException("verification start version is not a number"),
                 )
             }
-            SnapshotDecodeResult.Success(
-                TransferSnapshot(
-                    transferId = TransferId(require(fields, KEY_TRANSFER_ID)),
-                    sessionId = SessionId(require(fields, KEY_SESSION_ID)),
-                    batchId = BatchId(require(fields, KEY_BATCH_ID)),
-                    recipientId = fields[KEY_RECIPIENT_ID]?.takeIf { it.isNotEmpty() }
-                        ?.let { RecipientId(it) },
-                    direction = runCatching {
-                        SessionDirection.valueOf(require(fields, KEY_DIRECTION))
-                    }.getOrDefault(SessionDirection.OUTBOUND),
-                    descriptor = descriptor,
-                    state = state,
-                    confirmedBytes = requireLong(fields, KEY_CONFIRMED_BYTES),
-                    optimisticBytes = requireLong(fields, KEY_OPTIMISTIC_BYTES),
-                    lastAcknowledgedSequence = requireLongOrNull(fields, KEY_LAST_ACK_SEQUENCE),
-                    retryCount = requireInt(fields, KEY_RETRY_COUNT),
-                    failure = failure,
-                    verification = verification,
-                    remotePaused = (fields[KEY_REMOTE_PAUSED] ?: "false").toBoolean(),
-                    snapshotVersion = requireLong(fields, KEY_SNAPSHOT_VERSION),
-                    queueOrder = requireLong(fields, KEY_QUEUE_ORDER),
-                ),
+            val snapshot = TransferSnapshot(
+                transferId = TransferId(require(fields, KEY_TRANSFER_ID)),
+                sessionId = SessionId(require(fields, KEY_SESSION_ID)),
+                batchId = BatchId(require(fields, KEY_BATCH_ID)),
+                recipientId = require(fields, KEY_RECIPIENT_ID).takeIf { it.isNotEmpty() }
+                    ?.let(::RecipientId),
+                direction = direction,
+                descriptor = descriptor,
+                state = state,
+                confirmedBytes = requireLong(fields, KEY_CONFIRMED_BYTES),
+                optimisticBytes = requireLong(fields, KEY_OPTIMISTIC_BYTES),
+                lastAcknowledgedSequence = requireLongOrNull(fields, KEY_LAST_ACK_SEQUENCE),
+                retryCount = requireInt(fields, KEY_RETRY_COUNT),
+                failure = failure,
+                verification = verification,
+                remotePaused = requireBoolean(fields, KEY_REMOTE_PAUSED),
+                snapshotVersion = requireLong(fields, KEY_SNAPSHOT_VERSION),
+                queueOrder = requireLong(fields, KEY_QUEUE_ORDER),
             )
-        } catch (e: IllegalArgumentException) {
-            invalid("a snapshot field failed validation: ${e.message ?: "unknown reason"}")
+            if (snapshot.violations().isNotEmpty()) return invalid("inconsistent_snapshot")
+            if (serialize(snapshot) != raw) return invalid("noncanonical_snapshot")
+            SnapshotDecodeResult.Success(snapshot)
+        } catch (_: IllegalArgumentException) {
+            invalid("snapshot_field_invalid")
         }
     }
 
@@ -261,19 +287,30 @@ public object TransferSnapshotCodec {
             ?: throw IllegalArgumentException("snapshot field $key is not a number")
 
     private fun requireLongOrNull(fields: Map<String, String>, key: String): Long? {
-        val value = fields[key]
-        return if (value.isNullOrEmpty()) null else value.toLongOrNull()
+        val value = require(fields, key)
+        return if (value.isEmpty()) null else value.toLongOrNull()
+            ?: throw IllegalArgumentException("snapshot field $key is not a number")
     }
 
+    private fun requireBoolean(fields: Map<String, String>, key: String): Boolean =
+        when (require(fields, key)) {
+            "true" -> true
+            "false" -> false
+            else -> throw IllegalArgumentException("snapshot field $key is not a boolean")
+        }
+
     private fun requireDigestOrNull(fields: Map<String, String>, key: String): Sha256Digest? {
-        val value = fields[key]
-        if (value.isNullOrEmpty()) return null
+        val value = require(fields, key)
+        if (value.isEmpty()) return null
+        if (!value.matches(Regex("[0-9a-f]{64}"))) {
+            throw IllegalArgumentException("snapshot field $key is not a canonical SHA-256 digest")
+        }
         return Sha256Digest.fromHex(value)
             ?: throw IllegalArgumentException("snapshot field $key is not a SHA-256 digest")
     }
 
     private fun invalid(reason: String): SnapshotDecodeResult.Invalid =
-        SnapshotDecodeResult.Invalid(TransferError.MalformedFrame(reason))
+        SnapshotDecodeResult.Invalid(TransferError.PersistedSnapshotInvalid(reason))
 
     private fun escape(value: String): String = value
         .replace("\\", "\\\\")

@@ -44,6 +44,21 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
+      # Preserve the exact committed exports before tests/KSP can write into
+      # core-data/schemas. The post-KSP step compares against these byte copies.
+      - name: Record committed Room schema inputs
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          cp core-data/schemas/app.morsecode.core.data.db.MorseDatabase/1.json ci-logs/room-v1-committed.json
+          if [ -f core-data/schemas/app.morsecode.core.data.db.MorseDatabase/2.json ]; then
+            cp core-data/schemas/app.morsecode.core.data.db.MorseDatabase/2.json ci-logs/room-v2-committed.json
+            echo "Room v2 schema was committed at checkout."
+          else
+            echo "Room v2 bootstrap: no committed 2.json exists yet."
+          fi
+          sha256sum ci-logs/room-v1-committed.json ci-logs/room-v2-committed.json 2>/dev/null || true
+
       - name: Install Temurin JDK 17
         uses: actions/setup-java@v5
         with:
@@ -130,7 +145,7 @@ jobs:
           mkdir -p ci-logs
           ./gradlew --no-daemon --stacktrace checkMilestoneHygiene 2>&1 | tee ci-logs/10-hygiene.log
 
-      # These three need only Node, so they run before the Gradle work and fail
+      # These read-only verifiers need only Node, so they run before the Gradle work and fail
       # the run before a 20-minute build if a documented limit has drifted from
       # the constant it names. transfer-limits.mjs is the one that matters here:
       # it parses doc/transfer-protocol.md's limits table and ProtocolLimits.kt
@@ -143,7 +158,11 @@ jobs:
           {
             for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs; do
               echo "== $script =="
-              node "$script" || echo "VERIFIER FAILED: $script"
+              if [ "$script" = tools/verify/room-schema.mjs ]; then
+                node "$script" --baseline-only || echo "VERIFIER FAILED: $script"
+              else
+                node "$script" || echo "VERIFIER FAILED: $script"
+              fi
             done
           } 2>&1 | tee ci-logs/15-verifiers.log
           grep -q "VERIFIER FAILED" ci-logs/15-verifiers.log && exit 1
@@ -191,6 +210,29 @@ jobs:
               echo "(core-data/schemas does not exist)"
             fi
           } 2>&1 | tee ci-logs/25-room-schema-build.log
+
+      - name: Validate KSP schema and compare committed exports
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          node tools/verify/room-schema.mjs --require-v2
+          V1="core-data/schemas/app.morsecode.core.data.db.MorseDatabase/1.json"
+          V2="core-data/schemas/app.morsecode.core.data.db.MorseDatabase/2.json"
+          if ! cmp -s ci-logs/room-v1-committed.json "$V1"; then
+            echo "::error title=Room v1 schema::KSP changed the immutable committed 1.json"
+            exit 1
+          fi
+          if [ -f ci-logs/room-v2-committed.json ]; then
+            if ! cmp -s ci-logs/room-v2-committed.json "$V2"; then
+              echo "::error title=Room v2 schema::generated 2.json differs from the committed authentic export"
+              diff -u ci-logs/room-v2-committed.json "$V2" || true
+              exit 1
+            fi
+            echo "Generated 2.json matches the committed export byte-for-byte."
+          else
+            echo "::notice title=Room v2 schema bootstrap::KSP produced 2.json; it must be committed from this authentic export before the persistence group can complete."
+          fi
+          sha256sum "$V1" "$V2"
 
       # The export is published twice on purpose: as an artifact, for humans and
       # for environments that can reach the blob hosts; and as check-run

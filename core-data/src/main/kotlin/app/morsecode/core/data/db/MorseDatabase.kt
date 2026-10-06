@@ -6,12 +6,12 @@ import androidx.room.RoomDatabase
 /**
  * The single local database.
  *
- * Version 1 with no migrations yet; the exported schema (`core-data/schemas`,
- * produced by KSP on every build) is what makes future migrations testable with
- * `MigrationTestHelper` instead of guesswork. Any schema change must ship a
- * [androidx.room.migration.Migration] and a migration test — destructive
- * fallbacks are not used, because a lost `confirmed_bytes` offset means a
- * resumed transfer would restart from zero.
+ * Version 2 is an additive extension of the immutable nine-table v1 schema.
+ * KSP exports each authentic version under `core-data/schemas`; the explicit
+ * [MORSE_MIGRATION_1_2] is executed by the migration test and registered in the
+ * production builder. Future schema changes must add a migration and executed
+ * migration test. Destructive fallbacks are forbidden because dropping a
+ * confirmed offset or SAF identity can lose resumable state or make cleanup unsafe.
  */
 @Database(
     entities = [
@@ -24,8 +24,12 @@ import androidx.room.RoomDatabase
         BrowserSessionEntity::class,
         SafGrantEntity::class,
         WebTransferEntity::class,
+        TransferSnapshotEntity::class,
+        TransferPartialEntity::class,
+        SafRenameHistoryEntity::class,
+        SafPendingCleanupEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 public abstract class MorseDatabase : RoomDatabase() {
@@ -47,6 +51,14 @@ public abstract class MorseDatabase : RoomDatabase() {
     public abstract fun safGrantDao(): SafGrantDao
 
     public abstract fun webTransferDao(): WebTransferDao
+
+    public abstract fun transferSnapshotDao(): TransferSnapshotDao
+
+    public abstract fun transferPartialDao(): TransferPartialDao
+
+    public abstract fun safRenameHistoryDao(): SafRenameHistoryDao
+
+    public abstract fun safPendingCleanupDao(): SafPendingCleanupDao
 
     public companion object {
         public const val NAME: String = "morsecode.db"

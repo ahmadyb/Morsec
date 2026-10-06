@@ -31,27 +31,33 @@ private val HEX = charArrayOf(
  * Value-equal by content (unlike a bare `ByteArray`) so it can be compared,
  * stored in a snapshot and used as a map key without surprises.
  */
-public class Sha256Digest(public val bytes: ByteArray) {
+public class Sha256Digest(bytes: ByteArray) {
+    private val value: ByteArray = bytes.copyOf()
+
     init {
-        require(bytes.size == ProtocolLimits.SHA256_DIGEST_BYTES) {
-            "a SHA-256 digest must be ${ProtocolLimits.SHA256_DIGEST_BYTES} bytes, was ${bytes.size}"
+        require(value.size == ProtocolLimits.SHA256_DIGEST_BYTES) {
+            "a SHA-256 digest must be ${ProtocolLimits.SHA256_DIGEST_BYTES} bytes, was ${value.size}"
         }
     }
 
-    private val lazyHex: String by lazy { toHexString(bytes) }
+    /** A defensive copy of the canonical 32-byte digest representation. */
+    public val bytes: ByteArray get() = value.copyOf()
+
+    private val lazyHex: String by lazy { toHexString(value) }
 
     /** Lowercase 64-character hexadecimal. */
     public val hex: String get() = lazyHex
 
     public fun contentEquals(other: Sha256Digest?): Boolean =
-        other != null && bytes.contentEquals(other.bytes)
+        other != null && value.contentEquals(other.value)
 
     override fun equals(other: Any?): Boolean =
-        this === other || (other is Sha256Digest && bytes.contentEquals(other.bytes))
+        this === other || (other is Sha256Digest && value.contentEquals(other.value))
 
-    override fun hashCode(): Int = bytes.contentHashCode()
+    override fun hashCode(): Int = value.contentHashCode()
 
-    override fun toString(): String = "sha256:$hex"
+    /** Digest bytes are never included in default diagnostics or generated parent toStrings. */
+    override fun toString(): String = "Sha256Digest([redacted])"
 
     public companion object {
         /** Non-throwing factory for untrusted 32-byte input. */

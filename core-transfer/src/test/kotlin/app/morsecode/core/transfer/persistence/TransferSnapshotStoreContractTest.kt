@@ -35,23 +35,23 @@ class TransferSnapshotStoreContractTest {
         store.saveTransition(null, a, emptyList())
         store.saveTransition(null, b, emptyList())
 
-        val session = store.loadSession(Tf.sessionId)
+        val session = store.loadedSession(Tf.sessionId)
         assertTrue(session != null)
         assertEquals(2, session!!.transfers.size)
         assertEquals(setOf(TransferId("tr-a"), TransferId("tr-b")), session.transfers.map { it.transferId }.toSet())
         assertEquals(TransferSnapshotCodec.VERSION, session.version)
     }
 
-    @Test fun `an absent session loads as null rather than empty`() {
-        assertNull(InMemorySnapshotStore().loadSession(SessionId("nope")))
-        assertNull(InMemorySnapshotStore().loadTransfer(TransferId("nope")))
+    @Test fun `an absent session and transfer have an explicit missing result`() {
+        assertEquals(StoreReadResult.Missing, InMemorySnapshotStore().loadSession(SessionId("nope")))
+        assertEquals(StoreReadResult.Missing, InMemorySnapshotStore().loadTransfer(TransferId("nope")))
     }
 
     @Test fun `a saved transition is restored as an equal snapshot`() {
         val store = InMemorySnapshotStore()
         val snapshot = Tf.pausedLocally(confirmedBytes = 4_096L)
         assertEquals(StoreResult.Ok, store.saveTransition(null, snapshot, emptyList()))
-        val restored = store.loadTransfer(snapshot.transferId)
+        val restored = store.loadedTransfer(snapshot.transferId)
         assertTrue(restored != null)
         assertEquals(snapshot.copy(failure = null), restored!!.copy(failure = null))
         assertEquals(4_096L, restored.confirmedBytes)
@@ -80,7 +80,7 @@ class TransferSnapshotStoreContractTest {
         // Either both the state and the checkpoint are visible, or neither is:
         // there is no observable moment where the state has advanced and the
         // offset has not.
-        assertEquals(Tf.chunk.value.toLong(), store.loadTransfer(confirmed.transferId)!!.confirmedBytes)
+        assertEquals(Tf.chunk.value.toLong(), store.loadedTransfer(confirmed.transferId)!!.confirmedBytes)
         assertEquals(
             Tf.chunk.value.toLong(),
             store.checkpointFor(confirmed.transferId)?.value,
@@ -89,7 +89,7 @@ class TransferSnapshotStoreContractTest {
 
     @Test fun `saveCheckpoint is idempotent for a given offset`() {
         val store = InMemorySnapshotStore()
-        val snapshot = Tf.queued()
+        val snapshot = Tf.receiving()
         store.saveTransition(null, snapshot, emptyList())
         val offset = ConfirmedOffset(4_096L)
         assertEquals(StoreResult.Ok, store.saveCheckpoint(snapshot.transferId, offset))
@@ -101,7 +101,7 @@ class TransferSnapshotStoreContractTest {
 
     @Test fun `a checkpoint never moves backwards`() {
         val store = InMemorySnapshotStore()
-        val snapshot = Tf.queued()
+        val snapshot = Tf.receiving()
         store.saveTransition(null, snapshot, emptyList())
         store.saveCheckpoint(snapshot.transferId, ConfirmedOffset(8_192L))
         val result = store.saveCheckpoint(snapshot.transferId, ConfirmedOffset(4_096L))
@@ -142,7 +142,7 @@ class TransferSnapshotStoreContractTest {
         )
         assertEquals(
             setOf(TransferId("tr-paused"), TransferId("tr-queued"), TransferId("tr-retry")),
-            store.listResumable(Tf.sessionId).map { it.transferId }.toSet(),
+            store.resumable(Tf.sessionId).map { it.transferId }.toSet(),
         )
     }
 
@@ -159,11 +159,11 @@ class TransferSnapshotStoreContractTest {
         )
         assertEquals(
             listOf(TransferId("tr-mine")),
-            store.listResumable(Tf.sessionId).map { it.transferId },
+            store.resumable(Tf.sessionId).map { it.transferId },
         )
         assertEquals(
             listOf(TransferId("tr-other")),
-            store.listResumable(SessionId("sess-other")).map { it.transferId },
+            store.resumable(SessionId("sess-other")).map { it.transferId },
         )
     }
 
@@ -175,10 +175,10 @@ class TransferSnapshotStoreContractTest {
         store.saveTransition(null, failed, emptyList())
 
         assertEquals(StoreResult.Ok, store.removeTerminal(done.transferId, RetentionPolicy.KEEP_FOR_HISTORY))
-        assertTrue(store.loadTransfer(done.transferId) != null)
+        assertTrue(store.loadedTransfer(done.transferId) != null)
 
         assertEquals(StoreResult.Ok, store.removeTerminal(failed.transferId, RetentionPolicy.DISCARD_IMMEDIATELY))
-        assertNull(store.loadTransfer(failed.transferId))
+        assertNull(store.loadedTransfer(failed.transferId))
     }
 
     @Test fun `a non terminal delivery is never dropped`() {
@@ -187,7 +187,7 @@ class TransferSnapshotStoreContractTest {
         store.saveTransition(null, snapshot, emptyList())
         val result = store.removeTerminal(snapshot.transferId, RetentionPolicy.DISCARD_IMMEDIATELY)
         assertTrue(result is StoreResult.Failed)
-        assertTrue(store.loadTransfer(snapshot.transferId) != null)
+        assertTrue(store.loadedTransfer(snapshot.transferId) != null)
     }
 
     @Test fun `every retention policy round trips through its id`() {
@@ -210,13 +210,13 @@ class TransferSnapshotStoreContractTest {
         val restarted = InMemorySnapshotStore()
         restarted.importAll(durable)
 
-        val restored = restarted.loadTransfer(paused.transferId)
+        val restored = restarted.loadedTransfer(paused.transferId)
         assertTrue(restored != null)
         assertEquals(4_096L, restored!!.confirmedBytes)
         assertEquals(4_096L, restored.optimisticBytes)
         assertEquals(
             listOf(paused.transferId),
-            restarted.listResumable(Tf.sessionId).map { it.transferId },
+            restarted.resumable(Tf.sessionId).map { it.transferId },
         )
     }
 
@@ -231,7 +231,7 @@ class TransferSnapshotStoreContractTest {
 
         val restarted = InMemorySnapshotStore()
         restarted.importAll(store.exportAll())
-        val restored = restarted.loadTransfer(inFlight.transferId)!!
+        val restored = restarted.loadedTransfer(inFlight.transferId)!!
         assertEquals(0L, restored.confirmedBytes)
         assertEquals(2L * Tf.chunk.value, restored.optimisticBytes)
         assertFalse(restored.allBytesConfirmed)
@@ -246,18 +246,39 @@ class TransferSnapshotStoreContractTest {
         val restarted = InMemorySnapshotStore()
         val rejected = restarted.importAllReporting(corrupted)
         assertEquals(1, rejected.size)
-        assertTrue(rejected.single().error is TransferError.MalformedFrame)
+        assertTrue(rejected.single().error is TransferError.PersistedSnapshotInvalid)
         // The bad row is skipped, not fatal: the rest of the queue still loads.
-        assertTrue(restarted.loadTransfer(Tf.transferId) == null)
-        assertTrue(restarted.listResumable(Tf.sessionId).isEmpty())
+        assertTrue(restarted.loadedTransfer(Tf.transferId) == null)
+        assertTrue(restarted.resumable(Tf.sessionId).isEmpty())
     }
 
     @Test fun `an empty store resumes nothing and reports no error`() {
         val store = InMemorySnapshotStore()
-        assertTrue(store.listResumable(Tf.sessionId).isEmpty())
+        assertTrue(store.resumable(Tf.sessionId).isEmpty())
         assertTrue(store.exportAll().isEmpty())
     }
 }
+
+private fun InMemorySnapshotStore.loadedSession(sessionId: SessionId): SessionSnapshot? =
+    when (val result = loadSession(sessionId)) {
+        StoreReadResult.Missing -> null
+        is StoreReadResult.Found -> result.value
+        is StoreReadResult.Failed -> throw AssertionError(result.error.describe())
+    }
+
+private fun InMemorySnapshotStore.loadedTransfer(transferId: TransferId): TransferSnapshot? =
+    when (val result = loadTransfer(transferId)) {
+        StoreReadResult.Missing -> null
+        is StoreReadResult.Found -> result.value
+        is StoreReadResult.Failed -> throw AssertionError(result.error.describe())
+    }
+
+private fun InMemorySnapshotStore.resumable(sessionId: SessionId): List<TransferSnapshot> =
+    when (val result = listResumable(sessionId)) {
+        StoreReadResult.Missing -> emptyList()
+        is StoreReadResult.Found -> result.value
+        is StoreReadResult.Failed -> throw AssertionError(result.error.describe())
+    }
 
 /*
  * A deterministic in-memory adapter for the contract above.
@@ -274,26 +295,30 @@ private class InMemorySnapshotStore : TransferSnapshotStore {
     private val checkpoints = HashMap<TransferId, ConfirmedOffset>()
     private val verifications = HashMap<TransferId, VerificationInfo>()
 
-    override fun loadSession(sessionId: SessionId): SessionSnapshot? {
-        val transfers = rows.values.mapNotNull { row ->
-            (TransferSnapshotCodec.deserialize(row) as? SnapshotDecodeResult.Success)
-                ?.snapshot
-                ?.takeIf { it.sessionId == sessionId }
-        }
-        if (transfers.isEmpty() &&
-            rows.values.none { row ->
-                (TransferSnapshotCodec.deserialize(row) as? SnapshotDecodeResult.Success)
-                    ?.snapshot?.sessionId == sessionId
+    override fun loadSession(sessionId: SessionId): StoreReadResult<SessionSnapshot> {
+        val transfers = mutableListOf<TransferSnapshot>()
+        for (row in rows.values) {
+            when (val decoded = TransferSnapshotCodec.deserialize(row)) {
+                is SnapshotDecodeResult.Invalid -> return StoreReadResult.Failed(decoded.error)
+                is SnapshotDecodeResult.Success -> if (decoded.snapshot.sessionId == sessionId) {
+                    transfers += decoded.snapshot
+                }
             }
-        ) {
-            return null
         }
-        return SessionSnapshot(sessionId = sessionId, transfers = transfers)
+        if (transfers.isEmpty()) return StoreReadResult.Missing
+        return StoreReadResult.Found(SessionSnapshot(sessionId = sessionId, transfers = transfers))
     }
 
-    override fun loadTransfer(transferId: TransferId): TransferSnapshot? {
-        val row = rows[transferId] ?: return null
-        return (TransferSnapshotCodec.deserialize(row) as? SnapshotDecodeResult.Success)?.snapshot
+    override fun loadTransfer(transferId: TransferId): StoreReadResult<TransferSnapshot> {
+        val row = rows[transferId] ?: return StoreReadResult.Missing
+        return when (val decoded = TransferSnapshotCodec.deserialize(row)) {
+            is SnapshotDecodeResult.Invalid -> StoreReadResult.Failed(decoded.error)
+            is SnapshotDecodeResult.Success -> if (decoded.snapshot.transferId == transferId) {
+                StoreReadResult.Found(decoded.snapshot)
+            } else {
+                StoreReadResult.Failed(TransferError.PersistedSnapshotInvalid("transfer_identity_mismatch"))
+            }
+        }
     }
 
     override fun saveTransition(
@@ -358,22 +383,30 @@ private class InMemorySnapshotStore : TransferSnapshotStore {
         return StoreResult.Ok
     }
 
-    override fun listResumable(sessionId: SessionId): List<TransferSnapshot> =
-        rows.values.mapNotNull { row ->
-            (TransferSnapshotCodec.deserialize(row) as? SnapshotDecodeResult.Success)?.snapshot
-        }.filter { it.sessionId == sessionId && !it.isTerminal }
+    override fun listResumable(sessionId: SessionId): StoreReadResult<List<TransferSnapshot>> {
+        val decoded = mutableListOf<TransferSnapshot>()
+        for (row in rows.values) {
+            when (val result = TransferSnapshotCodec.deserialize(row)) {
+                is SnapshotDecodeResult.Invalid -> return StoreReadResult.Failed(result.error)
+                is SnapshotDecodeResult.Success -> decoded += result.snapshot
+            }
+        }
+        val inSession = decoded.filter { it.sessionId == sessionId }
+        if (inSession.isEmpty()) return StoreReadResult.Missing
+        return StoreReadResult.Found(inSession.filterNot { it.isTerminal })
+    }
 
     override fun removeTerminal(
         transferId: TransferId,
         policy: RetentionPolicy,
     ): StoreResult {
-        val snapshot = loadTransfer(transferId) ?: return StoreResult.Failed(
-            TransferError.UnexpectedInternal("no snapshot to remove for $transferId"),
-        )
+        val snapshot = when (val loaded = loadTransfer(transferId)) {
+            StoreReadResult.Missing -> return StoreResult.Failed(TransferError.PersistenceConflict("snapshot_missing"))
+            is StoreReadResult.Failed -> return StoreResult.Failed(loaded.error)
+            is StoreReadResult.Found -> loaded.value
+        }
         if (!snapshot.isTerminal) {
-            return StoreResult.Failed(
-                TransferError.UnexpectedInternal("delivery $transferId has not finished"),
-            )
+            return StoreResult.Failed(TransferError.PersistenceConflict("terminal_required"))
         }
         if (policy == RetentionPolicy.DISCARD_IMMEDIATELY) {
             rows.remove(transferId)

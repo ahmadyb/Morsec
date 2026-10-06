@@ -61,6 +61,8 @@ ksp {
 
 dependencies {
     api(project(":core-model"))
+    // The transfer contracts remain pure JVM; core-data owns their Room adapter.
+    api(project(":core-transfer"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)

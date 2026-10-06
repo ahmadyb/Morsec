@@ -8,6 +8,7 @@ import app.morsecode.core.transfer.integrity.Sha256Accumulator
 import java.io.ByteArrayInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -375,23 +376,25 @@ class SafCommitRecoveryTest {
     }
 
     @Test
-    fun `an unsupported checkpoint version is rejected before provider access`() {
+    fun `an unsupported persisted checkpoint version is rejected before provider access`() {
         val gateway = RecordingSafGateway()
         val staging = Staging(payload)
         val journal = InMemorySafCommitJournal()
-        val checkpoint = SafCommitCheckpoint.fromRecord(
+        val valid = SafCommitCheckpoint.fromRecord(
             record(),
             grant,
             SafCommitCheckpointPhase.READY,
-        ).copy(version = SafCommitCheckpoint.CURRENT_VERSION + 1)
-        assertTrue(journal.save(checkpoint))
+        )
+        val unsupported = valid.copy(version = SafCommitCheckpoint.CURRENT_VERSION + 1)
+        // Simulate an unknown on-disk version without going through the validating writer.
+        journal.checkpoints[unsupported.commitId] = unsupported
 
-        val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
+        val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(valid, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.ReconciliationRequired)
+        assertTrue(recovered is SafCommitRecoveryOutcome.Failed)
         assertEquals(
             TransferStorageError.Unsupported("saf_checkpoint_version"),
-            (recovered as SafCommitRecoveryOutcome.ReconciliationRequired).error,
+            (recovered as SafCommitRecoveryOutcome.Failed).error,
         )
         assertEquals(0, gateway.providerCallCount)
         assertFalse(staging.deleted)
@@ -876,12 +879,13 @@ class SafCommitRecoveryTest {
                 ),
             ),
         )
-        assertTrue(journal.save(corrupted))
+        // Corrupt the test row directly to model data that bypassed the typed writer.
+        journal.checkpoints[corrupted.commitId] = corrupted
 
-        val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(corrupted, grant)
+        val recovered = coordinator(gateway, staging, journal).resumeOrReconcile(checkpoint, grant)
 
-        assertTrue(recovered is SafCommitRecoveryOutcome.ReconciliationRequired)
-        assertEquals(TransferStorageError.StateConflict("checkpoint_cleanup_identity_mismatch"), (recovered as SafCommitRecoveryOutcome.ReconciliationRequired).error)
+        assertTrue(recovered is SafCommitRecoveryOutcome.Failed)
+        assertEquals(TransferStorageError.StateConflict("checkpoint_malformed"), (recovered as SafCommitRecoveryOutcome.Failed).error)
         assertEquals(0, gateway.countOf("deleteAndReconcile:"))
     }
 
@@ -934,6 +938,32 @@ class SafCommitRecoveryTest {
         assertTrue(outcome is SafCommitOutcome.Failed)
         assertEquals(0, gateway.countOf("create:"))
         assertEquals(0, gateway.countOf("rename:"))
+    }
+
+    @Test
+    fun `journal io and storage full stay distinct and a failed result remains reconcilable`() {
+        val failures = listOf(
+            TransferStorageError.Io("journal_write"),
+            TransferStorageError.StorageFull("journal_write"),
+        )
+        for (journalError in failures) {
+            val gateway = RecordingSafGateway()
+            val staging = Staging(payload)
+            val journal = InMemorySafCommitJournal().apply {
+                rejectOnSaveAttempt = 7 // temporary-created result, after provider create
+                rejectWriteError = journalError
+            }
+
+            val outcome = coordinator(gateway, staging, journal).commit(record(), grant)
+
+            assertTrue(outcome is SafCommitOutcome.ReconciliationRequired)
+            assertEquals(journalError, (outcome as SafCommitOutcome.ReconciliationRequired).error)
+            assertEquals(1, gateway.countOf("create:"))
+            assertEquals(0, gateway.countOf("rename:"))
+            val persisted = requireNotNull(journal.load(partialId))
+            assertEquals(SafCommitCheckpointPhase.RECONCILIATION_REQUIRED, persisted.phase)
+            assertNotNull(persisted.temporaryIdentity)
+        }
     }
 
     @Test

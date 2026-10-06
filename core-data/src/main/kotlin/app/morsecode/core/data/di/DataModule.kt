@@ -1,18 +1,20 @@
 package app.morsecode.core.data.di
 
 import android.content.Context
-import android.util.Log
 import androidx.room.Room
 import app.morsecode.core.data.db.BrowserSessionDao
 import app.morsecode.core.data.db.CrashReportDao
 import app.morsecode.core.data.db.HistoryDao
 import app.morsecode.core.data.db.LogDao
+import app.morsecode.core.data.db.MORSE_MIGRATION_1_2
 import app.morsecode.core.data.db.MorseDatabase
 import app.morsecode.core.data.db.RecentDeviceDao
 import app.morsecode.core.data.db.SafGrantDao
 import app.morsecode.core.data.db.TransferItemDao
 import app.morsecode.core.data.db.TransferSessionDao
 import app.morsecode.core.data.db.WebTransferDao
+import app.morsecode.core.data.db.RoomTransferSnapshotStore
+import app.morsecode.core.transfer.persistence.TransferSnapshotStore
 import app.morsecode.core.model.di.ApplicationScope
 import app.morsecode.core.model.di.DefaultDispatcher
 import app.morsecode.core.model.di.IoDispatcher
@@ -45,13 +47,17 @@ public object DataModule {
     @Singleton
     public fun provideDatabase(@ApplicationContext context: Context): MorseDatabase =
         Room.databaseBuilder(context, MorseDatabase::class.java, MorseDatabase.NAME)
-            // Queries run off the main thread by contract; failing loudly on an
-            // accidental main-thread read is better than a silent jank frame.
-            .setQueryCallback(
-                { sqlQuery, bindArgs -> Log.v("MorsecodeSql", "$sqlQuery $bindArgs") },
-                { command -> command.run() },
-            )
+            .addMigrations(MORSE_MIGRATION_1_2)
+            // Do not log SQL bind arguments: durable transfer rows can contain
+            // provider URIs, grant identities and sensitive document metadata.
             .build()
+
+    @Provides
+    @Singleton
+    public fun provideTransferSnapshotStore(
+        database: MorseDatabase,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): TransferSnapshotStore = RoomTransferSnapshotStore(database, dispatcher)
 
     @Provides
     public fun provideTransferSessionDao(database: MorseDatabase): TransferSessionDao =

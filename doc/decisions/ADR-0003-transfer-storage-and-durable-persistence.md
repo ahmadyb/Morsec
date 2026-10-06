@@ -1,18 +1,69 @@
 # ADR-0003 — Android transfer storage adapters and durable persistence
 
-- **Status:** accepted (2026-10-02), amended for the SAF destination closure pass (2026-10-05)
-- **Applies to:** `:core-storage` (Android source, destination, restoration, cleanup),
-  `:core-data` (Room entities, migration, persistence adapter, clock), `:core-transfer`
-  (unchanged contracts, one added decision vocabulary)
-- **Closure amendment scope:** SAF destination commit, checkpoint, recovery and cleanup only.
-  The existing Room v1 schema and persistence boundaries below are unchanged; no Room v2
-  entity, migration, SAF journal adapter or production journal is started here.
+- **Status:** accepted (2026-10-02), amended for SAF destination closure (2026-10-05), and amended for the separately authorized Room v2 persistence group (2026-10-06; verification pending)
+- **Applies to:** `:core-storage` (Android source/destination adapters and SAF journal),
+  `:core-data` (Room entities, migration, snapshot adapter, clock), and `:core-transfer`
+  (pure persistence contracts, codec, digest value, and typed errors)
+- **Historical closure amendment:** the 2026-10-05 SAF destination closure was limited to
+  commit/checkpoint/recovery/cleanup and intentionally left Room v1 unchanged. The current
+  2026-10-06 task separately authorizes only the Room v2 persistence group described below.
 - **Supersedes:** nothing. **Amends:** the pre-implementation report for this group,
   which contained one contradiction (foreign keys) and several unstated assumptions
   (durability, SAF visibility, descriptor ownership, zero-progress policy) that are
   resolved here.
 - **Delivery:** Milestone 3. `FeatureReadiness.TRANSFER_ENGINE` stays pinned to
   milestone 5 and `CURRENT_MILESTONE` stays 2. Nothing in this group turns the engine on.
+
+## Amendment 2026-10-06 — Room v2 persistence group
+
+This amendment records the user's separate, explicit authorization after acceptance of
+SAF destination commit `43e575b1c9e2aea6b70bd03f0ac76ac642e14210`. It supersedes only the
+2026-10-05 closure-pass prohibition on Room v2; it does not authorize a restoration
+coordinator, cleanup worker, service, transfer UI, networking, or any later feature.
+
+The v2 design is additive and keeps Room entities out of provider logic:
+
+- `transfer_snapshots` stores the reducer snapshot as explicit typed columns (never as
+  a serialized object), including durable `confirmed_bytes` and an independent monotonic
+  Room `row_revision`.
+- `transfer_partials` stores one bounded SAF checkpoint parent, exact grant/tree/document
+  identity fields, the checkpoint-format version and phase, expected/copied byte counts,
+  canonical lowercase 64-character SHA-256 hex, rename intent/result metadata, typed
+  failure/reconciliation fields, and child-count integrity markers.
+- `saf_rename_history` and `saf_pending_cleanup` are bounded, ordered child tables. Their
+  foreign keys cascade only to the exact `transfer_partials.commit_id` owner; there is no
+  recovery-data foreign key to the UI-owned `transfer_sessions` table.
+
+`MORSE_MIGRATION_1_2` creates only the four new tables and their indices/ownership
+constraints. Production registers it explicitly. The accepted nine-table `1.json` is
+pinned by SHA-256 and byte count and remains immutable; CI generates `2.json` with Room
+KSP, then compares it byte-for-byte with the committed authentic export. Destructive
+fallbacks and destructive DDL are forbidden.
+
+`RoomTransferSnapshotStore.saveTransition` transactionally checks the prior full snapshot
+and exact next reducer version, then atomically replaces the complete typed-column row
+while incrementing `row_revision`. Exact retries are idempotent; stale, gapped, regressing,
+or inconsistent writes return typed conflicts. Per-chunk checkpoint updates change only
+the dedicated confirmed-offset column and cannot regress or exceed the declared size.
+Session retention does not remove a session that still has a transfer snapshot or SAF
+journal parent.
+
+`RoomSafCommitJournal` uses a transaction for both complete reads and complete replacements.
+It validates a checkpoint before returning it, maps all bounded children, compares the
+caller-held `journal_revision` inside the write transaction, and rejects stale writers.
+The revision is not the checkpoint format version or the Room database version. Child
+counts and ordered sequence fields detect missing/reordered rows; malformed identity,
+digest, scope, ownership, phase, and token data yield typed refusals before any provider
+call. No checkpoint/Room identity, private URI, or raw digest is emitted by entity, digest,
+checkpoint, or persistence-error `toString()` output.
+
+`core-data` owns the transfer snapshot store and schema. `core-storage` depends one way on
+`core-data` and supplies the production SAF journal adapter/Hilt factory. Both depend on
+pure `core-transfer`; no dependency cycle or Room entity enters a provider operation.
+Opening the database does not begin recovery. Close/reopen tests demonstrate durable reads;
+they do not claim automatic startup recovery. At the time of this amendment, the code is
+in progress and test/build/lint/APK/exact-SHA CI evidence is still pending. The remaining
+broader restoration and cleanup group requires separate approval.
 
 ## Context
 
@@ -254,12 +305,10 @@ settles the prior request without another delete. `stagingReleased` records the 
 delete observation independently. Permission revocation or a still-present document
 remains pending; an unknown query is not success.
 
-The executable protocol is deliberately distinct from production durability. The package
-contains `SafCommitJournal` as an abstraction and `InMemorySafCommitJournal` as a test
-fake; it has **no production journal implementation**. Version 2 describes the checkpoint
-shape and coordinator/recovery rules, but no Room v2 schema, Room transfer adapter, or
-production persistence is delivered here. The database remains at version 1, and no
-cleanup service is added.
+Historical state at the end of the 2026-10-05 closure pass: the executable protocol had
+only the `SafCommitJournal` abstraction and `InMemorySafCommitJournal` test fake; it had no
+production journal or Room v2 persistence. The separate 2026-10-06 persistence amendment
+above supersedes that status. No cleanup service is added by either group.
 
 ---
 
@@ -536,26 +585,28 @@ saved remains `RECONCILIATION_REQUIRED`; recovery does not downgrade that unreso
 to terminal `Cancelled`. Once publication is authoritative, cancellation does not withdraw
 the final and recovery continues identity-checked cleanup.
 
-The checkpoint is a Room-independent, versioned model. In this package
-`SafCommitJournal` is only an interface, and `InMemorySafCommitJournal` is a test fake;
-there is no production journal implementation. Thus coordinator recovery behavior is
-executable against the abstraction and unit fake, but **production process-death durability
-is not delivered**. This SAF model version 2 is not Room schema version 2. The Room
-database stays at version 1; no Room v2 entities or migration, transfer adapter, cleanup
-service, or other later-milestone work is started by this closure pass.
+The checkpoint remains a Room-independent, versioned model. At the accepted 2026-10-05
+closure point, `SafCommitJournal` was only an interface and `InMemorySafCommitJournal`
+was the test fake, so production process-death durability had not been delivered. The
+separately authorized 2026-10-06 amendment above adds the scoped Room v2 persistence layer;
+SAF checkpoint version 2 remains distinct from Room database version 2. No cleanup
+service or other later-milestone work is started by this persistence group.
 
 ---
 
 ## Consequences
 
-- `core-transfer` gains exactly one thing: the `RestorationDecision` vocabulary in
-  `persistence`, alongside `StoreResult` and `RetentionPolicy`. No Android, `Uri`,
-  `Room`, `java.io` or stream type enters the module; `tools/verify/transfer-limits.mjs`
-  enforces that and CI runs it.
-- `core-storage` gains `api(project(":core-transfer"))` and packages for source,
-  destination, verification, SAF checkpoint/reconciliation and cleanup abstractions.
-- `core-data` remains at Room schema version 1. Its clock is unchanged by this SAF closure;
-  no Room v2 entities, migration, SAF journal adapter or production journal are added.
+- Historical 2026-10-05 closure delta: `core-transfer` gained the `RestorationDecision`
+  vocabulary and `core-storage` gained the SAF storage/reconciliation code. The current
+  2026-10-06 persistence amendment additionally adds typed persistence errors, defensive
+  SHA-256 values, and the Room snapshot/journal adapters described above.
+- `core-transfer` remains pure JVM; no Android, `Uri`, Room, stream, or provider type enters
+  the module. `tools/verify/transfer-limits.mjs` enforces the dependency boundary.
+- `core-storage` depends one-way on `core-data` for the production SAF journal adapter;
+  provider logic receives only domain checkpoint values, never Room entities.
+- `core-data` is now Room schema version 2 via additive `Migration(1, 2)`. The old
+  nine-table `1.json` remains immutable; no destructive migration, cleanup service, or
+  automatic startup recovery is added.
 - `core-model` is unchanged.
 - `app` is unchanged, `CURRENT_MILESTONE` stays 2, and `TRANSFER_ENGINE` stays gated
   until milestone 5.

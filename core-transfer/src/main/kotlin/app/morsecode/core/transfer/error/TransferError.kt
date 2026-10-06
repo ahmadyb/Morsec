@@ -2,6 +2,8 @@ package app.morsecode.core.transfer.error
 
 import app.morsecode.core.transfer.ProtocolLimits
 
+private val SAFE_PERSISTENCE_REASON = Regex("[a-z0-9_]{1,64}")
+
 /*
  * The transfer core never throws at a caller to report a protocol, storage or
  * transport problem: every failure is a value that can be stored, shown and
@@ -57,9 +59,9 @@ public enum class ErrorCategory(public val id: String) {
  * Removes anything a transfer error is not allowed to carry: control bytes,
  * absolute filesystem paths, environment-looking secrets and over-long blobs.
  *
- * SHA-256 digests are kept because core-data's `LogRedactor` deliberately keeps
- * them, and because a transfer cannot be audited without them. Everything else
- * opaque is replaced.
+ * SHA-256 digests are redacted along with other opaque values. They remain in
+ * the persistence codec where integrity decisions require them, never in an
+ * error detail, log line, or shared diagnostic.
  */
 public object ErrorDetailRedactor {
     private const val REDACTED = "[redacted]"
@@ -67,7 +69,6 @@ public object ErrorDetailRedactor {
     private val ABSOLUTE_PATH = Regex("""(^|[\s=(])(/|\\)[^\s,;)]*""")
     private val WINDOWS_DRIVE = Regex("""\b[A-Za-z]:[\\/][^\s,;)]*""")
     private val LONG_OPAQUE = Regex("""[A-Za-z0-9+/=._-]{40,}""")
-    private val DIGEST = Regex("""^[0-9a-f]{64}$""")
     private val CONTROL = Regex("""\p{Cntrl}""")
 
     /** Upper bound applied to every detail string before it is stored. */
@@ -90,9 +91,7 @@ public object ErrorDetailRedactor {
             val prefix = match.groupValues[1]
             "$prefix$REDACTED"
         }
-        text = LONG_OPAQUE.replace(text) { match ->
-            if (DIGEST.matches(match.value)) match.value else REDACTED
-        }
+        text = LONG_OPAQUE.replace(text, REDACTED)
         text = text.trim()
         return truncateToUtf8Bytes(text, maxBytes)
     }
@@ -303,11 +302,12 @@ public sealed class TransferError {
         public val actualHex: String,
     ) : TransferError() {
         override val code: String = "file_checksum_mismatch"
-        override val detail: String =
-            "full-file SHA-256 differs from the descriptor ($expectedHex != $actualHex)"
+        override val detail: String = "full-file SHA-256 differs from the descriptor"
         override val retryable: Boolean = true
         override val origin: ErrorOrigin = ErrorOrigin.REMOTE
         override val category: ErrorCategory = ErrorCategory.INTEGRITY
+
+        override fun toString(): String = "FileChecksumMismatch([digests redacted])"
     }
 
     /** The source stream could not be opened. */
@@ -391,17 +391,67 @@ public sealed class TransferError {
         override val category: ErrorCategory = ErrorCategory.LOCAL_ACTION
     }
 
-    /** A persisted snapshot was written by a newer, incompatible build. */
+    /** A persisted snapshot was written by an incompatible build. */
     public data class SnapshotVersionUnsupported(
         public val found: Int,
         public val maxSupported: Int,
     ) : TransferError() {
         override val code: String = "snapshot_version_unsupported"
         override val detail: String =
-            "snapshot version $found is newer than the supported maximum $maxSupported"
+            "snapshot version $found is outside the supported range ending at $maxSupported"
         override val retryable: Boolean = false
         override val origin: ErrorOrigin = ErrorOrigin.LOCAL
-        override val category: ErrorCategory = ErrorCategory.PROTOCOL
+        override val category: ErrorCategory = ErrorCategory.STORAGE
+    }
+
+    /** A stored row exists but failed strict validation. The retained reason is a safe token only. */
+    public class PersistedSnapshotInvalid(reason: String) : TransferError() {
+        public val reason: String = reason.takeIf { SAFE_PERSISTENCE_REASON.matches(it) } ?: "malformed_row"
+        override val code: String = "persisted_snapshot_invalid"
+        override val detail: String = "stored transfer state is invalid ($reason)"
+        override val retryable: Boolean = false
+        override val origin: ErrorOrigin = ErrorOrigin.LOCAL
+        override val category: ErrorCategory = ErrorCategory.STORAGE
+
+        override fun equals(other: Any?): Boolean = other is PersistedSnapshotInvalid && reason == other.reason
+        override fun hashCode(): Int = reason.hashCode()
+        override fun toString(): String = "PersistedSnapshotInvalid(reason=$reason)"
+    }
+
+    /** Compare-and-set rejected a stale or gapped persistence revision. */
+    public class PersistenceConflict(reason: String) : TransferError() {
+        public val reason: String = reason.takeIf { SAFE_PERSISTENCE_REASON.matches(it) } ?: "revision_conflict"
+        override val code: String = "persistence_conflict"
+        override val detail: String = "transfer state changed concurrently ($reason)"
+        override val retryable: Boolean = true
+        override val origin: ErrorOrigin = ErrorOrigin.LOCAL
+        override val category: ErrorCategory = ErrorCategory.STORAGE
+
+        override fun equals(other: Any?): Boolean = other is PersistenceConflict && reason == other.reason
+        override fun hashCode(): Int = reason.hashCode()
+        override fun toString(): String = "PersistenceConflict(reason=$reason)"
+    }
+
+    /** Local database failure with storage-full kept distinct from ordinary I/O. */
+    public class PersistenceFailure(
+        operation: String,
+        public val storageFull: Boolean,
+    ) : TransferError() {
+        public val operation: String = operation.takeIf { it.matches(Regex("[a-z_]{1,24}")) } ?: "saved"
+        override val code: String = if (storageFull) "persistence_storage_full" else "persistence_io"
+        override val detail: String = if (storageFull) {
+            "the device ran out of space while saving transfer state"
+        } else {
+            "transfer state could not be $operation"
+        }
+        override val retryable: Boolean = !storageFull
+        override val origin: ErrorOrigin = ErrorOrigin.LOCAL
+        override val category: ErrorCategory = ErrorCategory.STORAGE
+
+        override fun equals(other: Any?): Boolean =
+            other is PersistenceFailure && operation == other.operation && storageFull == other.storageFull
+        override fun hashCode(): Int = 31 * operation.hashCode() + storageFull.hashCode()
+        override fun toString(): String = "PersistenceFailure(code=$code)"
     }
 
     /**

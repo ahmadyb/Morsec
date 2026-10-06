@@ -705,6 +705,7 @@ public class SafCommitCoordinator private constructor(
     private val isCancelled: () -> Boolean,
     private val verificationDigesterFactory: () -> ChunkDigester,
 ) {
+    private val journalCursor = SafCommitJournalCursor(journal)
     /** Production constructor always uses incremental SHA-256. */
     public constructor(
         gateway: SafDocumentGateway,
@@ -779,9 +780,11 @@ public class SafCommitCoordinator private constructor(
         }
         var scopedRecord = record.copy(grantId = grant.grantId, verifiedDigest = null)
         val previousCheckpoint = try {
-            journal.load(scopedRecord.partialId)
+            journalCursor.load(scopedRecord.partialId)
+        } catch (rejected: SafCommitJournalReadException) {
+            return fail(scopedRecord, rejected.error)
         } catch (_: Exception) {
-            return fail(scopedRecord, TransferStorageError.StateConflict("journal_load_failed"))
+            return fail(scopedRecord, TransferStorageError.Io("journal_read"))
         }
         val requestedCheckpoint = checkpointFor(scopedRecord, grant, SafCommitCheckpointPhase.READY)
         val initialCheckpoint = if (previousCheckpoint == null) {
@@ -837,10 +840,10 @@ public class SafCommitCoordinator private constructor(
             }
             previousCheckpoint
         }
-        if (previousCheckpoint == null && !runCatching { journal.save(initialCheckpoint) }.getOrDefault(false)) {
+        if (previousCheckpoint == null && !runCatching { journalCursor.save(initialCheckpoint) }.getOrDefault(false)) {
             return SafCommitOutcome.Failed(
                 record = scopedRecord.copy(state = SafCommitState.COMMIT_FAILED),
-                error = TransferStorageError.StateConflict("journal_initial_save_failed"),
+                error = journalWriteFailure(TransferStorageError.StateConflict("journal_initial_save_failed")),
                 checkpoint = initialCheckpoint,
             )
         }
@@ -1014,12 +1017,17 @@ public class SafCommitCoordinator private constructor(
         checkpoint: SafCommitCheckpoint,
         grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
+        SafCommitCheckpointValidator.validate(checkpoint)?.let { error ->
+            return SafCommitRecoveryOutcome.Failed(checkpoint, error)
+        }
         val latest = try {
-            journal.load(checkpoint.commitId)
+            journalCursor.load(checkpoint.commitId)
+        } catch (rejected: SafCommitJournalReadException) {
+            return SafCommitRecoveryOutcome.Failed(checkpoint, rejected.error)
         } catch (_: Exception) {
             return SafCommitRecoveryOutcome.Failed(
                 checkpoint,
-                TransferStorageError.StateConflict("journal_load_failed"),
+                TransferStorageError.Io("journal_read"),
             )
         } ?: return SafCommitRecoveryOutcome.Failed(
             checkpoint,
@@ -1191,7 +1199,7 @@ public class SafCommitCoordinator private constructor(
         if (!saveCheckpoint(ready, grant, SafCommitCheckpointPhase.READY)) {
             return SafCommitRecoveryOutcome.Failed(
                 checkpointFor(record, grant, SafCommitCheckpointPhase.READY),
-                TransferStorageError.StateConflict("journal_resume_ready_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_resume_ready_failed")),
             )
         }
         return toRecoveryOutcome(commit(ready, grant), checkpointFor(ready, grant, SafCommitCheckpointPhase.READY))
@@ -1243,7 +1251,7 @@ public class SafCommitCoordinator private constructor(
                             record,
                             grant,
                             SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_INTENT,
-                            TransferStorageError.StateConflict("journal_temporary_delete_result_failed"),
+                            journalWriteFailure(TransferStorageError.StateConflict("journal_temporary_delete_result_failed")),
                             listOf(persistedIdentity.documentUri),
                         )
                     }
@@ -1344,7 +1352,7 @@ public class SafCommitCoordinator private constructor(
             return recoveryReconciliation(
                 recovered,
                 grant,
-                TransferStorageError.StateConflict("journal_provider_verified_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_provider_verified_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -1416,7 +1424,7 @@ public class SafCommitCoordinator private constructor(
                         record,
                         grant,
                         SafCommitCheckpointPhase.VISIBLE_DELETE_INTENT,
-                        TransferStorageError.StateConflict("journal_visible_delete_result_failed"),
+                        journalWriteFailure(TransferStorageError.StateConflict("journal_visible_delete_result_failed")),
                         listOf(identity.documentUri),
                     )
                 }
@@ -1472,7 +1480,7 @@ public class SafCommitCoordinator private constructor(
             return recoveryReconciliation(
                 verified,
                 grant,
-                TransferStorageError.StateConflict("journal_provider_verified_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_provider_verified_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -1487,7 +1495,7 @@ public class SafCommitCoordinator private constructor(
             return recoveryReconciliation(
                 published,
                 grant,
-                TransferStorageError.StateConflict("journal_publication_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_publication_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -1516,7 +1524,7 @@ public class SafCommitCoordinator private constructor(
             return recoveryReconciliation(
                 record,
                 grant,
-                TransferStorageError.StateConflict("journal_visible_delete_intent_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_visible_delete_intent_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -1556,7 +1564,7 @@ public class SafCommitCoordinator private constructor(
                 record,
                 grant,
                 SafCommitCheckpointPhase.VISIBLE_DELETE_INTENT,
-                TransferStorageError.StateConflict("journal_visible_delete_result_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_visible_delete_result_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -1968,7 +1976,7 @@ public class SafCommitCoordinator private constructor(
                     return recoveryReconciliation(
                         verified,
                         grant,
-                        TransferStorageError.StateConflict("journal_final_verification_failed"),
+                        journalWriteFailure(TransferStorageError.StateConflict("journal_final_verification_failed")),
                         listOf(doc.documentUri),
                     )
                 }
@@ -1983,7 +1991,7 @@ public class SafCommitCoordinator private constructor(
                     return recoveryReconciliation(
                         verified,
                         grant,
-                        TransferStorageError.StateConflict("journal_publication_failed"),
+                        journalWriteFailure(TransferStorageError.StateConflict("journal_publication_failed")),
                         listOf(doc.documentUri),
                     )
                 }
@@ -2259,7 +2267,7 @@ public class SafCommitCoordinator private constructor(
             return recoveryReconciliation(
                 ready,
                 grant,
-                TransferStorageError.StateConflict("journal_overwrite_recovery_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_overwrite_recovery_failed")),
                 listOfNotNull(backupInfo?.documentUri, replacement.documentUri),
             )
         }
@@ -2345,7 +2353,7 @@ public class SafCommitCoordinator private constructor(
                 return recoveryReconciliation(
                     published,
                     grant,
-                    TransferStorageError.StateConflict("journal_publication_failed"),
+                    journalWriteFailure(TransferStorageError.StateConflict("journal_publication_failed")),
                     listOf(final.documentUri),
                 )
             }
@@ -2358,7 +2366,7 @@ public class SafCommitCoordinator private constructor(
                 return recoveryReconciliation(
                     committed,
                     grant,
-                    TransferStorageError.StateConflict("journal_committed_result_failed"),
+                    journalWriteFailure(TransferStorageError.StateConflict("journal_committed_result_failed")),
                     listOf(final.documentUri),
                 )
             }
@@ -2582,7 +2590,7 @@ public class SafCommitCoordinator private constructor(
             return recoveryReconciliation(
                 record,
                 grant,
-                TransferStorageError.StateConflict("journal_temporary_delete_intent_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_temporary_delete_intent_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -2627,7 +2635,7 @@ public class SafCommitCoordinator private constructor(
                 record,
                 grant,
                 SafCommitCheckpointPhase.INTERRUPTED_TEMPORARY_DELETE_INTENT,
-                TransferStorageError.StateConflict("journal_temporary_delete_result_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_temporary_delete_result_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -2766,7 +2774,7 @@ public class SafCommitCoordinator private constructor(
         error: TransferStorageError,
         knownUris: List<String>,
     ): SafCommitRecoveryOutcome.ReconciliationRequired {
-        val prior = runCatching { journal.load(record.partialId) }.getOrNull()
+        val prior = runCatching { journalCursor.load(record.partialId) }.getOrNull()
         val checkpoint = runCatching {
             checkpointFor(
                 record,
@@ -2797,7 +2805,7 @@ public class SafCommitCoordinator private constructor(
         knownUris: List<String>,
     ): SafCommitRecoveryOutcome.ReconciliationRequired {
         val unresolved = record.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
-        val prior = runCatching { journal.load(record.partialId) }.getOrNull()
+        val prior = runCatching { journalCursor.load(record.partialId) }.getOrNull()
         val returnedRenameIdentity = prior?.returnedRenameIdentity
         val returnedRenameUri = prior?.returnedRenameUri
         val checkpoint = runCatching {
@@ -2817,7 +2825,7 @@ public class SafCommitCoordinator private constructor(
             grant,
             SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
         )
-        saveCheckpoint(
+        val saved = saveCheckpoint(
             unresolved,
             grant,
             SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
@@ -2828,7 +2836,10 @@ public class SafCommitCoordinator private constructor(
                 unresolved.renameHistory.none { it.phase == unresolvedPhase }
             },
         )
-        return SafCommitRecoveryOutcome.ReconciliationRequired(checkpoint, error, knownUris.distinct())
+        val outcomeError = if (saved) error else journalWriteFailure(
+            TransferStorageError.StateConflict("journal_reconciliation_save_failed"),
+        )
+        return SafCommitRecoveryOutcome.ReconciliationRequired(checkpoint, outcomeError, knownUris.distinct())
     }
 
     private fun isCancellationCheckpoint(checkpoint: SafCommitCheckpoint): Boolean =
@@ -2919,7 +2930,7 @@ public class SafCommitCoordinator private constructor(
         outcome: SafCommitOutcome,
         fallback: SafCommitCheckpoint,
     ): SafCommitRecoveryOutcome {
-        val persisted = runCatching { journal.load(fallback.commitId) }.getOrNull() ?: fallback
+        val persisted = runCatching { journalCursor.load(fallback.commitId) }.getOrNull() ?: fallback
         return when (outcome) {
             is SafCommitOutcome.Committed -> SafCommitRecoveryOutcome.Committed(outcome.checkpoint ?: persisted)
             is SafCommitOutcome.ReconciliationRequired -> {
@@ -3222,12 +3233,17 @@ public class SafCommitCoordinator private constructor(
         checkpoint: SafCommitCheckpoint,
         grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
+        SafCommitCheckpointValidator.validate(checkpoint)?.let { error ->
+            return SafCommitRecoveryOutcome.Failed(checkpoint, error)
+        }
         val latest = try {
-            journal.load(checkpoint.commitId)
+            journalCursor.load(checkpoint.commitId)
+        } catch (rejected: SafCommitJournalReadException) {
+            return SafCommitRecoveryOutcome.Failed(checkpoint, rejected.error)
         } catch (_: Exception) {
             return SafCommitRecoveryOutcome.Failed(
                 checkpoint,
-                TransferStorageError.StateConflict("journal_load_failed"),
+                TransferStorageError.Io("journal_read"),
             )
         } ?: return SafCommitRecoveryOutcome.Failed(
             checkpoint,
@@ -3309,10 +3325,10 @@ public class SafCommitCoordinator private constructor(
             returnedRenameUri = latest.returnedRenameUri,
             failure = TransferStorageError.Cancelled,
         )
-        if (!runCatching { journal.save(intent) }.getOrDefault(false)) {
+        if (!runCatching { journalCursor.save(intent) }.getOrDefault(false)) {
             return SafCommitRecoveryOutcome.ReconciliationRequired(
                 latest,
-                TransferStorageError.StateConflict("journal_cancel_delete_intent_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_cancel_delete_intent_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -3340,10 +3356,10 @@ public class SafCommitCoordinator private constructor(
             returnedRenameUri = latest.returnedRenameUri,
             failure = error ?: TransferStorageError.Cancelled,
         )
-        if (!runCatching { journal.save(observed) }.getOrDefault(false)) {
+        if (!runCatching { journalCursor.save(observed) }.getOrDefault(false)) {
             return SafCommitRecoveryOutcome.ReconciliationRequired(
                 intent,
-                TransferStorageError.StateConflict("journal_cancel_delete_result_failed"),
+                journalWriteFailure(TransferStorageError.StateConflict("journal_cancel_delete_result_failed")),
                 listOf(identity.documentUri),
             )
         }
@@ -3383,12 +3399,25 @@ public class SafCommitCoordinator private constructor(
             )
         }
         val current = record.copy(grantId = grant.grantId)
-        val stored = runCatching { journal.load(current.partialId) }.getOrNull()
-            ?: return reconcileKnown(
+        val stored = try {
+            journalCursor.load(current.partialId)
+        } catch (rejected: SafCommitJournalReadException) {
+            return reconcileKnown(
                 current,
-                TransferStorageError.StateConflict("cleanup_checkpoint_missing"),
+                rejected.error,
                 current.knownDocumentIdentities.map { it.documentUri },
             )
+        } catch (_: Exception) {
+            return reconcileKnown(
+                current,
+                TransferStorageError.Io("journal_read"),
+                current.knownDocumentIdentities.map { it.documentUri },
+            )
+        } ?: return reconcileKnown(
+            current,
+            TransferStorageError.StateConflict("cleanup_checkpoint_missing"),
+            current.knownDocumentIdentities.map { it.documentUri },
+        )
         if (!checkpointMatchesRecord(stored, current, grant) ||
             !checkpointIdentityShapeMatches(stored) ||
             !cleanupCheckpointAuthorizesFinal(stored, current) ||
@@ -4782,7 +4811,7 @@ public class SafCommitCoordinator private constructor(
         returnedRenameUri: String? = null,
     ): SafCommitOutcome.ReconciliationRequired {
         val unresolved = record.copy(state = SafCommitState.RECONCILIATION_REQUIRED)
-        val prior = runCatching { journal.load(record.partialId) }.getOrNull()
+        val prior = runCatching { journalCursor.load(record.partialId) }.getOrNull()
         val returnedIdentity = returnedRenameIdentity ?: prior?.returnedRenameIdentity
         val returnedUri = returnedRenameUri ?: prior?.returnedRenameUri
         val unresolvedPhase = prior?.unresolvedRenamePhase?.takeIf { phase ->
@@ -4797,10 +4826,10 @@ public class SafCommitCoordinator private constructor(
             failure = error,
             unresolvedRenamePhase = unresolvedPhase,
         )
-        val saved = runCatching { journal.save(checkpoint) }.getOrDefault(false)
+        val saved = runCatching { journalCursor.save(checkpoint) }.getOrDefault(false)
         return SafCommitOutcome.ReconciliationRequired(
             record = unresolved,
-            error = if (saved) error else TransferStorageError.StateConflict("journal_reconciliation_save_failed"),
+            error = if (saved) error else journalWriteFailure(TransferStorageError.StateConflict("journal_reconciliation_save_failed")),
             knownUris = knownUris.distinct(),
             checkpoint = checkpoint,
         )
@@ -4830,7 +4859,7 @@ public class SafCommitCoordinator private constructor(
         )
         return SafCommitOutcome.ReconciliationRequired(
             record = unresolved,
-            error = if (persisted) error else TransferStorageError.StateConflict("journal_rename_failure_save_failed"),
+            error = if (persisted) error else journalWriteFailure(TransferStorageError.StateConflict("journal_rename_failure_save_failed")),
             knownUris = knownUris.distinct(),
             checkpoint = checkpoint,
         )
@@ -6017,7 +6046,7 @@ public class SafCommitCoordinator private constructor(
                 ) {
                     null
                 } else {
-                    TransferStorageError.StateConflict("journal_copy_result_failed")
+                    journalWriteFailure(TransferStorageError.StateConflict("journal_copy_result_failed"))
                 }
                 return SafCopyPhase(
                     outcome = SafCopyOutcome.Failed(opened.error, 0L),
@@ -6059,10 +6088,10 @@ public class SafCommitCoordinator private constructor(
             val copiedRecord = record.copy(copiedBytes = copiedBytes)
             val flush = if (outcome is SafCopyOutcome.Copied) {
                 if (!saveCheckpoint(copiedRecord, grant, SafCommitCheckpointPhase.COPY_COMPLETED)) {
-                    journalError = TransferStorageError.StateConflict("journal_copy_result_failed")
+                    journalError = journalWriteFailure(TransferStorageError.StateConflict("journal_copy_result_failed"))
                     FlushDurability.FlushUnsupported
                 } else if (!saveCheckpoint(copiedRecord, grant, SafCommitCheckpointPhase.FLUSH_INTENT)) {
-                    journalError = TransferStorageError.StateConflict("journal_flush_intent_failed")
+                    journalError = journalWriteFailure(TransferStorageError.StateConflict("journal_flush_intent_failed"))
                     FlushDurability.FlushUnsupported
                 } else if (isCancelled()) {
                     if (!saveCheckpoint(
@@ -6072,7 +6101,7 @@ public class SafCommitCoordinator private constructor(
                             failure = TransferStorageError.Cancelled,
                         )
                     ) {
-                        journalError = TransferStorageError.StateConflict("journal_cancel_save_failed")
+                        journalError = journalWriteFailure(TransferStorageError.StateConflict("journal_cancel_save_failed"))
                     }
                     return SafCopyPhase(
                         SafCopyOutcome.Failed(TransferStorageError.Cancelled, copiedBytes),
@@ -6108,7 +6137,7 @@ public class SafCommitCoordinator private constructor(
                             failure = flushFailure,
                         )
                     ) {
-                        journalError = TransferStorageError.StateConflict("journal_flush_result_failed")
+                        journalError = journalWriteFailure(TransferStorageError.StateConflict("journal_flush_result_failed"))
                     }
                     result
                 }
@@ -6121,7 +6150,7 @@ public class SafCommitCoordinator private constructor(
                         failure = copyFailure,
                     )
                 ) {
-                    journalError = TransferStorageError.StateConflict("journal_copy_result_failed")
+                    journalError = journalWriteFailure(TransferStorageError.StateConflict("journal_copy_result_failed"))
                 }
                 FlushDurability.FlushUnsupported
             }
@@ -6417,8 +6446,8 @@ public class SafCommitCoordinator private constructor(
         returnedRenameUri: String? = null,
         failure: TransferStorageError? = null,
         unresolvedRenamePhase: SafRenamePhase? = null,
-    ): Boolean = runCatching {
-        journal.save(
+    ): Boolean = try {
+        journalCursor.save(
             checkpointFor(
                 record,
                 grant,
@@ -6429,7 +6458,17 @@ public class SafCommitCoordinator private constructor(
                 unresolvedRenamePhase,
             ),
         )
-    }.getOrDefault(false)
+    } catch (_: IllegalArgumentException) {
+        journalCursor.rememberWriteFailure(TransferStorageError.StateConflict("checkpoint_malformed"))
+        false
+    } catch (_: Exception) {
+        journalCursor.rememberWriteFailure(TransferStorageError.Io("journal_write"))
+        false
+    }
+
+    /** Keep journal I/O and storage-full distinct; compare-and-set conflicts retain phase context. */
+    private fun journalWriteFailure(fallback: TransferStorageError.StateConflict): TransferStorageError =
+        journalCursor.consumeWriteFailure()?.takeUnless { it is TransferStorageError.StateConflict } ?: fallback
 
     private fun unresolvedRenamePhaseAfterSaveFailure(
         record: SafCommitRecord,
@@ -6461,8 +6500,10 @@ public class SafCommitCoordinator private constructor(
         returnedRenameUri: String? = null,
         knownUris: List<String> = record.knownDocumentIdentities.map { it.documentUri },
     ): SafCommitOutcome {
-        val error = TransferStorageError.StateConflict(
-            if (afterMutation) "journal_result_save_failed" else "journal_intent_save_failed",
+        val error = journalWriteFailure(
+            TransferStorageError.StateConflict(
+                if (afterMutation) "journal_result_save_failed" else "journal_intent_save_failed",
+            ),
         )
         val checkpoint = runCatching {
             checkpointFor(
@@ -6480,7 +6521,7 @@ public class SafCommitCoordinator private constructor(
             )
         }.getOrNull()
         if (afterMutation && checkpoint != null) {
-            runCatching { journal.save(checkpoint) }
+            runCatching { journalCursor.save(checkpoint) }
         }
         return if (afterMutation) {
             SafCommitOutcome.ReconciliationRequired(
@@ -7059,11 +7100,11 @@ public class SafCommitCoordinator private constructor(
             SafCommitCheckpointPhase.RECONCILIATION_REQUIRED,
             failure = TransferStorageError.Cancelled,
         )
-        val saved = runCatching { journal.save(checkpoint) }.getOrDefault(false)
+        val saved = runCatching { journalCursor.save(checkpoint) }.getOrDefault(false)
         return SafCommitOutcome.ReconciliationRequired(
             record = unresolved,
             error = if (saved) TransferStorageError.Cancelled
-            else TransferStorageError.StateConflict("journal_cancel_after_mutation_failed"),
+            else journalWriteFailure(TransferStorageError.StateConflict("journal_cancel_after_mutation_failed")),
             knownUris = knownUris.distinct(),
             checkpoint = checkpoint,
         )
@@ -7081,13 +7122,13 @@ public class SafCommitCoordinator private constructor(
             SafCommitCheckpointPhase.CANCELLED,
             failure = TransferStorageError.Cancelled,
         )
-        val saved = runCatching { journal.save(checkpoint) }.getOrDefault(false)
+        val saved = runCatching { journalCursor.save(checkpoint) }.getOrDefault(false)
         return if (saved) {
             SafCommitOutcome.Failed(cancelled, TransferStorageError.Cancelled, checkpoint)
         } else {
             SafCommitOutcome.ReconciliationRequired(
                 record = cancelled.copy(state = SafCommitState.RECONCILIATION_REQUIRED),
-                error = TransferStorageError.StateConflict("journal_cancel_save_failed"),
+                error = journalWriteFailure(TransferStorageError.StateConflict("journal_cancel_save_failed")),
                 knownUris = cancelled.knownDocumentIdentities.map { it.documentUri },
                 checkpoint = checkpoint,
             )
@@ -7115,11 +7156,11 @@ public class SafCommitCoordinator private constructor(
                 unresolved.renameHistory.none { it.phase == phase }
             },
         )
-        val saved = runCatching { journal.save(checkpoint) }.getOrDefault(false)
+        val saved = runCatching { journalCursor.save(checkpoint) }.getOrDefault(false)
         return SafCommitOutcome.ReconciliationRequired(
             record = unresolved,
             error = if (saved) TransferStorageError.Cancelled
-            else TransferStorageError.StateConflict("journal_cancel_save_failed"),
+            else journalWriteFailure(TransferStorageError.StateConflict("journal_cancel_save_failed")),
             knownUris = knownUris.distinct(),
             checkpoint = checkpoint,
         )

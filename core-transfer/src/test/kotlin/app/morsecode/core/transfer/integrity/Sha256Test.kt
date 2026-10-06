@@ -11,6 +11,20 @@ import java.security.MessageDigest
 
 class Sha256Test {
 
+    @Test fun `digest input and exposed bytes are defensively copied`() {
+        val input = ByteArray(32) { it.toByte() }
+        val digest = Sha256Digest(input)
+        val expectedHex = digest.hex
+        input[0] = 99
+        val exposed = digest.bytes
+        exposed[1] = 88
+
+        assertEquals(expectedHex, digest.hex)
+        assertEquals(0.toByte(), digest.bytes[0])
+        assertEquals(1.toByte(), digest.bytes[1])
+        assertEquals(32, digest.bytes.size)
+    }
+
     @Test fun `known vector for the empty input`() {
         assertEquals(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -131,6 +145,12 @@ class Sha256Test {
         assertEquals(a.hashCode(), b.hashCode())
         assertTrue(a.contentEquals(b))
         assertFalse(a.contentEquals(Sha256Digest.fromHex("b".repeat(64))))
+    }
+
+    @Test fun `digest text rendering redacts the raw value`() {
+        val digest = Sha256Digest.fromHex("ab".repeat(32))!!
+        assertFalse(digest.toString().contains(digest.hex))
+        assertEquals("Sha256Digest([redacted])", digest.toString())
     }
 
     @Test fun `malformed digests are rejected rather than guessed at`() {

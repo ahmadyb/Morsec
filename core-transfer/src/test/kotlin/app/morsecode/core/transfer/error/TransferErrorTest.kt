@@ -39,6 +39,10 @@ class TransferErrorTest {
             TransferError.CancelledRemotely,
             TransferError.RetryLimitReached(5),
             TransferError.SnapshotVersionUnsupported(9, 1),
+            TransferError.PersistedSnapshotInvalid("malformed_row"),
+            TransferError.PersistenceConflict("stale_snapshot_revision"),
+            TransferError.PersistenceFailure("write", storageFull = false),
+            TransferError.PersistenceFailure("write", storageFull = true),
             TransferError.UnexpectedInternal("boom"),
         )
         for (error in samples) {
@@ -79,6 +83,16 @@ class TransferErrorTest {
         assertTrue(file.retryable)
     }
 
+    @Test fun `full file checksum failures never render digest bytes`() {
+        val expected = "a".repeat(64)
+        val observed = "b".repeat(64)
+        val error = TransferError.FileChecksumMismatch(expected, observed)
+        assertFalse(error.detail.contains(expected))
+        assertFalse(error.detail.contains(observed))
+        assertFalse(error.describe().contains(expected))
+        assertFalse(error.toString().contains(observed))
+    }
+
     @Test fun `local and remote cancellations are distinguishable`() {
         assertEquals(ErrorOrigin.LOCAL, TransferError.CancelledLocally.origin)
         assertEquals(ErrorOrigin.REMOTE, TransferError.CancelledRemotely.origin)
@@ -116,9 +130,26 @@ class TransferErrorTest {
         }
     }
 
-    @Test fun `sha256 digests survive redaction because audits need them`() {
+    @Test fun `sha256 digests are redacted from error details`() {
         val digest = "a".repeat(64)
-        assertEquals(digest, ErrorDetailRedactor.redact(digest))
+        val redacted = ErrorDetailRedactor.redact("digest=$digest")
+        assertFalse(redacted.contains(digest))
+        assertTrue(redacted.contains("digest=[redacted]"))
+    }
+
+    @Test fun `persistence diagnostics retain only safe reason tokens`() {
+        val raw = "content://provider/private-document sha256=${"a".repeat(64)}"
+        val invalid = TransferError.PersistedSnapshotInvalid(raw)
+        val conflict = TransferError.PersistenceConflict(raw)
+        val failure = TransferError.PersistenceFailure(raw, storageFull = false)
+
+        assertEquals("malformed_row", invalid.reason)
+        assertEquals("revision_conflict", conflict.reason)
+        assertEquals("saved", failure.operation)
+        assertFalse(invalid.toString().contains("provider"))
+        assertFalse(conflict.toString().contains("private-document"))
+        assertFalse(failure.toString().contains("sha256"))
+        assertFalse(invalid.detail.contains("provider"))
     }
 
     @Test fun `other long opaque blobs are redacted`() {

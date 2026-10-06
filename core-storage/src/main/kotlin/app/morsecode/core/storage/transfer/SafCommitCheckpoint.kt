@@ -106,7 +106,9 @@ public data class SafCommitCheckpointFailure(
     public val code: String,
 ) {
     init {
-        require(categoryId.matches(Regex("[a-z_]{1,40}"))) { "invalid failure category" }
+        require(TransferStorageErrorCategory.entries.any { it.id == categoryId }) {
+            "unknown failure category"
+        }
         require(code.matches(Regex("[a-z0-9_]{1,64}"))) { "invalid failure code" }
     }
 
@@ -255,13 +257,41 @@ public data class SafCommitCheckpoint(
     }
 }
 
+/** One validated checkpoint and the adapter-owned compare-and-set revision. */
+public data class SafCommitJournalEntry(
+    public val checkpoint: SafCommitCheckpoint,
+    public val revision: Long,
+) {
+    init {
+        require(revision >= 1L) { "journal revision must be positive" }
+    }
+}
+
+/** Typed journal read: corrupt/unknown rows are not reported as missing. */
+public sealed interface SafCommitJournalRead {
+    public data object Missing : SafCommitJournalRead
+
+    public data class Found(public val entry: SafCommitJournalEntry) : SafCommitJournalRead
+
+    public data class Rejected(public val error: TransferStorageError) : SafCommitJournalRead
+}
+
+/** Typed write result. Conflicts never overwrite a newer checkpoint. */
+public sealed interface SafCommitJournalWrite {
+    public data class Saved(public val revision: Long) : SafCommitJournalWrite
+
+    public data class Conflict(public val error: TransferStorageError.StateConflict) : SafCommitJournalWrite
+
+    public data class Rejected(public val error: TransferStorageError) : SafCommitJournalWrite
+}
+
 /** The coordinator's persistence boundary; implementations must not log checkpoints. */
 public interface SafCommitJournal {
-    /** Loads the latest checkpoint for the deterministic commit key, or null when absent. */
-    public fun load(commitId: PartialIdentity): SafCommitCheckpoint?
+    /** Loads and validates the latest checkpoint for the deterministic commit key. */
+    public fun read(commitId: PartialIdentity): SafCommitJournalRead
 
-    /** Saves one complete replacement checkpoint; false/throw means it was not saved. */
-    public fun save(checkpoint: SafCommitCheckpoint): Boolean
+    /** Atomically replaces the whole checkpoint/child set at an expected revision (0 means absent). */
+    public fun write(checkpoint: SafCommitCheckpoint, expectedRevision: Long): SafCommitJournalWrite
 }
 
 /** Possible outcomes from the executable recovery entry point. */

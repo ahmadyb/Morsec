@@ -61,10 +61,23 @@ public interface TransferSessionDao {
     @Query("DELETE FROM transfer_sessions WHERE sessionId = :sessionId")
     public suspend fun delete(sessionId: String)
 
+    /**
+     * Existing session-retention path. A session remains intact while any v2
+     * snapshot or SAF checkpoint still owns recovery data; pruning must never
+     * discard bytes needed to resume/reconcile it.
+     */
     @Query(
         """
         DELETE FROM transfer_sessions
         WHERE phase IN ('ended', 'failed') AND ended_at < :olderThan
+          AND NOT EXISTS (
+              SELECT 1 FROM transfer_snapshots
+              WHERE transfer_snapshots.session_id = transfer_sessions.sessionId
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM transfer_partials
+              WHERE transfer_partials.session_id = transfer_sessions.sessionId
+          )
         """,
     )
     public suspend fun deleteClosedBefore(olderThan: Long)
