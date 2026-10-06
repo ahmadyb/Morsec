@@ -54,16 +54,27 @@ Milestone 3 SAF process-restoration and safe-cleanup orchestration group, then s
   run [37509054977](https://github.com/ahmadyb/Morsec/actions/runs/37509054977) on
   `5cb815499991253fd2e0d209896fa1f1c92b9d05` compiled, passed milestone hygiene, all
   reference/design/protocol verifiers and KSP/schema comparison, produced 0 lint errors/45
-  accepted warnings across 7 reports, and assembled a 19.00 MiB debug APK plus 1.10 MiB
+  warnings across 7 reports, and assembled a 19.00 MiB debug APK plus 1.10 MiB
   instrumentation APK. It reported 2,611 JVM tests (app 588, core-data 56, core-design 100,
-  core-model 40, core-storage 1,388, core-transfer 439); only the same test-class
-  initialization error failed in both Debug and Release:
+  core-model 40, core-storage 1,388, core-transfer 439); the same test-class initialization
+  error failed in Debug and Release because
   `production factory explicitly restores app private staging through real DocumentsContract`
-  ended with a Boolean expression, but JUnit requires `void`. The focused correction is
-  committed locally as `992048d` (`assertTrue(stagingStore.delete(id))`) and awaits push plus
-  exact-SHA rerun. No test pass is claimed until that run is green. Preserve rescue bundles,
-  publish only to the assigned branch, and require exact local/remote SHA equality plus green
-  exact-SHA CI before completion. No PR or other branch.
+  returned a Boolean instead of JUnit's required `void`. Commit `992048d` changed the final
+  expression to `assertTrue(stagingStore.delete(id))`.
+- Second exact-SHA Android CI run
+  [37511044619](https://github.com/ahmadyb/Morsec/actions/runs/37511044619) on
+  `a29c6cccd0f8d09098c77fa82c2fa45b228f293a` passed milestone hygiene, all reference/design/
+  protocol verifiers, KSP/schema comparison, lint (0 errors/45 warnings across 7 reports),
+  and both APK assemblies (debug 19.00 MiB, instrumentation 1.10 MiB). It reported 2,627
+  JVM tests (app 588, core-data 56, core-design 100, core-model 40, core-storage 1,404,
+  core-transfer 439); the same production-factory test failed in Debug and Release because
+  its generated `sessionId` exceeded the existing 64-byte model limit. The focused pending
+  fixture correction removes the unnecessary `factory-` component from the generated
+  staging identity so derived session/transfer ids remain within their existing bounds.
+  The worktree correction has not yet been committed or CI-verified; no green result is
+  claimed. Keep rescue artifacts, publish only to the assigned branch, and require exact
+  local/tracking/server SHA equality plus green exact-SHA CI before completion. No PR or
+  other branch.
 - `doc/transfer-restoration.md` records the runtime boundary. The older
   `MORSEC_OFFLINE_PATCH/` and `MORSEC_ROOM_V2_RESCUE_2026-10-06/` paths named below were
   absent in this checkout; do not overwrite or delete any rescue artifacts if they appear.

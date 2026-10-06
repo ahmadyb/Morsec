@@ -610,7 +610,7 @@ class TransferRestorationRoomReconstructionTest {
         )
         val gateway = DocumentsContractSafGateway(context.contentResolver)
         val actualGrant = requireNotNull(gateway.resolveGrant(rowId.toString(), exactUri, requireNotNull(authority)))
-        val id = PartialIdentity("saf_staged:factory-${UUID.randomUUID().toString().replace('-', '_')}")
+        val id = PartialIdentity("saf_staged:${UUID.randomUUID().toString().replace('-', '_')}")
         val stagingStore = AppPrivatePartialStore(File(context.filesDir, "incoming"))
         stagedFiles += stagingStore to id
         val staged = stagingStore.open(id)
