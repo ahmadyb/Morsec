@@ -1,6 +1,6 @@
 # Milestone 3 callable SAF restoration orchestration
 
-**Status:** implementation and tests are in progress; hosted exact-SHA build, test, lint, APK, and CI evidence is pending. This document is not completion evidence until the final handoff records the pushed SHA and its green CI run.
+**Status:** implementation and tests are complete for the authorized callable restoration-orchestration scope. Exact implementation SHA `540bfaed700aa17476b9394587e3174489e18685` passed hosted Android CI run [37505271565](https://github.com/ahmadyb/Morsec/actions/runs/37505271565). The run reports 2,613 tests, 0 failed, 0 skipped (153 reports); lint reports 0 errors and 46 warnings (7 reports); both debug (18.98 MiB) and instrumentation (1.10 MiB) APKs assembled. The `morsecode-debug-apk` artifact is available on the run. This evidence is for the exact source implementation SHA above; if the handoff is subsequently synchronized in a documentation-only commit, verify and report CI for that final pushed SHA separately.
 
 ## Scope and activation boundary
 

@@ -3,6 +3,52 @@
 You are continuing an existing Android project. Do not restart, redesign,
 replace, or regenerate the repository.
 
+## Current authoritative state — 2026-10-06: Milestone 3 callable SAF restoration orchestration
+
+The explicitly authorized Milestone 3 callable restoration-orchestration group is
+implemented. The accepted starting commit for this group was
+`b758135a2b820a11c78e3df46967d146aacae2f0`. Work stayed on
+`arena/01a10ca1-morsec`; implementation commits are `32c3a920f7ac81b147946a49165fec7de65fdd19`,
+`a91bff6191f9b950a65c43d3757838e97ac9bdec`, and
+`540bfaed700aa17476b9394587e3174489e18685`. The latest implementation SHA matched
+`origin/arena/01a10ca1-morsec` before this documentation synchronization. No new branch,
+PR, merge, rebase, history rewrite, or force-push was used.
+
+Exact-SHA Android CI run
+[37505271565](https://github.com/ahmadyb/Morsec/actions/runs/37505271565) is green on
+`540bfaed700aa17476b9394587e3174489e18685` (JDK 17, Gradle 8.13, API 36, minSdk 23).
+It reports 2,613 tests, 0 failed, 0 skipped in 153 reports; lint has 0 errors and 46
+warnings in 7 reports. Both APK assemble steps passed: debug APK 18.98 MiB and
+instrumentation APK 1.10 MiB. The `morsecode-debug-apk` artifact is published on the run.
+The exact-SHA run also regenerated and compared the committed Room schema exports.
+
+The local reference verifier passed 31/31, the Room schema verifier passed 11/11, and
+`git diff --check` passed. Schemas v1 and v2 remain byte-identical to their accepted
+artifacts (v1: 29,767 bytes, SHA-256
+`b0bca4243d2f0ba4631e3338e611d3bcaff8ba456de83b79ea0106ae187ac488`; v2: 50,652 bytes,
+SHA-256 `7e6acfd9c03b0214dcaddc2f5d1ceb175588f5cfcf93cca5437617be24b2b074`). Room remains
+at version 2; no schema v3 or destructive migration was added. This sandbox has no Java
+runtime, so local Gradle validation is unavailable; hosted exact-SHA CI is the recorded
+compile/test/lint/APK evidence.
+
+Discovery is bounded and deterministic; malformed checkpoint data and exact persisted
+SAF grant authority/tree/scope are validated before provider access. Restoration routes
+through the existing SAF recovery path, with exact-identity cleanup, process-local
+per-commit locks, revision-conflict reload, injected per-run budgets/cancellation,
+bounded retry guidance, isolated structured redacted reports, and database/coordinator
+reconstruction and crash-boundary coverage. The reconstruction test proves only its
+explicit close/reopen/reconstruct sequence; it is not an OS process-death test.
+Construction is inert and restoration remains callable only: no automatic startup or
+background invocation was introduced. `CURRENT_MILESTONE` remains 2 and
+`TRANSFER_ENGINE` remains gated. Do not expand scope into any previously prohibited
+service, scheduler, network, UI, or Room-v3 feature.
+
+The Room-v2 and SAF-closure status sections below are retained as historical evidence;
+their earlier “stop before restoration” wording is superseded only for this explicitly
+authorized callable restoration group. All other standing exclusions remain in force.
+Preserve the untracked rescue directories and unexpected worktree changes; never use
+`git reset --hard` or unreviewed `git clean`.
+
 ## Repository
 
 GitHub repository:
@@ -23,7 +69,7 @@ recorded first below.
 
 ---
 
-## Current authoritative state — 2026-10-06: Room v2 persistence group
+## Previous verified state — 2026-10-06: Room v2 persistence group
 
 The accepted SAF destination implementation was the starting point at
 `43e575b1c9e2aea6b70bd03f0ac76ac642e14210`. The fixed Arena branch is
