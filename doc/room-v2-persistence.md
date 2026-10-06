@@ -1,8 +1,8 @@
 # Room v2 transfer and SAF persistence
 
-**Status:** implementation in progress; exact-SHA test/build/lint/APK/CI evidence and the authentic committed `2.json` are still pending. Do not treat this document as completion evidence until the handoff records the verified SHA and run.
+**Base Room v2 status:** verified by green Android CI run [37469198527](https://github.com/ahmadyb/Morsec/actions/runs/37469198527) on accepted starting SHA `b758135a2b820a11c78e3df46967d146aacae2f0`; the authentic committed `2.json` is present. The separately authorized restoration orchestration is still being implemented on `arena/268e777f-morsec`; this base run does not validate its new tests or changes. See [transfer-restoration.md](transfer-restoration.md) and the current handoff for exact-SHA completion evidence.
 
-This is only the Room v2 persistence group. It does not enable `TRANSFER_ENGINE`, start automatic recovery, invoke a provider on database open, or add a restoration coordinator, cleanup worker/service, transfer UI, network transport, foreground service, notification, Media3, or WebShare.
+This document records the base Room v2 persistence group. Its original exclusion of a restoration coordinator was superseded by the separately authorized, callable SAF process-restoration amendment in [transfer-restoration.md](transfer-restoration.md) and ADR-0003. That amendment adds no Room schema or migration changes. It still does not enable `TRANSFER_ENGINE`, start automatic recovery, invoke a provider on database open, or add a cleanup worker/service, transfer UI, network transport, foreground service, notification, Media3, or WebShare.
 
 ## Schema history and migration
 
@@ -54,6 +54,6 @@ SAF rows retain the exact stored URI strings and separately retain authority, tr
 
 ## Tests and evidence required
 
-The code includes Robolectric/Room tests for migration of the authentic committed v1 schema, preservation of representative existing rows, fresh v2 creation and Room validation, indices/foreign keys, snapshot CAS/rollback/reopen/malformed-row behavior, journal enum/phase/strategy/policy and child mapping, exact cleanup/rename evidence, unsupported versions, malformed identity/digest/ownership, stale and parallel writers, idempotence, child-only cascade, rollback after injected child failure, and database reopen. These tests still need to be executed in the hosted Android toolchain; test source is not evidence that they pass.
+The base Room v2 suite includes Robolectric/Room tests for migration of the authentic committed v1 schema, preservation of representative existing rows, fresh v2 creation and Room validation, indices/foreign keys, snapshot CAS/rollback/reopen/malformed-row behavior, journal enum/phase/strategy/policy and child mapping, exact cleanup/rename evidence, unsupported versions, malformed identity/digest/ownership, stale and parallel writers, idempotence, child-only cascade, rollback after injected child failure, and database reopen. Those base tests ran in the green exact-SHA Android CI run recorded above. Restoration-specific Room close/discard/reopen tests are added separately; they still need hosted execution at the final restoration SHA. Test source is not evidence that those new tests pass.
 
 Exact completion evidence must include the authentic KSP-produced and committed `2.json`, unchanged v1 hash/size, byte-comparison in CI, passing migration/fresh-install/reopen tests, all JVM tests, zero lint errors, debug and instrumentation APKs, and exact-SHA green CI. `CURRENT_MILESTONE` must remain 2 and `TRANSFER_ENGINE` must remain gated.

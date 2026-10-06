@@ -1,12 +1,13 @@
 # ADR-0003 — Android transfer storage adapters and durable persistence
 
-- **Status:** accepted (2026-10-02), amended for SAF destination closure (2026-10-05), and amended for the separately authorized Room v2 persistence group (2026-10-06; verification pending)
+- **Status:** accepted (2026-10-02), amended for SAF destination closure (2026-10-05), Room v2 persistence (2026-10-06), and explicitly invoked SAF process restoration (2026-10-06; verification pending)
 - **Applies to:** `:core-storage` (Android source/destination adapters and SAF journal),
   `:core-data` (Room entities, migration, snapshot adapter, clock), and `:core-transfer`
   (pure persistence contracts, codec, digest value, and typed errors)
 - **Historical closure amendment:** the 2026-10-05 SAF destination closure was limited to
-  commit/checkpoint/recovery/cleanup and intentionally left Room v1 unchanged. The current
-  2026-10-06 task separately authorizes only the Room v2 persistence group described below.
+  commit/checkpoint/recovery/cleanup and intentionally left Room v1 unchanged. The first
+  2026-10-06 amendment below authorized Room v2; the subsequent restoration amendment
+  separately authorizes only callable, explicit SAF commit restoration.
 - **Supersedes:** nothing. **Amends:** the pre-implementation report for this group,
   which contained one contradiction (foreign keys) and several unstated assumptions
   (durability, SAF visibility, descriptor ownership, zero-progress policy) that are
@@ -61,9 +62,40 @@ checkpoint, or persistence-error `toString()` output.
 `core-data` and supplies the production SAF journal adapter/Hilt factory. Both depend on
 pure `core-transfer`; no dependency cycle or Room entity enters a provider operation.
 Opening the database does not begin recovery. Close/reopen tests demonstrate durable reads;
-they do not claim automatic startup recovery. At the time of this amendment, the code is
-in progress and test/build/lint/APK/exact-SHA CI evidence is still pending. The remaining
-broader restoration and cleanup group requires separate approval.
+they do not claim automatic startup recovery. At the time of this amendment, the code was
+in progress and test/build/lint/APK/exact-SHA CI evidence was still pending. The later,
+separately authorized restoration scope is recorded next.
+
+## Amendment 2026-10-06 — callable SAF process-restoration group
+
+This subsequent amendment records explicit authorization for only the callable SAF
+process-restoration and safe-cleanup orchestration group. It does not change the schema or
+supersede the Room v2 ownership, migration, CAS, or redaction rules above.
+
+The production entry point is `TransferRestorationCoordinatorFactory.createForProduction`
+and the caller explicitly invokes `TransferRestorationCoordinator.restore()`. Construction,
+Room opening, and Hilt provisioning remain inert. Production wiring uses the v2 Room
+journal and deterministic keyset discovery, exact persisted-grant resolution, the real
+`DocumentsContractSafGateway`, and lazy app-private staging. Recovery delegates to the
+existing `resumeOrReconcile`; it does not implement a second commit/copy/rename/digest or
+delete protocol.
+
+One pass is bounded by checkpoint/page, provider-mutation, cleanup, observation, and
+revision-conflict limits, with an optional monotonic elapsed observation. It never sleeps,
+schedules, persists retry timestamps, starts a worker/service, or restarts network work.
+A process-local lock excludes concurrent same-checkpoint work but makes no cross-process
+claim. Stale journal writes trigger bounded reload/revalidation/reclassification. Typed
+redacted results return the remaining work and explicit retry guidance. Exact staging,
+provider-temporary, and backup cleanup remains authorized by stored identity and commit
+state; only observed provider absence settles deletion.
+
+The scope still prohibits Room v3/schema changes, startup recovery, WorkManager/alarms,
+services/foreground services, notifications, wake locks, networking, LAN/Nearby/Wi-Fi
+Direct, transfer UI, Media3, and WebShare. `CURRENT_MILESTONE` remains 2 and
+`TRANSFER_ENGINE` remains gated. The implementation and test coverage are described in
+[`../transfer-restoration.md`](../transfer-restoration.md). Close/discard/reopen Room tests
+model persisted-state reconstruction and do not claim Android OS process-death testing.
+Exact-SHA hosted validation remains the completion gate.
 
 ## Context
 
@@ -429,18 +461,19 @@ adapter guard refuses while recovery data exists); and no destructive migration 
 
 ---
 
-## Decision 10 — Restoration is a pure decision
+## Historical Decision 10 — Earlier pure-decision restoration proposal (superseded)
 
-`TransferRestorationCoordinator` may read persistence and inspect storage. It must not
-start a transport, discovery, a foreground service, networking, UI or timers, and it
-must not resume transmission. It returns `RestorationDecision` — a pure value — for a
-later runtime layer to act on.
+The earlier, unimplemented proposal described a side-effect-free `RestorationDecision`
+value for a later runtime layer. It prohibited transmission restart, foreground services,
+networking, UI, and timers, and did not authorize an explicit coordinator beyond the
+original SAF destination pass. Its `PartialInspector`/`SourceProbe`/`GrantProbe` API was
+not implemented.
 
-Storage inspection sits behind interfaces (`PartialInspector`, `SourceProbe`,
-`GrantProbe`) so that the overwhelming majority of restoration tests are deterministic
-JVM tests with fakes; only the provider implementations need Robolectric. This existing
-decision does not authorize starting a restoration coordinator beyond SAF reconciliation
-in the current SAF destination pass.
+The 2026-10-06 callable SAF process-restoration amendment at the start of this ADR
+supersedes that proposal only for the explicitly authorized SAF commit group: the caller's
+`TransferRestorationCoordinator.restore()` performs bounded local Room/SAF reconciliation
+and returns a redacted `RestorationRunReport`. It still starts no transport or automation,
+never restarts transmission, and does not add UI, workers, services, networking, or timers.
 
 ---
 
@@ -597,13 +630,19 @@ service or other later-milestone work is started by this persistence group.
 ## Consequences
 
 - Historical 2026-10-05 closure delta: `core-transfer` gained the `RestorationDecision`
-  vocabulary and `core-storage` gained the SAF storage/reconciliation code. The current
-  2026-10-06 persistence amendment additionally adds typed persistence errors, defensive
-  SHA-256 values, and the Room snapshot/journal adapters described above.
+  vocabulary and `core-storage` gained the SAF storage/reconciliation code. The 2026-10-06
+  Room amendment added typed persistence errors, defensive SHA-256 values, and the Room
+  snapshot/journal adapters. The separate callable-restoration amendment adds bounded
+  orchestration over those existing boundaries and does not change the transfer feature gate.
 - `core-transfer` remains pure JVM; no Android, `Uri`, Room, stream, or provider type enters
   the module. `tools/verify/transfer-limits.mjs` enforces the dependency boundary.
 - `core-storage` depends one-way on `core-data` for the production SAF journal adapter;
-  provider logic receives only domain checkpoint values, never Room entities.
+  provider logic receives only domain checkpoint values, never Room entities. Its
+  restoration coordinator is explicitly invoked, bounded, and wired only to Room v2,
+  exact persisted grants, `DocumentsContract`, and app-private staging.
+- `TransferRestorationCoordinator.restore()` returns typed redacted guidance after reusing
+  `resumeOrReconcile`; it starts no worker/service, schedule, UI, network transfer, or
+  startup recovery. Same-checkpoint exclusion is process-local only.
 - `core-data` is now Room schema version 2 via additive `Migration(1, 2)`. The old
   nine-table `1.json` remains immutable; no destructive migration, cleanup service, or
   automatic startup recovery is added.

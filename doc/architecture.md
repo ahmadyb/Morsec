@@ -17,6 +17,7 @@ Companion documents:
 - [`qa/lint-and-warnings.md`](qa/lint-and-warnings.md) — every lint/compiler warning that is accepted, and why
 - [`fidelity-notes.md`](fidelity-notes.md) — how the UI tracks the Material 3 mockup
 - [`release.md`](release.md) — signing and release builds
+- [`transfer-restoration.md`](transfer-restoration.md) — explicit SAF checkpoint recovery and its bounded side-effect boundary
 
 ## Module map
 
@@ -26,7 +27,7 @@ Companion documents:
 | `:core-model` | Kotlin/JVM | Domain models, enums, the transfer state machine, formatters, `NetworkPorts`, `FeatureReadiness`, DI qualifiers | **M1** |
 | `:core-design` | Android library | Mockup design tokens (colours, metrics, type) and the reusable Compose component set | **M1** |
 | `:core-data` | Android library | Room database (entities, DAOs, mappers), DataStore settings, repositories, logging + redaction, crash recorder | **M1** |
-| `:core-storage` | Android library | MediaStore / SAF / legacy-storage adapters, the runtime permission matrix, installed-apps reader | **M1** |
+| `:core-storage` | Android library | MediaStore / SAF / legacy-storage adapters, the runtime permission matrix, installed-apps reader, explicit SAF checkpoint restoration | **M1 + M3 storage** |
 | `:core-transfer` | Kotlin/JVM | Protocol framing, checksums, resume, the queue scheduler, snapshot persistence contracts — the pure engine; wiring it to a transport is M5 | **M3 core**, M5 wiring |
 | `:transport-lan` | Android library | UDP discovery beacons, TCP control and data channels | M6 |
 | `:transport-nearby` | Android library | Google Play services Nearby Connections transport | M7 |
@@ -125,7 +126,7 @@ Pure Kotlin. The pieces the rest of the app leans on hardest:
 
 ### Data — `:core-data`
 
-Room database `MorseDatabase` with nine entities and their DAOs:
+Room database `MorseDatabase` at schema version 2 with thirteen entities: the original nine-table v1 schema plus four transfer/SAF persistence tables from the additive v1→v2 migration.
 
 | Table | Holds |
 | --- | --- |
@@ -138,6 +139,10 @@ Room database `MorseDatabase` with nine entities and their DAOs:
 | `browser_sessions` | WebShare sessions; stores a **token digest**, never a token |
 | `saf_grants` | Persisted SAF tree grants and whether they are still readable |
 | `web_transfers` | Browser upload/download records, resumable after a restart |
+| `transfer_snapshots` | Typed transfer-engine snapshots and adapter-owned CAS revisions |
+| `transfer_partials` | Versioned SAF commit checkpoints and exact destination identities |
+| `saf_rename_history` | Bounded, ordered rename evidence owned by one checkpoint |
+| `saf_pending_cleanup` | Exact staging/provider-temporary/backup cleanup identities |
 
 Entities never cross a module boundary: `db/Mappers.kt` converts to and from `:core-model`
 types, and repositories (`TransferRepository`, `HistoryRepository`, `DeviceRepository`,
@@ -145,6 +150,9 @@ types, and repositories (`TransferRepository`, `HistoryRepository`, `DeviceRepos
 the app sees. `DataStoreSettingsRepository` keeps settings in one Preferences DataStore
 file (`files/datastore/morsecode_settings.preferences_pb`), falls back to defaults on a
 corrupt store, and clamps every write to the ranges the model's `require` blocks accept.
+`MorseDatabase.NAME` is the existing application-private `morsecode.db`; the production SAF
+journal stores checkpoint parents and their bounded child rows there. Room v1/v2 exports
+remain frozen, and no restoration work starts when Room is built or opened.
 
 Logging is a first-class concern: `MorseLogger` writes through `RoomMorseLogger`, and
 **every** message and stack trace passes `LogRedactor` first — authorization headers,
@@ -217,7 +225,7 @@ of it. Android destinations and the versioned SAF checkpoint protocol live in
 
 | Module | Owns |
 | --- | --- |
-| `:core-storage` | Android source/destination adapters (MediaStore, SAF, app-private, legacy), verification, SAF checkpoint/recovery protocol, `SafCommitJournal`, the production Room-backed journal adapter and its Hilt factory, duplicate-policy resolution, and cleanup planning. It never passes Room entities to provider code. |
+| `:core-storage` | Android source/destination adapters (MediaStore, SAF, app-private, legacy), verification, SAF checkpoint/recovery protocol, production Room journal/discovery/grant adapters, the inert production restoration factory, duplicate-policy resolution, and cleanup planning. It never passes Room entities to provider code. |
 | `:core-data` | Room schema v2, explicit migration 1→2, `RoomTransferSnapshotStore`, transfer/SAF Room entities and DAOs, database/DAO bindings, and injected `Clock`. |
 | `:core-transfer` | Pure-JVM transfer contracts, reducer, versioned snapshot codec, 32-byte SHA-256 value type, and typed persistence errors; no Android, `Uri`, Room, stream, or provider dependency. |
 
@@ -231,10 +239,13 @@ without destructive fallback.
 `SafCommitCheckpoint.CURRENT_VERSION` (checkpoint-format version 2) is distinct
 from the Room database's version 2. The Room journal validates checkpoint rows
 before returning them; neither opening the DB nor constructing the singleton
-journal starts provider recovery, a service, or a worker. Process-restart
-persistence is demonstrated by close/reopen tests, not by automatic recovery. Table
-ownership, transaction/revision rules, schema history, redaction, and verification
-requirements are documented in [`room-v2-persistence.md`](room-v2-persistence.md).
+journal starts provider recovery, a service, or a worker. `TransferRestorationCoordinator`
+exposes a caller-invoked, bounded `restore()` pass that reuses `resumeOrReconcile`; it is not
+called automatically. Process-restart persistence is demonstrated by close/reopen tests,
+not by Android OS process-death tests. Table ownership, transaction/revision rules, schema
+history, redaction, and verification requirements are documented in
+[`room-v2-persistence.md`](room-v2-persistence.md) and
+[`transfer-restoration.md`](transfer-restoration.md).
 
 Thirteen decisions govern the parts where a plausible default silently loses data — Room
 schema bootstrap without bot commits, session ownership with **no** foreign key,
@@ -274,9 +285,10 @@ proof. `SafCommitCoordinatorFactory.create()` constructs the coordinator with
 `DocumentsContractSafGateway` over the supplied real `ContentResolver` and requires the
 caller to provide a `SafCommitJournal`; it has no fake gateway fallback. Unit tests inject
 a fake gateway explicitly. The production API tier is chosen from `Build.VERSION.SDK_INT`,
-not an arbitrary integer. No production `SafCommitJournal` implementation exists yet, so
-this factory and checkpoint protocol do not by themselves make commit state durable across
-process death.
+not an arbitrary integer. Production durability is supplied by `RoomSafCommitJournal` in
+Room v2. The separate `TransferRestorationCoordinatorFactory` wires the real Room
+discovery/journal, exact persisted-grant resolver, `DocumentsContract` gateway, and
+app-private staging; only an explicit `restore()` call begins restoration.
 
 The coordinator treats the sequence as an ordered safety boundary:
 
@@ -298,9 +310,10 @@ URI/id pairs, duplicate or out-of-order phases, repeated entries, cycles, and un
 checkpoint versions before making any provider call. It does not compact the history: reaching
 the bound or attempting a phase twice stops in reconciliation. A failed or unresolved rename
 persists its phase so recovery observes exact provider candidates but never blindly repeats it.
-The model is independent of Room, but there is no production `SafCommitJournal`; only the
-interface and an in-memory test fake exist, so the model is not production-durable across
-process death.
+The checkpoint model is independent of Room; `RoomSafCommitJournal` implements its
+production persistence boundary without leaking Room entities into provider operations.
+Process restoration is an explicit API, not startup automation; close/reopen tests demonstrate
+database reconstruction but do not claim Android OS process-death coverage.
 
 Every SAF provider filename is limited to `ProtocolLimits.MAX_PATH_SEGMENT_BYTES`
 (127) UTF-8 bytes by `SafFilenamePolicy`. It rejects malformed UTF-16, NUL/control

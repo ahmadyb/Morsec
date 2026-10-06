@@ -23,7 +23,49 @@ recorded first below.
 
 ---
 
-## Current authoritative state — 2026-10-06: Room v2 persistence group
+## Current authoritative state — 2026-10-06: callable SAF process-restoration group (in progress)
+
+This is the current, narrower authorization and supersedes older handoff statements that
+said a restoration coordinator was not approved. Work only on the explicitly invoked
+Milestone 3 SAF process-restoration and safe-cleanup orchestration group, then stop.
+
+- Repository: `https://github.com/ahmadyb/Morsec`.
+- Fixed Arena branch: `arena/268e777f-morsec`; accepted starting SHA:
+  `b758135a2b820a11c78e3df46967d146aacae2f0`. At the initial recheck local HEAD matched
+  this SHA and the accepted exact-SHA CI run `37469198527` was green. At that same recheck,
+  the preferred remote branch was `540bfaed700aa17476b9394587e3174489e18685` and the
+  assigned remote ref was absent. Do not merge/rebase to the preferred branch; publish
+  only to the assigned branch.
+- Schema v1/v2 remain frozen: database version 2, no v3, no schema/column/table changes,
+  no new migration, and no destructive fallback. The essential grant, exact document,
+  cleanup, phase, digest, and revision fields are present in the existing v2 schema.
+- Scope includes bounded deterministic checkpoint discovery, validation before document
+  provider access, typed classifications, exact persisted-grant resolution, reuse of
+  `resumeOrReconcile`, exact-identity cleanup, process-local checkpoint locks, bounded CAS
+  conflict reload/reclassification, explicit retry guidance, redacted reports, a real
+  production factory, Room close/discard/reopen reconstruction tests, and documentation.
+  No network transfer is restarted and no retry is scheduled.
+- No WorkManager/AlarmManager, services/FGS, startup initializers, notifications, wake locks,
+  networking/LAN/Nearby/Wi-Fi Direct, transfer UI, Media3, or WebShare. `CURRENT_MILESTONE`
+  stays 2 and `TRANSFER_ENGINE` stays gated.
+- At the time this handoff snapshot was written, the restoration changes were uncompiled
+  and no restoration CI run existed. The coordinator suite has 14 test methods and the Room
+  reconstruction suite has 9, plus a staging-key collision regression; source coverage is
+  not evidence they pass. `./gradlew test` cannot start because this sandbox has no Java,
+  `JAVA_HOME`, Gradle, or Kotlin compiler. Hosted CI on the exact pushed SHA is required.
+  Preserve the rescue bundles, publish focused commits only to the assigned branch, and
+  require exact local/remote SHA equality plus green exact-SHA CI before calling the group
+  complete. No PR or other branch.
+- `doc/transfer-restoration.md` records the runtime boundary. The older
+  `MORSEC_OFFLINE_PATCH/` and `MORSEC_ROOM_V2_RESCUE_2026-10-06/` paths named below were
+  absent in this checkout; do not overwrite or delete any rescue artifacts if they appear.
+  Two current rescue snapshots are outside Git at `/home/user/MORSEC_RESTORATION_RESCUE_2026-10-06/`
+  and `/home/user/MORSEC_RESTORATION_RESCUE_2026-10-06-v2/`; preserve them until the
+  assigned-branch commits are remote and exact-SHA CI is green.
+
+---
+
+## Historical authoritative state — 2026-10-06: Room v2 persistence group
 
 The accepted SAF destination implementation was the starting point at
 `43e575b1c9e2aea6b70bd03f0ac76ac642e14210`. The fixed Arena branch is
