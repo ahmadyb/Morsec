@@ -644,6 +644,6 @@ class TransferRestorationRoomReconstructionTest {
         assertTrue(stagingStore.lengthOrNull(id) == null)
         assertEquals(SafCommitCheckpointPhase.COMMITTED, journal.read(id)
             .let { (it as SafCommitJournalRead.Found).entry.checkpoint.phase })
-        stagingStore.delete(id)
+        assertTrue(stagingStore.delete(id))
     }
 }
