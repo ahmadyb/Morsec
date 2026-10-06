@@ -23,7 +23,7 @@ recorded first below.
 
 ---
 
-## Current authoritative state — 2026-10-06: callable SAF process-restoration group (in progress)
+## Current authoritative state — 2026-10-06: callable SAF process-restoration group (implementation complete; exact-SHA CI green; handoff synchronization in progress)
 
 This is the current, narrower authorization and supersedes older handoff statements that
 said a restoration coordinator was not approved. Work only on the explicitly invoked
@@ -79,15 +79,26 @@ Milestone 3 SAF process-restoration and safe-cleanup orchestration group, then s
   of the production-factory test: it expected one restoration call to finish cleanup, but
   the existing SAF protocol correctly returned `RETRY_PROVIDER_TEMPORARY_CLEANUP` after
   verifying/publishing the final and releasing staging. That provider-temporary identity is
-  deliberately settled by a later explicit `resumeOrReconcile` invocation; no automatic
-  retry occurs. The pending test correction now asserts the first report is delivered with
-  only provider-temporary cleanup pending, then explicitly invokes restore again and expects
-  committed/no pending cleanup while asserting there was no second create, write, or rename. It
-  disables only the optional elapsed-time cap for deterministic Robolectric integration;
-  all count/mutation/cleanup/observation bounds remain enabled. This worktree correction is
-  not yet committed or CI-verified. No green result is claimed. Keep rescue artifacts,
-  publish only to the assigned branch, and require exact local/tracking/server SHA equality
-  plus green exact-SHA CI before completion. No PR or other branch.
+  settled by a later explicit `resumeOrReconcile` invocation; no automatic retry occurs.
+- Fourth exact-SHA Android CI run
+  [37512842117](https://github.com/ahmadyb/Morsec/actions/runs/37512842117) on
+  `11706e45f2e88da34959a5d0b74f0787e8018711` is green. All 2,627 JVM tests passed (0 failed,
+  0 skipped, 147 reports): app 588, core-data 56, core-design 100, core-model 40,
+  core-storage 1,404, core-transfer 439. Milestone hygiene, reference/design/protocol
+  verifiers, KSP/schema comparison, lint, debug APK assembly, and instrumentation APK
+  assembly all passed. Lint had 0 errors/45 warnings across 7 reports; APKs were 19.00 MiB
+  (debug) and 1.10 MiB (instrumentation). CI regenerated and byte-compared the frozen Room
+  v2 schema (13 tables, 50,652 bytes); no schema or migration changed. The focused test fix
+  now asserts the first explicit invocation reports a delivered final with only provider-
+  temporary cleanup pending, then explicitly invokes restoration again to reconcile that
+  exact identity and finish committed without a second provider create, write, or rename.
+  Its Robolectric policy disables only the optional elapsed-time cap; every operation-count
+  bound remains active. The latest local, tracking, and server refs were equal to
+  `11706e45f2e88da34959a5d0b74f0787e8018711`, and the worktree was clean. Local Gradle
+  remains unavailable (no Java/JAVA_HOME). This document-only handoff synchronization will
+  be pushed to the assigned branch and will trigger another full exact-SHA workflow run;
+  consult the final delivery report for that run's head SHA and result. Preserve rescue
+  artifacts until the synchronization SHA is green. No PR or other branch.
 - `doc/transfer-restoration.md` records the runtime boundary. The older
   `MORSEC_OFFLINE_PATCH/` and `MORSEC_ROOM_V2_RESCUE_2026-10-06/` paths named below were
   absent in this checkout; do not overwrite or delete any rescue artifacts if they appear.
