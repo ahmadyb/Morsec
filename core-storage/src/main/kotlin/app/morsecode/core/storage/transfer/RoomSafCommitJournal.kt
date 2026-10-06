@@ -276,10 +276,12 @@ private object SafCommitEntityMapper {
         }
         val expectedDigest = digest(parent.expectedDigestHex)
         val verifiedDigest = digest(parent.verifiedDigestHex)
+        val failureCategory = parent.lastFailureCategory
+        val failureCode = parent.lastFailureCode
         val failure = when {
-            parent.lastFailureCategory == null && parent.lastFailureCode == null -> null
-            parent.lastFailureCategory != null && parent.lastFailureCode != null ->
-                SafCommitCheckpointFailure(parent.lastFailureCategory, parent.lastFailureCode)
+            failureCategory == null && failureCode == null -> null
+            failureCategory != null && failureCode != null ->
+                SafCommitCheckpointFailure(failureCategory, failureCode)
             else -> throw InvalidCheckpointRow()
         }
         if (historyRows.map { it.sequence } != historyRows.indices.toList() ||
@@ -321,8 +323,9 @@ private object SafCommitEntityMapper {
             val identity = requiredPair(row.documentUri, row.documentId)
             when (type) {
                 SafCleanupPending.STAGING -> {
-                    if (identity != null || row.stagingIdentity == null) throw InvalidCheckpointRow()
-                    SafPendingCleanupIdentity(type, stagingIdentity = PartialIdentity(row.stagingIdentity))
+                    val stagingIdentity = row.stagingIdentity
+                    if (identity != null || stagingIdentity == null) throw InvalidCheckpointRow()
+                    SafPendingCleanupIdentity(type, stagingIdentity = PartialIdentity(stagingIdentity))
                 }
                 SafCleanupPending.PROVIDER_TEMPORARY,
                 SafCleanupPending.BACKUP,

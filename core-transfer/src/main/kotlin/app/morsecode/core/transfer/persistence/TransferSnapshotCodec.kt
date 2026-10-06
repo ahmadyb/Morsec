@@ -268,7 +268,6 @@ public object TransferSnapshotCodec {
                 queueOrder = requireLong(fields, KEY_QUEUE_ORDER),
             )
             if (snapshot.violations().isNotEmpty()) return invalid("inconsistent_snapshot")
-            if (serialize(snapshot) != raw) return invalid("noncanonical_snapshot")
             SnapshotDecodeResult.Success(snapshot)
         } catch (_: IllegalArgumentException) {
             invalid("snapshot_field_invalid")

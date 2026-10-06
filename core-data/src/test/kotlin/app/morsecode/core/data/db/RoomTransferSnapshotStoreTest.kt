@@ -72,7 +72,7 @@ class RoomTransferSnapshotStoreTest {
         val store = RoomTransferSnapshotStore(firstDb, Dispatchers.IO)
         assertEquals(StoreResult.Ok, store.saveTransition(null, snapshot, emptyList()))
 
-        val stored = firstDb.transferSnapshotDao().find(snapshot.transferId.value)!!
+        val stored = runBlocking { firstDb.transferSnapshotDao().find(snapshot.transferId.value)!! }
         assertEquals(1, stored.isFolderArchive)
         assertEquals(1, stored.remotePaused)
         assertEquals("[redacted]", stored.failureDetail)

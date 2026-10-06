@@ -215,24 +215,27 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          node tools/verify/room-schema.mjs --require-v2
-          V1="core-data/schemas/app.morsecode.core.data.db.MorseDatabase/1.json"
-          V2="core-data/schemas/app.morsecode.core.data.db.MorseDatabase/2.json"
-          if ! cmp -s ci-logs/room-v1-committed.json "$V1"; then
-            echo "::error title=Room v1 schema::KSP changed the immutable committed 1.json"
-            exit 1
-          fi
-          if [ -f ci-logs/room-v2-committed.json ]; then
-            if ! cmp -s ci-logs/room-v2-committed.json "$V2"; then
-              echo "::error title=Room v2 schema::generated 2.json differs from the committed authentic export"
-              diff -u ci-logs/room-v2-committed.json "$V2" || true
+          mkdir -p ci-logs
+          {
+            node tools/verify/room-schema.mjs --require-v2
+            V1="core-data/schemas/app.morsecode.core.data.db.MorseDatabase/1.json"
+            V2="core-data/schemas/app.morsecode.core.data.db.MorseDatabase/2.json"
+            if ! cmp -s ci-logs/room-v1-committed.json "$V1"; then
+              echo "::error title=Room v1 schema::KSP changed the immutable committed 1.json"
               exit 1
             fi
-            echo "Generated 2.json matches the committed export byte-for-byte."
-          else
-            echo "::notice title=Room v2 schema bootstrap::KSP produced 2.json; it must be committed from this authentic export before the persistence group can complete."
-          fi
-          sha256sum "$V1" "$V2"
+            if [ -f ci-logs/room-v2-committed.json ]; then
+              if ! cmp -s ci-logs/room-v2-committed.json "$V2"; then
+                echo "::error title=Room v2 schema::generated 2.json differs from the committed authentic export"
+                diff -u ci-logs/room-v2-committed.json "$V2" || true
+                exit 1
+              fi
+              echo "Generated 2.json matches the committed export byte-for-byte."
+            else
+              echo "::notice title=Room v2 schema bootstrap::KSP produced 2.json; it must be committed from this authentic export before the persistence group can complete."
+            fi
+            sha256sum "$V1" "$V2"
+          } 2>&1 | tee ci-logs/26-room-schema-verify.log
 
       # The export is published twice on purpose: as an artifact, for humans and
       # for environments that can reach the blob hosts; and as check-run
@@ -254,7 +257,9 @@ jobs:
           import os
           import zlib
 
-          CHUNK = 12000
+          # GitHub check annotations truncate messages at 4 KiB; leave room for
+          # workflow-command escaping and keep every schema chunk lossless.
+          CHUNK = 3000
           MAX_CHUNKS = 8
 
           files = sorted(glob.glob("core-data/schemas/**/*.json", recursive=True))

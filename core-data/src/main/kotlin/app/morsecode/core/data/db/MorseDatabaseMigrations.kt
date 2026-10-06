@@ -5,8 +5,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 /** Additive Room v1 → v2 migration. Existing v1 tables and rows are untouched. */
 public val MORSE_MIGRATION_1_2: Migration = object : Migration(1, 2) {
-    override fun migrate(database: SupportSQLiteDatabase) {
-        database.execSQL(
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
             """
             CREATE TABLE `transfer_snapshots` (
                 `transfer_id` TEXT NOT NULL,
@@ -45,12 +45,12 @@ public val MORSE_MIGRATION_1_2: Migration = object : Migration(1, 2) {
             )
             """.trimIndent(),
         )
-        database.execSQL(
+        db.execSQL(
             "CREATE INDEX `index_transfer_snapshots_session_id_snapshot_state` " +
                 "ON `transfer_snapshots` (`session_id`, `snapshot_state`)",
         )
 
-        database.execSQL(
+        db.execSQL(
             """
             CREATE TABLE `transfer_partials` (
                 `commit_id` TEXT NOT NULL,
@@ -93,20 +93,20 @@ public val MORSE_MIGRATION_1_2: Migration = object : Migration(1, 2) {
             )
             """.trimIndent(),
         )
-        database.execSQL(
+        db.execSQL(
             "CREATE UNIQUE INDEX `index_transfer_partials_staging_identity` " +
                 "ON `transfer_partials` (`staging_identity`)",
         )
-        database.execSQL(
+        db.execSQL(
             "CREATE INDEX `index_transfer_partials_session_id_checkpoint_phase` " +
                 "ON `transfer_partials` (`session_id`, `checkpoint_phase`)",
         )
-        database.execSQL(
+        db.execSQL(
             "CREATE INDEX `index_transfer_partials_transfer_id` " +
                 "ON `transfer_partials` (`transfer_id`)",
         )
 
-        database.execSQL(
+        db.execSQL(
             """
             CREATE TABLE `saf_rename_history` (
                 `commit_id` TEXT NOT NULL,
@@ -122,12 +122,12 @@ public val MORSE_MIGRATION_1_2: Migration = object : Migration(1, 2) {
             )
             """.trimIndent(),
         )
-        database.execSQL(
+        db.execSQL(
             "CREATE UNIQUE INDEX `index_saf_rename_history_commit_id_phase` " +
                 "ON `saf_rename_history` (`commit_id`, `phase`)",
         )
 
-        database.execSQL(
+        db.execSQL(
             """
             CREATE TABLE `saf_pending_cleanup` (
                 `commit_id` TEXT NOT NULL,
@@ -141,11 +141,11 @@ public val MORSE_MIGRATION_1_2: Migration = object : Migration(1, 2) {
             )
             """.trimIndent(),
         )
-        database.execSQL(
+        db.execSQL(
             "CREATE UNIQUE INDEX `index_saf_pending_cleanup_commit_id_cleanup_type` " +
                 "ON `saf_pending_cleanup` (`commit_id`, `cleanup_type`)",
         )
-        database.execSQL(
+        db.execSQL(
             "CREATE UNIQUE INDEX `index_saf_pending_cleanup_commit_id_document_uri_document_id` " +
                 "ON `saf_pending_cleanup` (`commit_id`, `document_uri`, `document_id`)",
         )

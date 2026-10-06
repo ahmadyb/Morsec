@@ -165,13 +165,13 @@ class TransferSnapshotCodecTest {
         // prove is that a corrupt row on disk cannot smuggle one past the decoder.
         val row = rowWith("displayName", "a\\nb")
         assertInvalid(row)
-        assertTrue(error(row).detail.contains("displayName"))
+        assertEquals("snapshot_field_invalid", (error(row) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `an escaped backslash in a stored value is unescaped before it is validated`() {
         val row = rowWith("displayName", "back\\\\slash")
         assertInvalid(row)
-        assertTrue(error(row).detail.contains("displayName"))
+        assertEquals("snapshot_field_invalid", (error(row) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `a raw newline cannot carry a forged line past the duplicate key check`() {
@@ -181,13 +181,13 @@ class TransferSnapshotCodecTest {
         // instead of silently promoting a queued delivery to completed.
         val row = rowWith("displayName", "a\nstate=COMPLETED")
         assertInvalid(row)
-        assertTrue(error(row).detail.contains("duplicate snapshot key state"))
+        assertEquals("snapshot_duplicate_key", (error(row) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `a raw newline producing an unusable line is refused as keyless`() {
         val row = rowWith("displayName", "a\nstate")
         assertInvalid(row)
-        assertTrue(error(row).detail.contains("no key"))
+        assertEquals("snapshot_line_missing_key", (error(row) as TransferError.PersistedSnapshotInvalid).reason)
     }
 
     @Test fun `a value holding the key separator stays inside its own field`() {
@@ -197,7 +197,7 @@ class TransferSnapshotCodecTest {
                 assertEquals("the state must be untouched", TransferState.QUEUED, result.snapshot.state)
 
             is SnapshotDecodeResult.Invalid ->
-                assertTrue(result.error.detail.contains("displayName"))
+                assertEquals("snapshot_field_invalid", (result.error as TransferError.PersistedSnapshotInvalid).reason)
         }
     }
 

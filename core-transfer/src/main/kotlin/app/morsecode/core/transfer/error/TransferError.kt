@@ -68,7 +68,8 @@ public object ErrorDetailRedactor {
 
     private val ABSOLUTE_PATH = Regex("""(^|[\s=(])(/|\\)[^\s,;)]*""")
     private val WINDOWS_DRIVE = Regex("""\b[A-Za-z]:[\\/][^\s,;)]*""")
-    private val LONG_OPAQUE = Regex("""[A-Za-z0-9+/=._-]{40,}""")
+    // Stop before a key separator (`digest=`), but retain optional base64 padding.
+    private val LONG_OPAQUE = Regex("""(?<![A-Za-z0-9+/._-])[A-Za-z0-9+/._-]{40,}={0,2}""")
     private val CONTROL = Regex("""\p{Cntrl}""")
 
     /** Upper bound applied to every detail string before it is stored. */
@@ -408,28 +409,28 @@ public sealed class TransferError {
     public class PersistedSnapshotInvalid(reason: String) : TransferError() {
         public val reason: String = reason.takeIf { SAFE_PERSISTENCE_REASON.matches(it) } ?: "malformed_row"
         override val code: String = "persisted_snapshot_invalid"
-        override val detail: String = "stored transfer state is invalid ($reason)"
+        override val detail: String = "stored transfer state is invalid (${this.reason})"
         override val retryable: Boolean = false
         override val origin: ErrorOrigin = ErrorOrigin.LOCAL
         override val category: ErrorCategory = ErrorCategory.STORAGE
 
-        override fun equals(other: Any?): Boolean = other is PersistedSnapshotInvalid && reason == other.reason
-        override fun hashCode(): Int = reason.hashCode()
-        override fun toString(): String = "PersistedSnapshotInvalid(reason=$reason)"
+        override fun equals(other: Any?): Boolean = other is PersistedSnapshotInvalid && this.reason == other.reason
+        override fun hashCode(): Int = this.reason.hashCode()
+        override fun toString(): String = "PersistedSnapshotInvalid(reason=${this.reason})"
     }
 
     /** Compare-and-set rejected a stale or gapped persistence revision. */
     public class PersistenceConflict(reason: String) : TransferError() {
         public val reason: String = reason.takeIf { SAFE_PERSISTENCE_REASON.matches(it) } ?: "revision_conflict"
         override val code: String = "persistence_conflict"
-        override val detail: String = "transfer state changed concurrently ($reason)"
+        override val detail: String = "transfer state changed concurrently (${this.reason})"
         override val retryable: Boolean = true
         override val origin: ErrorOrigin = ErrorOrigin.LOCAL
         override val category: ErrorCategory = ErrorCategory.STORAGE
 
-        override fun equals(other: Any?): Boolean = other is PersistenceConflict && reason == other.reason
-        override fun hashCode(): Int = reason.hashCode()
-        override fun toString(): String = "PersistenceConflict(reason=$reason)"
+        override fun equals(other: Any?): Boolean = other is PersistenceConflict && this.reason == other.reason
+        override fun hashCode(): Int = this.reason.hashCode()
+        override fun toString(): String = "PersistenceConflict(reason=${this.reason})"
     }
 
     /** Local database failure with storage-full kept distinct from ordinary I/O. */
@@ -442,15 +443,15 @@ public sealed class TransferError {
         override val detail: String = if (storageFull) {
             "the device ran out of space while saving transfer state"
         } else {
-            "transfer state could not be $operation"
+            "transfer state could not be ${this.operation}"
         }
         override val retryable: Boolean = !storageFull
         override val origin: ErrorOrigin = ErrorOrigin.LOCAL
         override val category: ErrorCategory = ErrorCategory.STORAGE
 
         override fun equals(other: Any?): Boolean =
-            other is PersistenceFailure && operation == other.operation && storageFull == other.storageFull
-        override fun hashCode(): Int = 31 * operation.hashCode() + storageFull.hashCode()
+            other is PersistenceFailure && this.operation == other.operation && storageFull == other.storageFull
+        override fun hashCode(): Int = 31 * this.operation.hashCode() + storageFull.hashCode()
         override fun toString(): String = "PersistenceFailure(code=$code)"
     }
 

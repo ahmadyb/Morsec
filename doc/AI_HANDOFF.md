@@ -37,11 +37,13 @@ rewrite history, force-push, merge, or create a PR. Push directly to the fixed b
 
 Only the explicitly approved Room v2 persistence group is in scope. Worktree additions
 include the v2 transfer entities/migration/store, a production Room `SafCommitJournal`,
-validation/CAS cursor and tests, schema verifier/CI wiring, and documentation. This work
-is still **incomplete and unverified**: no Room v2 KSP export has been committed; no tests,
-Gradle build, lint, APK assembly, or exact-SHA CI for the persistence group has run. Do not
-claim otherwise. The sandbox currently has no `java`, `javac`, or `gradle`; hosted CI is
-needed unless a toolchain is made available.
+validation/CAS cursor and tests, schema verifier/CI wiring, and documentation. This work is still **incomplete and unverified**. First hosted run
+[37464589550](https://github.com/ahmadyb/Morsec/actions/runs/37464589550) on
+`afb3eae95329761b340d10a41723e88ae4f2e108` ran KSP and produced a 50,652-byte Room v2
+schema export, but JVM tests/compilation and strict schema verification failed. The
+annotation transport truncated the schema chunk, so it has not yet been committed. No
+passing Room tests, lint, APK assembly, or exact-SHA green CI is available. The sandbox
+currently has no `java`, `javac`, or `gradle`; hosted CI remains necessary.
 
 Before continuing, preserve all of the following:
 
@@ -66,15 +68,16 @@ file to compare byte-for-byte.
 Current code has explicit `Migration(1,2)`, Room schema version 2, bounded SAF parent/
 child tables with child-only ownership cascades, `RoomTransferSnapshotStore`, and
 `RoomSafCommitJournal`. Transfer snapshots use validated typed Room columns; no
-serialized snapshot object is persisted. The verifier and CI still need to be exercised;
-code/tests may contain compile/runtime issues. On 2026-10-06 the static checks were rerun:
-`refs.mjs` 31/31, `token-parity.mjs` 195/195, `transfer-limits.mjs` 21/21, and
-`room-schema.mjs --baseline-only` 7/7; Node syntax checks and `git diff --check` also passed.
-This does not replace compilation or tests. Next: execute `:core-transfer`, `:core-data`,
-and `:core-storage` tests (then full `./gradlew test`), confirm migration/reopen/typed-
-validation/revision behavior, generate and verify schema v2, run lint and assemble both APKs,
-update this handoff with exact evidence, push the final changes to the active Arena branch,
-and obtain green exact-SHA CI.
+serialized snapshot object is persisted. The first hosted run found seven failing
+`core-transfer` tests, test/source compilation errors in the Room adapter and SAF journal,
+and a strict v2-schema verification failure. The current worktree contains targeted fixes:
+restore compatible codec decoding while retaining safe reason tokens; bound schema annotation
+chunks below GitHub's 4-KiB limit and tee strict-schema diagnostics; run the Room DAO test
+query inside `runBlocking`; and use stable local vals for cross-module nullable properties.
+These fixes are not yet verified by a rerun. Static checks passed before these latest edits;
+rerun them, then push and check the exact-SHA workflow. Only after the next run should the
+remaining migration/reopen/typed-validation/revision behavior, lint and APK results be
+assessed; update this handoff with exact evidence and continue until exact-SHA green CI.
 
 `CURRENT_MILESTONE` must stay 2 and `TRANSFER_ENGINE` must remain gated. Do not start a
 restoration coordinator, cleanup worker, LAN/Nearby/Wi-Fi Direct, transfer networking,
