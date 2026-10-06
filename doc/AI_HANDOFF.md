@@ -25,31 +25,36 @@ recorded first below.
 
 ## Current authoritative state — 2026-10-06: Room v2 persistence group
 
-The accepted SAF destination implementation is the starting point at
+The accepted SAF destination implementation was the starting point at
 `43e575b1c9e2aea6b70bd03f0ac76ac642e14210`. The fixed Arena branch is
-`arena/01a10ca1-morsec`; its fetched `origin/arena/01a10ca1-morsec` ref was verified
-at that SHA. The prior local HEAD
-`7fab62ffd6387855bd3fb80c03683dd93c496a36` was its ancestor; after verifying the
-rescue checksums, the branch ref was advanced with a non-destructive `git reset --mixed`,
-which preserved the Room v2 worktree changes.
-The current HEAD is the accepted SHA. Do not switch branches,
-rewrite history, force-push, merge, or create a PR. Push directly to the fixed branch.
+`arena/01a10ca1-morsec`. The pre-existing local HEAD
+`7fab62ffd6387855bd3fb80c03683dd93c496a36` was an ancestor; after verifying the
+rescue checksums, the branch was reconciled with a non-destructive `git reset --mixed`,
+which preserved the Room v2 worktree changes. The latest pushed Room v2 commit is
+`420a56e15fd91ca856555da7e357124cf9b5774f` (`Commit authentic Room v2 schema and
+persistence fixes`). Current tracked worktree edits are the focused migration-test SQL
+placeholder correction and this handoff synchronization. Do not switch branches, rewrite history,
+force-push, merge, or create a PR. Push directly to the fixed branch.
 
-Only the explicitly approved Room v2 persistence group is in scope. Worktree additions
-include the v2 transfer entities/migration/store, a production Room `SafCommitJournal`,
-validation/CAS cursor and tests, schema verifier/CI wiring, and documentation. This work is still **incomplete and unverified**. Two hosted runs have been attempted:
+Only the explicitly approved Room v2 persistence group is in scope. The implementation
+includes the v2 transfer entities/migration/store, a production Room `SafCommitJournal`,
+validation/CAS cursor and tests, schema verifier/CI wiring, and documentation. Three
+hosted runs have been attempted. Run
 [37464589550](https://github.com/ahmadyb/Morsec/actions/runs/37464589550) on
-`afb3eae95329761b340d10a41723e88ae4f2e108` found compile/test failures; the next run,
+`afb3eae95329761b340d10a41723e88ae4f2e108` found compile/test failures. Run
 [37465900006](https://github.com/ahmadyb/Morsec/actions/runs/37465900006) on
-`cc149dfc4dd697967a9687348a1120e3f0695b80`, compiled and assembled both APKs but failed
-12 tests, lint with one API-level error, and strict schema verification. That run generated
-the authentic Room/KSP `2.json`; its 50,652 bytes were reconstructed byte-for-byte from
-the compressed check annotations. The v1 hash is unchanged, and the strict local schema
-verifier now passes 11/11 after correcting its Room foreign-key JSON field names. The
-export is present in the worktree but is not yet committed. Targeted fixes for the test,
-lint, and recovery failures are in the current worktree and still need a CI rerun. There is
-no exact-SHA green CI or zero-error lint evidence. The sandbox currently has no `java`,
-`javac`, or `gradle`; hosted CI remains necessary.
+`cc149dfc4dd697967a9687348a1120e3f0695b80` compiled and assembled both APKs but failed
+12 tests, one API-level lint check, and strict schema verification. It generated the
+authentic Room/KSP `2.json`; its 50,652 bytes were reconstructed byte-for-byte from CI
+check annotations. Run [37467189323](https://github.com/ahmadyb/Morsec/actions/runs/37467189323)
+on `420a56e15fd91ca856555da7e357124cf9b5774f` completed red solely because the same
+migration test failed in the Debug and Release unit-test variants (2,579 tests total, 2
+failures, 0 skipped). The emitted SQL had doubled backticks around `transfer_sessions` in
+an index `ON` clause. KSP schema generation and committed-schema comparison passed, lint
+passed with 0 errors, and both APKs assembled (debug 18.94 MiB; instrumentation 1.10 MiB).
+A focused replacement fix is now in the worktree, not yet CI-verified. There is not yet a
+green exact-SHA run for the current fix. The sandbox has no `java` or installed Gradle;
+hosted CI remains necessary.
 
 Before continuing, preserve all of the following:
 
@@ -64,31 +69,35 @@ Before continuing, preserve all of the following:
 
 The v1 schema remains at
 `core-data/schemas/app.morsecode.core.data.db.MorseDatabase/1.json` (29,767 bytes,
-SHA-256 `b0bca4243d2f0ba4631e3338e611d3bcaff8ba456de83b79ea0106ae187ac488`). It has not
-been edited. `tools/verify/room-schema.mjs --baseline-only` passes; strict mode correctly
-fails because authentic `2.json` is not yet present. Do not hand-author or regenerate over
-`1.json`. Generate `2.json` only with Room/KSP in CI (cache disabled), retrieve the KSP
-bytes from CI annotations/artifacts, inspect and commit them, then require CI's regenerated
-file to compare byte-for-byte.
+SHA-256 `b0bca4243d2f0ba4631e3338e611d3bcaff8ba456de83b79ea0106ae187ac488`); it is
+unchanged. The authentic KSP-generated v2 export is committed at
+`core-data/schemas/app.morsecode.core.data.db.MorseDatabase/2.json` (50,652 bytes,
+SHA-256 `7e6acfd9c03b0214dcaddc2f5d1ceb175588f5cfcf93cca5437617be24b2b074`). The strict
+local verifier passes 11/11, and run 37467189323 regenerated and compared the committed
+export successfully. Never hand-author v2 or regenerate over v1; keep CI's byte-for-byte
+KSP comparison.
 
 Current code has explicit `Migration(1,2)`, Room schema version 2, bounded SAF parent/
 child tables with child-only ownership cascades, `RoomTransferSnapshotStore`, and
 `RoomSafCommitJournal`. Transfer snapshots use validated typed Room columns; no
-serialized snapshot object is persisted. Run 1 found seven `core-transfer` test failures
-and compilation errors; run 2 fixed compilation and ran 2,579 tests, with 12 failures
-(two module/variant reports for six failing test cases): Room migration test table-name
-placeholder quoting; a Room journal fixture that tried to overwrite its own deliberately
-corrupted parent; four recovery cases whose invalid checkpoints are now rejected before
-provider access; and same-identity rename evidence where a stored identity may exist
-without a returned URI. The v2 verifier failure was a verifier bug (Room exports FK
-columns as `columns`/`referencedColumns`); after correction the authentic local schema
-passes 11/11. Run 2 also found one lint NewApi error from `ThreadLocal.withInitial` on
-minSdk 23; this is replaced with the API-23-safe constructor. Targeted fixes for all these
-findings are in the current worktree and await CI. Its debug and instrumentation APKs did
-assemble (18.94 MiB and 1.10 MiB), but the run was red and does not satisfy completion.
-Static checks passed before the latest fixes; rerun them, then push and check the exact-SHA
-workflow. Continue until tests, strict schema compare, zero-error lint, both APKs, migration
-and reopen coverage all pass on a green exact SHA.
+serialized snapshot object is persisted. Run 1 found compilation errors and seven
+`core-transfer` failures. Run 2 fixed compilation but recorded 12 test failures (six
+distinct cases duplicated across variants): migration fixture quoting; a journal fixture
+that overwrote its deliberately corrupted parent; four recovery expectations that did not
+account for typed malformed-checkpoint rejection before provider access; and same-identity
+rename evidence. Run 3 confirmed those fixes: the only two reported failures were the same
+migration test in Debug/Release. Its legacy schema bootstrap substitutes the Room table
+placeholder into index SQL; the template already includes SQL backticks, so the extra
+backticks introduced by the fixture caused malformed SQL. The worktree fix now substitutes
+the bare entity table name for index SQL as it already does for table-creation SQL. CI must
+still execute that fix; no local Kotlin/Android test run is possible without Java/Gradle.
+
+Local checks after this correction: reference verifier 31/31, token parity 195/195,
+protocol limits 21/21, strict Room schema 11/11, Node syntax check and `git diff --check`
+pass; v1 hash remains unchanged. Run 3 had zero lint errors (45 warnings) and assembled
+the debug and instrumentation APKs (18.94 MiB and 1.10 MiB). Continue until the migration
+and reopen tests, all JVM tests, strict schema compare, lint, and both APKs pass on a green
+exact-SHA workflow.
 
 `CURRENT_MILESTONE` must stay 2 and `TRANSFER_ENGINE` must remain gated. Do not start a
 restoration coordinator, cleanup worker, LAN/Nearby/Wi-Fi Direct, transfer networking,

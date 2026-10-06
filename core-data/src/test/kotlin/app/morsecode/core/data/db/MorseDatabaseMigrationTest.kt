@@ -228,7 +228,7 @@ class MorseDatabaseMigrationTest {
         for (entity in schema.entities) {
             legacy.execSQL(entity.createSql.replace(roomTableNameToken, entity.tableName))
             for (indexSql in entity.indexSql) {
-                legacy.execSQL(indexSql.replace(roomTableNameToken, "`${entity.tableName}`"))
+                legacy.execSQL(indexSql.replace(roomTableNameToken, entity.tableName))
             }
         }
         schema.setupQueries.forEach(legacy::execSQL)
