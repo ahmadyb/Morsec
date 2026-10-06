@@ -178,7 +178,10 @@ public data class SafGrantEntity(
     @ColumnInfo(name = "display_name") public val displayName: String,
     @ColumnInfo(name = "granted_at") public val grantedEpochMillis: Long = 0L,
     @ColumnInfo(name = "read_write") public val readWrite: Boolean = true,
-)
+) {
+    override fun toString(): String =
+        "SafGrantEntity(readWrite=$readWrite, [grant identity redacted])"
+}
 
 /** In-flight resumable upload/download offsets owned by the WebShare server. */
 @Entity(tableName = "web_transfers", indices = [Index("upload_id")])

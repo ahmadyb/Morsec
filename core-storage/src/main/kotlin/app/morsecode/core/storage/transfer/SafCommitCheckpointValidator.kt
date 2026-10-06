@@ -3,11 +3,13 @@ package app.morsecode.core.storage.transfer
 import androidx.core.net.toUri
 import app.morsecode.core.transfer.ProtocolLimits
 
+internal const val MAX_SAF_COMMIT_ID_LENGTH_CHARS: Int = 128
+
 /** Strict, provider-free validation for rows loaded from the SAF journal. */
 public object SafCommitCheckpointValidator {
 
     private const val MAX_IDENTITY_TEXT_BYTES = 4_096
-    private val COMMIT_ID_PATTERN = Regex("[A-Za-z0-9._:@-]{1,128}")
+    private val COMMIT_ID_PATTERN = Regex("[A-Za-z0-9._:@-]{1,$MAX_SAF_COMMIT_ID_LENGTH_CHARS}")
 
     /** Rejects an unbounded/ill-formed lookup key before it is bound into a Room query. */
     public fun validateCommitId(commitId: PartialIdentity): TransferStorageError? =

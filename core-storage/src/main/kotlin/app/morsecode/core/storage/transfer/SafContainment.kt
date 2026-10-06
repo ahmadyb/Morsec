@@ -459,7 +459,9 @@ public data class SafTreeGrant(
      * comparison can be made correctly, or skipped when we do not know it.
      */
     public val rootId: String? = null,
-)
+) {
+    override fun toString(): String = "SafTreeGrant(writable=$writable, [grant identity redacted])"
+}
 
 // ---------------------------------------------------------------------------
 // Layer A + the three layers together

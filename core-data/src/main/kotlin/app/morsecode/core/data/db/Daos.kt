@@ -388,6 +388,15 @@ public interface SafGrantDao {
 
     @Query("SELECT COUNT(*) FROM saf_grants")
     public suspend fun count(): Int
+
+    @Query("SELECT * FROM saf_grants WHERE id = :id")
+    public suspend fun findById(id: Long): SafGrantEntity?
+
+    @Query("SELECT * FROM saf_grants WHERE tree_uri = :treeUri")
+    public suspend fun findByTreeUri(treeUri: String): SafGrantEntity?
+
+    @Query("SELECT * FROM saf_grants WHERE id = :id AND tree_uri = :treeUri")
+    public suspend fun findExact(id: Long, treeUri: String): SafGrantEntity?
 }
 
 @Dao
