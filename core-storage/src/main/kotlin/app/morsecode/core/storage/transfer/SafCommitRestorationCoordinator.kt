@@ -1,6 +1,5 @@
 package app.morsecode.core.storage.transfer
 
-import app.morsecode.core.transfer.identity.PartialIdentity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Job
@@ -736,11 +735,10 @@ public class SafCommitRestorationCoordinator internal constructor(
             is SafCommitRecoveryOutcome.Failed,
             -> {
                 val classified = classifyError(error)
-                disposition = when {
-                    error == TransferStorageError.Cancelled -> SafCommitRestorationDisposition.CANCELLED
-                    classified.first != null -> classified.first
-                    pending.isNotEmpty() -> SafCommitRestorationDisposition.CLEANUP_PENDING
-                    else -> SafCommitRestorationDisposition.RECONCILIATION_REQUIRED
+                disposition = classified.first ?: if (pending.isNotEmpty()) {
+                    SafCommitRestorationDisposition.CLEANUP_PENDING
+                } else {
+                    SafCommitRestorationDisposition.RECONCILIATION_REQUIRED
                 }
                 trigger = classified.second
             }
