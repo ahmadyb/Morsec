@@ -48,14 +48,22 @@ Milestone 3 SAF process-restoration and safe-cleanup orchestration group, then s
 - No WorkManager/AlarmManager, services/FGS, startup initializers, notifications, wake locks,
   networking/LAN/Nearby/Wi-Fi Direct, transfer UI, Media3, or WebShare. `CURRENT_MILESTONE`
   stays 2 and `TRANSFER_ENGINE` stays gated.
-- At the time this handoff snapshot was written, the restoration changes were uncompiled
-  and no restoration CI run existed. The coordinator suite has 14 test methods and the Room
-  reconstruction suite has 9, plus a staging-key collision regression; source coverage is
-  not evidence they pass. `./gradlew test` cannot start because this sandbox has no Java,
-  `JAVA_HOME`, Gradle, or Kotlin compiler. Hosted CI on the exact pushed SHA is required.
-  Preserve the rescue bundles, publish focused commits only to the assigned branch, and
-  require exact local/remote SHA equality plus green exact-SHA CI before calling the group
-  complete. No PR or other branch.
+- The coordinator suite has 14 test methods and the Room reconstruction suite has 9, plus
+  a staging-key collision regression. Local `./gradlew test` cannot start because this
+  sandbox has no Java, `JAVA_HOME`, Gradle, or Kotlin compiler. First exact-SHA Android CI
+  run [37509054977](https://github.com/ahmadyb/Morsec/actions/runs/37509054977) on
+  `5cb815499991253fd2e0d209896fa1f1c92b9d05` compiled, passed milestone hygiene, all
+  reference/design/protocol verifiers and KSP/schema comparison, produced 0 lint errors/45
+  accepted warnings across 7 reports, and assembled a 19.00 MiB debug APK plus 1.10 MiB
+  instrumentation APK. It reported 2,611 JVM tests (app 588, core-data 56, core-design 100,
+  core-model 40, core-storage 1,388, core-transfer 439); only the same test-class
+  initialization error failed in both Debug and Release:
+  `production factory explicitly restores app private staging through real DocumentsContract`
+  ended with a Boolean expression, but JUnit requires `void`. The focused correction is
+  committed locally as `992048d` (`assertTrue(stagingStore.delete(id))`) and awaits push plus
+  exact-SHA rerun. No test pass is claimed until that run is green. Preserve rescue bundles,
+  publish only to the assigned branch, and require exact local/remote SHA equality plus green
+  exact-SHA CI before completion. No PR or other branch.
 - `doc/transfer-restoration.md` records the runtime boundary. The older
   `MORSEC_OFFLINE_PATCH/` and `MORSEC_ROOM_V2_RESCUE_2026-10-06/` paths named below were
   absent in this checkout; do not overwrite or delete any rescue artifacts if they appear.
