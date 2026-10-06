@@ -755,7 +755,10 @@ public class SafCommitCoordinator private constructor(
      * [grant] is the approved tree grant; its persisted permission is re-read
      * before each provider operation rather than trusted from this snapshot.
      */
-    public fun commit(record: SafCommitRecord, grant: SafTreeGrant): SafCommitOutcome {
+    public fun commit(record: SafCommitRecord, grant: SafTreeGrant): SafCommitOutcome =
+        SafCommitProcessLocks.withCommitLock(record.partialId) { commitLocked(record, grant) }
+
+    private fun commitLocked(record: SafCommitRecord, grant: SafTreeGrant): SafCommitOutcome {
         if (record.grantId != null && record.grantId != grant.grantId) {
             return fail(record, TransferStorageError.StateConflict("grant_context_mismatch"))
         }
@@ -1014,6 +1017,13 @@ public class SafCommitCoordinator private constructor(
      * reconciliation rather than being treated as success.
      */
     public fun resumeOrReconcile(
+        checkpoint: SafCommitCheckpoint,
+        grant: SafTreeGrant,
+    ): SafCommitRecoveryOutcome = SafCommitProcessLocks.withCommitLock(checkpoint.commitId) {
+        resumeOrReconcileLocked(checkpoint, grant)
+    }
+
+    private fun resumeOrReconcileLocked(
         checkpoint: SafCommitCheckpoint,
         grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
@@ -3232,6 +3242,13 @@ public class SafCommitCoordinator private constructor(
     public fun retryCancelledTemporaryCleanup(
         checkpoint: SafCommitCheckpoint,
         grant: SafTreeGrant,
+    ): SafCommitRecoveryOutcome = SafCommitProcessLocks.withCommitLock(checkpoint.commitId) {
+        retryCancelledTemporaryCleanupLocked(checkpoint, grant)
+    }
+
+    private fun retryCancelledTemporaryCleanupLocked(
+        checkpoint: SafCommitCheckpoint,
+        grant: SafTreeGrant,
     ): SafCommitRecoveryOutcome {
         SafCommitCheckpointValidator.validate(checkpoint)?.let { error ->
             return SafCommitRecoveryOutcome.Failed(checkpoint, error)
@@ -3371,6 +3388,13 @@ public class SafCommitCoordinator private constructor(
     }
 
     public fun retryPendingCleanup(
+        record: SafCommitRecord,
+        grant: SafTreeGrant,
+    ): SafCommitOutcome = SafCommitProcessLocks.withCommitLock(record.partialId) {
+        retryPendingCleanupLocked(record, grant)
+    }
+
+    private fun retryPendingCleanupLocked(
         record: SafCommitRecord,
         grant: SafTreeGrant,
     ): SafCommitOutcome {
@@ -6468,7 +6492,19 @@ public class SafCommitCoordinator private constructor(
 
     /** Keep journal I/O and storage-full distinct; compare-and-set conflicts retain phase context. */
     private fun journalWriteFailure(fallback: TransferStorageError.StateConflict): TransferStorageError =
-        journalCursor.consumeWriteFailure()?.takeUnless { it is TransferStorageError.StateConflict } ?: fallback
+        when (val failure = journalCursor.consumeWriteFailure()) {
+            null -> fallback
+            is TransferStorageError.StateConflict -> when (failure.reason) {
+                // Preserve the journal's typed CAS result so orchestration can reload and
+                // reclassify after another process advanced the checkpoint.
+                "stale_journal_revision",
+                "journal_revision_invalid",
+                "journal_revision_exhausted",
+                -> failure
+                else -> fallback
+            }
+            else -> failure
+        }
 
     private fun unresolvedRenamePhaseAfterSaveFailure(
         record: SafCommitRecord,

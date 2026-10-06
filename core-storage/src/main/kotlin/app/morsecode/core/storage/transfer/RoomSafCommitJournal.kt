@@ -4,6 +4,7 @@ import app.morsecode.core.data.db.MorseDatabase
 import app.morsecode.core.data.db.SafPendingCleanupEntity
 import app.morsecode.core.data.db.SafRenameHistoryEntity
 import app.morsecode.core.data.db.TransferPartialEntity
+import app.morsecode.core.model.TransferState
 import android.database.sqlite.SQLiteConstraintException
 import android.database.sqlite.SQLiteFullException
 import androidx.room.withTransaction
@@ -19,7 +20,7 @@ import kotlinx.coroutines.runBlocking
 internal class RoomSafCommitJournal(
     private val database: MorseDatabase,
     private val ioDispatcher: CoroutineDispatcher,
-) : SafCommitJournal {
+) : SafCommitJournal, SafCommitCheckpointDiscovery {
 
     override fun read(commitId: PartialIdentity): SafCommitJournalRead {
         SafCommitCheckpointValidator.validateCommitId(commitId)?.let { error ->
@@ -50,6 +51,63 @@ internal class RoomSafCommitJournal(
                 if (error != null) SafCommitJournalRead.Rejected(error) else SafCommitJournalRead.Found(entry)
             }
         }
+    }
+
+    override fun restorationPage(
+        after: SafCommitDiscoveryCursor?,
+        limit: Int,
+    ): SafCommitDiscoveryPageResult {
+        if (limit !in 1..MAX_DISCOVERY_PAGE_SIZE) {
+            return SafCommitDiscoveryPageResult.Failed(
+                TransferStorageError.StateConflict("restoration_page_limit"),
+            )
+        }
+        return callDatabase(
+            onFailure = { error -> SafCommitDiscoveryPageResult.Failed(error) },
+        ) {
+            database.withTransaction {
+                val rows = database.transferPartialDao().restorationPage(
+                    afterCommitId = after?.afterCommitId,
+                    limit = limit + 1,
+                )
+                val hasMore = rows.size > limit
+                val selected = rows.take(limit)
+                val candidates = selected.map { row -> candidateForRow(row) }
+                SafCommitDiscoveryPageResult.Page(
+                    SafCommitDiscoveryPage(
+                        candidates = candidates,
+                        hasMore = hasMore,
+                        nextCursor = candidates.lastOrNull()?.cursorAfter,
+                    ),
+                )
+            }
+        }
+    }
+
+    override fun readForRestoration(commitId: PartialIdentity): SafCommitDiscoveryReadResult {
+        SafCommitCheckpointValidator.validateCommitId(commitId)?.let {
+            return SafCommitDiscoveryReadResult.Failed(it)
+        }
+        val entry = when (val result = read(commitId)) {
+            SafCommitJournalRead.Missing -> return SafCommitDiscoveryReadResult.Missing
+            is SafCommitJournalRead.Rejected -> return SafCommitDiscoveryReadResult.Failed(result.error)
+            is SafCommitJournalRead.Found -> result.entry
+        }
+        val activity = callDatabase(
+            onFailure = { SafCommitTransferActivity.UNAVAILABLE },
+        ) {
+            database.withTransaction { readTransferActivity(entry.checkpoint) }
+        }
+        return SafCommitDiscoveryReadResult.Found(
+            SafCommitDiscoveryCandidate(
+                commitId = commitId,
+                checkpoint = entry.checkpoint,
+                revision = entry.revision,
+                error = null,
+                transferActivity = activity,
+                cursorAfter = SafCommitDiscoveryCursor(commitId.value),
+            ),
+        )
     }
 
     override fun write(
@@ -130,8 +188,91 @@ internal class RoomSafCommitJournal(
         }
     }
 
+    private suspend fun candidateForRow(parent: TransferPartialEntity): SafCommitDiscoveryCandidate {
+        val cursor = SafCommitDiscoveryCursor(parent.commitId)
+        val commitId = try {
+            PartialIdentity(parent.commitId)
+        } catch (_: IllegalArgumentException) {
+            return rejectedCandidate(cursor, null, TransferStorageError.StateConflict("checkpoint_malformed"))
+        }
+        SafCommitCheckpointValidator.validateCommitId(commitId)?.let { error ->
+            return rejectedCandidate(cursor, commitId, error)
+        }
+        val history: List<SafRenameHistoryEntity>
+        val cleanup: List<SafPendingCleanupEntity>
+        try {
+            history = database.safRenameHistoryDao().forCommit(parent.commitId)
+            cleanup = database.safPendingCleanupDao().forCommit(parent.commitId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return rejectedCandidate(cursor, commitId, TransferStorageError.Io("journal_read"))
+        }
+        val entry = try {
+            SafCommitEntityMapper.decode(parent, history, cleanup)
+        } catch (_: IllegalArgumentException) {
+            return rejectedCandidate(cursor, commitId, TransferStorageError.StateConflict("checkpoint_malformed"))
+        }
+        SafCommitCheckpointValidator.validate(entry.checkpoint)?.let { error ->
+            return rejectedCandidate(cursor, commitId, error)
+        }
+        return SafCommitDiscoveryCandidate(
+            commitId = commitId,
+            checkpoint = entry.checkpoint,
+            revision = entry.revision,
+            error = null,
+            transferActivity = readTransferActivity(entry.checkpoint),
+            cursorAfter = cursor,
+        )
+    }
+
+    private suspend fun readTransferActivity(
+        checkpoint: SafCommitCheckpoint,
+    ): SafCommitTransferActivity {
+        val row = try {
+            database.transferSnapshotDao().restorationActivity(checkpoint.transferId.value)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return SafCommitTransferActivity.UNAVAILABLE
+        } ?: return SafCommitTransferActivity.NOT_RECORDED
+        if (row.transferId != checkpoint.transferId.value || row.sessionId != checkpoint.sessionId.value) {
+            return SafCommitTransferActivity.MALFORMED
+        }
+        val state = TransferState.entries.firstOrNull { it.id == row.snapshotState }
+            ?: return SafCommitTransferActivity.MALFORMED
+        return if (state.isBusy || state.isPending || state.isPaused ||
+            state == TransferState.FAILED_RETRYABLE
+        ) {
+            SafCommitTransferActivity.ACTIVE_OR_RESUMABLE
+        } else {
+            SafCommitTransferActivity.QUIESCENT
+        }
+    }
+
+    private fun rejectedCandidate(
+        cursor: SafCommitDiscoveryCursor,
+        commitId: PartialIdentity?,
+        error: TransferStorageError,
+    ): SafCommitDiscoveryCandidate = SafCommitDiscoveryCandidate(
+        commitId = commitId,
+        checkpoint = null,
+        revision = null,
+        error = error,
+        transferActivity = if (error is TransferStorageError.Io) {
+            SafCommitTransferActivity.UNAVAILABLE
+        } else {
+            SafCommitTransferActivity.MALFORMED
+        },
+        cursorAfter = cursor,
+    )
+
     private fun rejected(reason: String): SafCommitJournalRead.Rejected =
         SafCommitJournalRead.Rejected(TransferStorageError.StateConflict(reason))
+
+    private companion object {
+        const val MAX_DISCOVERY_PAGE_SIZE: Int = 100
+    }
 
     private fun <T> callDatabase(
         onFailure: (TransferStorageError) -> T,

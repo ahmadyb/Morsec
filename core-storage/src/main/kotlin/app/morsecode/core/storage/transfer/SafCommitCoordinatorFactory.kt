@@ -54,4 +54,20 @@ public object SafCommitCoordinatorFactory {
         copyBufferBytes = copyBufferBytes,
         isCancelled = isCancelled,
     )
+
+    /** Production-only budgeted path used by explicit restoration invocations. */
+    internal fun createForRestoration(
+        resolver: ContentResolver,
+        staging: SafStaging,
+        journal: SafCommitJournal,
+        budget: SafCommitExecutionBudget,
+        isCancelled: () -> Boolean,
+    ): SafCommitCoordinator = SafCommitCoordinator(
+        gateway = BudgetedSafDocumentGateway(DocumentsContractSafGateway(resolver), budget),
+        staging = BudgetedSafStaging(staging, budget),
+        journal = journal,
+        allowVisibleFinalCopy = false,
+        copyBufferBytes = SafCopyStreamer.COPY_BUFFER_BYTES,
+        isCancelled = isCancelled,
+    )
 }

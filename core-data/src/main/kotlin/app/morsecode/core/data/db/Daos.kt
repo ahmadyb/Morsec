@@ -377,6 +377,10 @@ public interface SafGrantDao {
     @Query("SELECT * FROM saf_grants ORDER BY granted_at DESC")
     public fun observe(): Flow<List<SafGrantEntity>>
 
+    /** Exact persisted row lookup; restoration never scans or substitutes another grant. */
+    @Query("SELECT * FROM saf_grants WHERE id = :id LIMIT 1")
+    public suspend fun find(id: Long): SafGrantEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     public suspend fun insert(grant: SafGrantEntity): Long
 

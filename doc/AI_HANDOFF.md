@@ -1411,3 +1411,25 @@ Only after I explicitly approve Milestone 1 may you begin Milestone 2.
 
 Begin by verifying the repository and branch. Then report what you found
 and execute only the CI-validation task described above.
+
+---
+
+## Session state — 2026-10-06: Milestone 3 callable SAF restoration orchestration
+
+This newest section supersedes older historical statements above that the restoration coordinator was unstarted or prohibited. The user explicitly authorized this restoration-orchestration group only; all protected exclusions remain in force. Work is on `arena/01a10ca1-morsec`, starting from the accepted commit `b758135a2b820a11c78e3df46967d146aacae2f0`.
+
+### Implemented in the worktree
+
+- Added `SafCommitCheckpointDiscovery` and a bounded, binary-keyset Room discovery page, using the existing v2 checkpoint tables. Fully committed rows are omitted only when cleanup is empty and staging release is observed; interrupted/nonterminal/reconciliation and cleanup-pending rows remain discoverable.
+- Added provider-free projection of transfer activity and conservative classification of active, quiescent, malformed, and unavailable rows.
+- Added exact persisted SAF grant resolution via the stored numeric row ID, exact stored tree identity, and exact matching live persisted URI permission. No broader grant, prompt, or provider fallback is used.
+- Added an inert-at-construction, explicitly callable `SafCommitRestorationCoordinator`, bounded policy/cancellation/retry reporting, redacted per-checkpoint results, a recovery-factory seam, and production DI wiring through the existing SAF recovery state machine. Nothing invokes restoration automatically.
+- Added bounded budget adapters and a reference-counted process-local per-commit lock shared by commit, recovery, and cleanup entrypoints. Journal CAS conflicts are retained as typed conflicts and cause the restorer to reload/reclassify rather than replay stale work.
+- Added resolver, Room paging/activity, orchestration, budget, cancellation/unprocessed-work, cleanup identity/replacement, revision-conflict, lock, and Room close/reopen reconstruction tests. Existing SAF recovery tests cover lower-level cleanup and crash boundaries.
+- Added `doc/milestone-3-restoration-orchestration.md` as the component guide and limitation record.
+
+### Persistence and feature-gate protections
+
+Room version remains 2. No entity, migration, table, column, or accepted schema export is changed; schemas `1.json` and `2.json` remain immutable. No v3 or destructive fallback was added. `CURRENT_MILESTONE` remains 2 and `TRANSFER_ENGINE` stays gated. No worker/service/receiver/notification, startup hook, network transport, transfer UI, Media3, or WebShare integration was added. Process/database reconstruction evidence is limited to the explicit tested database close/reopen sequence; no OS process-death test is claimed.
+
+The rescue artifacts `MORSEC_OFFLINE_PATCH/` and `MORSEC_ROOM_V2_RESCUE_2026-10-06/` remain untouched. `git diff --check` passed at the last inspection. The sandbox has no Java runtime, so no local Gradle compilation or test run is available. Hosted CI, exact-SHA green status, lint, APKs, and final evidence are **pending**; do not describe the group as complete until those checks pass with zero failures/skips, zero lint errors, both APKs built, and local/remote SHA equality.
