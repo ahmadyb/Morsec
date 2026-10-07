@@ -55,7 +55,7 @@ kotlin {
     }
 }
 
-val secureRuntimeConfiguration = configurations.getByName("debugRuntimeClasspath")
+val secureConfigurations = configurations
 val secureLicenseDirectory = project.file("../app/src/main/assets/third_party_licenses")
 val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGovernance") {
     group = "verification"
@@ -63,7 +63,8 @@ val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGov
     doLast {
         val expectedConscryptVersion = "2.7.0"
         val expectedBouncyCastleVersion = "1.86"
-        val resolved = secureRuntimeConfiguration.resolvedConfiguration.resolvedArtifacts
+        val resolved = secureConfigurations.getByName("debugRuntimeClasspath")
+            .resolvedConfiguration.resolvedArtifacts
         val secureArtifacts = resolved.associate { artifact ->
             val id = artifact.moduleVersion.id
             "${id.group}:${id.name}" to id.version
