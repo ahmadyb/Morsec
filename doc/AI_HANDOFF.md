@@ -39,6 +39,45 @@ v3. Stop after Part B.
 audit report was delivered after cryptographic implementation had already begun. Preserve
 this process deviation in the final handoff; do not imply the required ordering was met.
 
+### Repository/source/dependency/API 23/security audit report (late; not the required initial gate)
+
+- Active branch is `arena/268e777f-morsec`; the dedicated `.partb-worktree` is based on
+  accepted SHA `3868863015300c71e3ea163a601d9da706a45935`, and its local/remote-tracking
+  refs matched at the audit recheck. The dirty original checkout `/home/user/Morsec` was
+  not edited or staged; Part B files are under `/home/user/Morsec/.partb-worktree`.
+- Accepted Part A is bounded unauthenticated LAN discovery (`MSD1`, IPv4 multicast
+  `239.255.33.45:33457`, 192-byte cap) plus selected-peer TCP `MSH1` control handshake on
+  `33456` (512-byte cap). IDs/address/profile equality are correlation checks, not trust;
+  CRC32 is not a MAC. Part A advertises `EncryptionCapability.NONE`, forces payload/resume/
+  secure-session bits off, and issues only `ControlOnlyUnauthenticated`. No file payload
+  method exists. `CURRENT_MILESTONE = 2`, `TRANSFER_ENGINE` is gated, and Room v1/v2 is
+  frozen with no v3.
+- The prior baseline has no crypto provider. The repository's `minSdk` is 23, but platform
+  TLS 1.3/exporter availability is not a consistent API-23 path. The reviewed selection is
+  bundled Conscrypt Android `2.7.0` for TLS 1.3, exporters and AES-GCM, plus Bouncy Castle
+  PKIX `1.86` only for ephemeral certificate construction/signature verification. Versions
+  are pinned, resolved runtime artifacts are checked, global JCA providers are not mutated,
+  and Apache 2.0 / Bouncy Castle terms plus Conscrypt NOTICE/attributions are included.
+  Versioned upstream/standard references and the API-23 instrumentation gate are in
+  `doc/security/milestone-4-part-b.md`.
+- Placement: pure reducer, fixed-schema transcript/confirmation codecs, and AEAD record
+  state in `:core-transfer`; Conscrypt engine, explicit pairing coordinator, and gated
+  control-only socket record channel in `:transport-lan`. The secure transcript binds
+  control/secure IDs, peers, roles, protocol/discovery/capability versions/ranges, app
+  versions, nonce/fingerprint pairs, LAN suite/features/limits and negotiated TLS version/
+  cipher. Approval is exact-request, local, expiring and manual. AEAD keys are
+  role/direction-separated; records are replay/order/tamper checked and close before
+  sequence/byte/lifetime limits. Production exposes only empty PING/PONG/CLOSE controls;
+  it has no file/chunk transfer or plaintext fallback.
+- Verification at this late audit: refs 31/31, token parity 195/195, transfer limits/core
+  isolation 21/21, Room baseline 11/11, secure dependency/license governance 13/13, TOML
+  parse and `git diff --check` pass. The new JVM/instrumentation tests, build, lint, APKs and
+  API-23 emulator still require exact-SHA hosted CI. This sandbox has no `java`, `javac`,
+  `kotlinc`, or Gradle executable; do not report local compilation/test evidence.
+- Prohibited product scope remains untouched: no UI, Nearby, payload/chunks, services,
+  workers/alarms, notifications, wake locks, background discovery, permanent identity,
+  trusted-device persistence, Room changes, WebShare or Media3 work.
+
 ### Accepted Part A baseline and evidence
 
 Part A added transport-neutral contracts, a deterministic bounded peer registry, monotonic
