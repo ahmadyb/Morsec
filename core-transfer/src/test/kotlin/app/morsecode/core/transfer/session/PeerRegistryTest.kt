@@ -64,7 +64,7 @@ public class PeerRegistryTest {
 
     @Test(expected = IllegalArgumentException::class)
     public fun unsafeEndpointIsRejectedBeforeItCanEnterTheRegistry() {
-        TransportEndpoint("lan", "peer.example")
+        TransportEndpoint("lan", "192.168.1.12/24")
     }
 
     private fun advertisement(peerId: String, name: String): PeerAdvertisement = PeerAdvertisement(
