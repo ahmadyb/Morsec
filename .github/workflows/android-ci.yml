@@ -174,7 +174,17 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p ci-logs
-          ./gradlew --no-daemon --stacktrace --continue test :transport-lan:verifySecureDependencyGovernance 2>&1 | tee ci-logs/20-unit-tests.log
+          ./gradlew --no-daemon --stacktrace --continue test 2>&1 | tee ci-logs/20-unit-tests.log
+
+      - name: Resolve and verify secure dependency graph
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --stacktrace :transport-lan:dependencies --configuration debugRuntimeClasspath 2>&1 | tee ci-logs/22-secure-runtime-dependencies.log
+          gradle_status=${PIPESTATUS[0]}
+          if [ "$gradle_status" -ne 0 ]; then exit "$gradle_status"; fi
+          node tools/verify/secure-dependency-governance.mjs --resolved ci-logs/22-secure-runtime-dependencies.log
 
       # KSP writes the Room schema while :core-data compiles, which the unit-test
       # task above has just done. The export is published twice on purpose:
