@@ -365,4 +365,3 @@ public object SessionHandshakeNegotiator {
             actual.encryption == EncryptionCapability.NONE &&
             SessionFeature.SECURE_SESSION !in actual.features
 }
-}
