@@ -66,10 +66,11 @@ kotlin {
 val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGovernance") {
     group = "verification"
     description = "Checks the exact Part B crypto runtime artifacts and pinned transitive versions."
-    doLast(org.gradle.api.Action<org.gradle.api.Task> { task ->
+    doLast {
+        val taskProject = this.project
         val expectedConscryptVersion = "2.7.0"
         val expectedBouncyCastleVersion = "1.86"
-        val resolved = task.project.configurations.getByName("debugRuntimeClasspath")
+        val resolved = taskProject.configurations.getByName("debugRuntimeClasspath")
             .resolvedConfiguration.resolvedArtifacts
         val secureArtifacts = resolved.associate { artifact ->
             val id = artifact.moduleVersion.id
@@ -94,7 +95,7 @@ val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGov
         check(resolvedBouncyCastleArtifacts.all { secureArtifacts[it] == expectedBouncyCastleVersion }) {
             "All Bouncy Castle runtime artifacts must use version $expectedBouncyCastleVersion"
         }
-        val licenseDirectory = task.project.file("../app/src/main/assets/third_party_licenses")
+        val licenseDirectory = taskProject.file("../app/src/main/assets/third_party_licenses")
         val apacheLicense = licenseDirectory.resolve("Apache-2.0.txt")
         val nettyLicense = licenseDirectory.resolve("licenses/LICENSE.netty.txt")
         val harmonyLicense = licenseDirectory.resolve("licenses/LICENSE.harmony.txt")
@@ -108,8 +109,8 @@ val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGov
         check(nettyLicense.readBytes().contentEquals(apacheLicense.readBytes()) &&
             harmonyLicense.readBytes().contentEquals(apacheLicense.readBytes())
         ) { "Conscrypt's Netty and Harmony Apache 2.0 license references must resolve exactly" }
-        task.logger.lifecycle("Secure crypto runtime graph verified: $secureArtifacts")
-    })
+        taskProject.logger.lifecycle("Secure crypto runtime graph verified: $secureArtifacts")
+    }
 }
 
 tasks.named("check") {
