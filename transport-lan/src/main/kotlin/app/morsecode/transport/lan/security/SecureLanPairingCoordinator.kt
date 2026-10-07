@@ -33,14 +33,14 @@ import java.security.SecureRandom
 import javax.net.ssl.SSLSocket
 
 internal sealed interface SecurePairingRunResult {
-    internal class Authenticated(
+    class Authenticated(
         val secureSocket: SSLSocket,
         val negotiatedSession: NegotiatedSession,
         val recordLayer: SecureRecordLayer,
         val expiresAtElapsedMillis: Long,
     ) : SecurePairingRunResult
 
-    internal class Failed(val result: SecurePairingResult.Failed) : SecurePairingRunResult
+    class Failed(val result: SecurePairingResult.Failed) : SecurePairingRunResult
 }
 
 internal interface PairingInteraction {
