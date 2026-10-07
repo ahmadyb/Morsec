@@ -68,9 +68,10 @@ not enable product readiness or add schema/tables/migrations.
   [37576934886](https://github.com/ahmadyb/Morsec/actions/runs/37576934886) passed all tests,
   lint and APK/schema steps; the final source-only fix removed its one additional lint
   warning, and final run 37577299393 is green at 45 warnings.
-- The current handoff change is documentation-only and records the green implementation
-  source SHA/run above. Validate its pushed closure commit with the same exact-SHA workflow;
-  then stop at Part A and report that final docs-only SHA/run without expanding scope.
+- The Part A source implementation and its exact-SHA evidence above are complete. The
+  documentation-only closure snapshot `a9866c1b089f2a4ffd94b7ae6a25003d54adc118` also passed
+  exact-SHA Android CI run [37577870037](https://github.com/ahmadyb/Morsec/actions/runs/37577870037).
+  This handoff remains at the Part A boundary; no further implementation scope is planned.
 
 Older session notes below are historical base-state evidence only and do not supersede this
 Part A scope or branch instruction.
