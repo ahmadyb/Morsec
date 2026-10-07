@@ -102,12 +102,13 @@ TLS socket.
 The test suite pins a canonical transcript SHA-256 vector, SAS/exporter bit vector, NIST
 AES-128-GCM known-answer vector, malformed/downgrade transcript cases, explicit-approval
 state transitions, mutual confirmation, and replay/reflection/gap/tamper/expiry/sequence
-limits. A loopback test exercises the real TLS exporter, explicit test-only approval seam,
-key confirmation and control-only negotiated result. Android instrumentation exercises the
-real bundled Conscrypt handshake, exporter and AES-GCM implementation on API 23. Hosted CI
-must pass on the exact pushed SHA, including JVM tests, dependency/license governance, Room
-schema immutability, lint with zero errors, debug and instrumentation APK packaging, and the
-API-23 emulator test. Local Java/Android toolchain absence is not test evidence.
+limits. API 23 Android instrumentation includes a loopback, end-to-end pairing test using the
+real bundled TLS exporter, the test-only explicit-approval seam, mutual key confirmation and
+control-only PING/PONG/CLOSE records; a separate provider test checks exporter agreement and
+AEAD tamper rejection. Hosted CI must pass on the exact pushed SHA, including JVM tests,
+dependency/license governance, Room schema immutability, lint with zero errors, debug and
+instrumentation APK packaging, and the API-23 emulator tests. Local Java/Android toolchain
+absence is not test evidence.
 
 ## Audit references
 

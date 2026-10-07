@@ -55,14 +55,15 @@ kotlin {
     }
 }
 
-val verifySecureDependencyGovernance by tasks.registering {
+val secureRuntimeConfiguration = configurations.getByName("debugRuntimeClasspath")
+val secureLicenseDirectory = project.file("../app/src/main/assets/third_party_licenses")
+val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGovernance") {
     group = "verification"
     description = "Checks the exact Part B crypto runtime artifacts and pinned transitive versions."
     doLast {
         val expectedConscryptVersion = "2.7.0"
         val expectedBouncyCastleVersion = "1.86"
-        val resolved = configurations.getByName("debugRuntimeClasspath")
-            .resolvedConfiguration.resolvedArtifacts
+        val resolved = secureRuntimeConfiguration.resolvedConfiguration.resolvedArtifacts
         val secureArtifacts = resolved.associate { artifact ->
             val id = artifact.moduleVersion.id
             "${id.group}:${id.name}" to id.version
@@ -86,16 +87,15 @@ val verifySecureDependencyGovernance by tasks.registering {
         check(resolvedBouncyCastleArtifacts.all { secureArtifacts[it] == expectedBouncyCastleVersion }) {
             "All Bouncy Castle runtime artifacts must use version $expectedBouncyCastleVersion"
         }
-        val licenseDirectory = file("../app/src/main/assets/third_party_licenses")
-        val apacheLicense = file("${licenseDirectory}/Apache-2.0.txt")
-        val nettyLicense = file("${licenseDirectory}/licenses/LICENSE.netty.txt")
-        val harmonyLicense = file("${licenseDirectory}/licenses/LICENSE.harmony.txt")
+        val apacheLicense = secureLicenseDirectory.resolve("Apache-2.0.txt")
+        val nettyLicense = secureLicenseDirectory.resolve("licenses/LICENSE.netty.txt")
+        val harmonyLicense = secureLicenseDirectory.resolve("licenses/LICENSE.harmony.txt")
         check(
             apacheLicense.isFile &&
                 nettyLicense.isFile &&
                 harmonyLicense.isFile &&
-                file("${licenseDirectory}/Conscrypt-NOTICE.txt").isFile &&
-                file("${licenseDirectory}/BouncyCastle-LICENSE.txt").isFile
+                secureLicenseDirectory.resolve("Conscrypt-NOTICE.txt").isFile &&
+                secureLicenseDirectory.resolve("BouncyCastle-LICENSE.txt").isFile
         ) { "Pinned crypto artifact notices/licenses are missing from app assets" }
         check(nettyLicense.readBytes().contentEquals(apacheLicense.readBytes()) &&
             harmonyLicense.readBytes().contentEquals(apacheLicense.readBytes())

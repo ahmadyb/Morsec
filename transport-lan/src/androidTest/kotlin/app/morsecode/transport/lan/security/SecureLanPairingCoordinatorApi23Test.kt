@@ -1,5 +1,6 @@
 package app.morsecode.transport.lan.security
 
+import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.morsecode.core.model.TransportKind
 import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.session.EncryptionCapability
@@ -30,8 +31,10 @@ import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
 
-public class SecureLanPairingCoordinatorTest {
+@RunWith(AndroidJUnit4::class)
+public class SecureLanPairingCoordinatorApi23Test {
     @Test
     public fun realTlsExporterApprovalAndMutualConfirmationProduceControlOnlySecureSession() {
         val listener = ServerSocket().apply {
