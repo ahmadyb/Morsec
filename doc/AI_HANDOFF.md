@@ -7,9 +7,10 @@ Continue the existing Android project; do not restart, redesign, replace, or reg
 GitHub repository: <https://github.com/ahmadyb/Morsec>
 
 This Arena session is fixed to `arena/268e777f-morsec`. Milestone 4 Part A starts from the
-accepted remote/local SHA `7b16cf286abbd681901831f21e1419e53cbed25d`. Do not switch or create
-branches, merge/rebase, rewrite history, force-push, or push anywhere except this branch.
-The original dirty checkout at `/home/user/Morsec` is preserved; the clean editing clone is
+accepted remote/local SHA `7b16cf286abbd681901831f21e1419e53cbed25d`; the completed implementation
+source snapshot is `ede3d5b5b490a8b0971d5a11cbcbc49fea11d615`. Do not switch or create branches,
+merge/rebase, rewrite history, force-push, or push anywhere except this branch. The original
+dirty checkout at `/home/user/Morsec` is preserved; the clean editing clone is
 `/home/user/Morsec-m4-part-a-7b16cf2`.
 
 ## Current authoritative state — Milestone 4 Part A
@@ -42,15 +43,34 @@ not enable product readiness or add schema/tables/migrations.
 
 ### Current status and evidence
 
-- Starting branch/SHA: `arena/268e777f-morsec` at
-  `7b16cf286abbd681901831f21e1419e53cbed25d`.
-- Current Part A commit SHA and exact-SHA hosted CI run: pending final commit and workflow.
-- The sandbox has no Java, Gradle, or Kotlin compiler. Android compile, full JVM tests, lint,
-  KSP/schema checks, and APK assembly must be evidenced by the hosted Android CI workflow.
-- Before completion: run static Node verifiers and `git diff --check`; inspect scope and
-  Room/readiness invariants; commit and push directly to the fixed branch; monitor exact-SHA
-  CI; repair any failures; then synchronize this handoff to the green final SHA/run and run
-  CI again if that documentation update changes the commit.
+- Fixed branch: `arena/268e777f-morsec`; source commit:
+  `ede3d5b5b490a8b0971d5a11cbcbc49fea11d615`.
+- Exact-SHA hosted Android CI: [run 37577299393](https://github.com/ahmadyb/Morsec/actions/runs/37577299393),
+  head SHA exactly matches the source commit above; all workflow jobs passed.
+- CI: 2,652 JVM tests passed, 0 failed, 0 skipped (app 588, `core-data` 56,
+  `core-design` 100, `core-model` 40, `core-storage` 1,408, `core-transfer` 450,
+  `transport-lan` 10). Android lint: 0 errors, 45 warnings across 7 reports; the new
+  `WifiManagerPotentialLeak` warning seen on the preceding attempt was removed by explicitly
+  using application context. Debug APK: 19.06 MiB; instrumentation APK: 1.10 MiB.
+- Room schema export/KSP comparison passed. Database version remains 2 with 13 tables;
+  committed v2 export remains 50,652 bytes with SHA-256
+  `7e6acfd9c03b0214dcaddc2f5d1ceb175588f5cfcf93cca5437617be24b2b074`. No schema change,
+  table, or migration was introduced.
+- Available static verifiers passed: references 31/31, token parity 195/195, transfer limits
+  21/21, Room baseline 11/11; `git diff --check` passed. Local Gradle could not run because
+  this sandbox has no Java (`JAVA_HOME` unset and no `java` command); hosted CI provides the
+  Android compile, JVM test, lint, KSP/schema, and APK evidence above.
+- CI iteration history: run [37575949304](https://github.com/ahmadyb/Morsec/actions/runs/37575949304)
+  caught an extra closing brace in the handshake negotiator; run
+  [37576219849](https://github.com/ahmadyb/Morsec/actions/runs/37576219849) then caught an
+  endpoint test that incorrectly expected a valid DNS-style opaque value to be rejected.
+  Both were corrected without changing the scope. Run
+  [37576934886](https://github.com/ahmadyb/Morsec/actions/runs/37576934886) passed all tests,
+  lint and APK/schema steps; the final source-only fix removed its one additional lint
+  warning, and final run 37577299393 is green at 45 warnings.
+- The current handoff change is documentation-only and records the green implementation
+  source SHA/run above. Validate its pushed closure commit with the same exact-SHA workflow;
+  then stop at Part A and report that final docs-only SHA/run without expanding scope.
 
 Older session notes below are historical base-state evidence only and do not supersede this
 Part A scope or branch instruction.
