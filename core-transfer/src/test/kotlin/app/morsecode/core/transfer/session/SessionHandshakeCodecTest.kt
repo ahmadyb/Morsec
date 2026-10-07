@@ -4,6 +4,7 @@ import app.morsecode.core.model.TransportKind
 import app.morsecode.core.transfer.identity.SessionId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -70,6 +71,51 @@ public class SessionHandshakeCodecTest {
 
         assertEquals(HandshakeRejectCode.NO_COMMON_PROTOCOL, decision.response.code)
         assertEquals(SessionFailureCode.PROTOCOL_VERSION_UNSUPPORTED, decision.failure.code)
+    }
+
+    @Test
+    public fun secureSessionCannotBeClaimedOrNegotiatedByThePartAHandshake() {
+        val hello = SessionHello(attemptId, local.peerInstanceId, remote.peerInstanceId, local)
+        val forgedAccept = SessionAccept(
+            attemptId = attemptId,
+            senderPeerInstanceId = remote.peerInstanceId,
+            targetPeerInstanceId = local.peerInstanceId,
+            profile = remote,
+            selectedProtocolVersion = 1,
+            negotiated = NegotiatedCapabilities(
+                features = setOf(SessionFeature.CONTROL_HANDSHAKE, SessionFeature.SECURE_SESSION),
+                maxChunkSizeBytes = 0,
+                resumeSupported = false,
+                encryption = EncryptionCapability.TLS_1_3,
+            ),
+        )
+        val encoded = SessionHandshakeCodec.encode(forgedAccept)
+        val decoded = SessionHandshakeCodec.decode(encoded) as SessionHandshakeDecodeResult.Success
+        val decision = SessionHandshakeNegotiator.verifyAccepted(
+            local = local,
+            expectedSelectedPeer = remote.peerInstanceId,
+            sentHello = hello,
+            accept = decoded.message as SessionAccept,
+        ) as SessionHandshakeDecision.Rejected
+
+        assertEquals(HandshakeRejectCode.INVALID_CAPABILITIES, decision.response.code)
+        assertEquals(SessionFailureCode.HANDSHAKE_INVALID, decision.failure.code)
+    }
+
+    @Test
+    public fun partBSecureControlCapabilityCannotIncludePayloadOrResume() {
+        assertThrows(IllegalArgumentException::class.java) {
+            NegotiatedCapabilities(
+                features = setOf(
+                    SessionFeature.CONTROL_HANDSHAKE,
+                    SessionFeature.SECURE_SESSION,
+                    SessionFeature.FILE_PAYLOAD,
+                ),
+                maxChunkSizeBytes = 4_096,
+                resumeSupported = false,
+                encryption = EncryptionCapability.TLS_1_3,
+            )
+        }
     }
 
     @Test

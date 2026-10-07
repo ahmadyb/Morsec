@@ -1,7 +1,9 @@
-# Milestone 4 Part A — LAN discovery and control-session foundation
+# Milestone 4 — LAN discovery and control-session foundation
 
-This document records the bounded discovery/session foundation only. It does **not**
-announce a usable file-sharing feature and does not advance `FeatureReadiness`.
+This document describes the bounded Part A discovery and unauthenticated-control boundary.
+Part B adds a separate explicit authenticated control-session upgrade, documented in
+[`security/milestone-4-part-b.md`](security/milestone-4-part-b.md). Neither part announces a
+usable file-sharing feature or advances `FeatureReadiness`.
 `FeatureReadiness.CURRENT_MILESTONE` remains `2`; `TRANSFER_ENGINE` and `LAN_TRANSPORT`
 remain gated. The full acceptance boundary and explicit exclusions are recorded in
 [`AI_HANDOFF.md`](AI_HANDOFF.md).
@@ -20,7 +22,9 @@ remain gated. The full acceptance boundary and explicit exclusions are recorded 
   this part. Production DI wiring makes the provider available without starting it.
 
 This is a control-only foundation. `ControlSession` exposes negotiated metadata and
-`close()` only—there is no file, stream, chunk, or payload send API in Part A.
+`close()` only—there is no file, stream, chunk, or payload send API. Part B adds a separate
+`PairableControlSession` seam that can be invoked explicitly to upgrade one existing LAN
+control session; it still adds no payload API.
 
 ## UDP discovery wire format
 
@@ -89,14 +93,14 @@ responder also requires a current discovery candidate from the same IPv4 address
 checks detect stale/mismatched discovery records; they do **not** authenticate the device.
 An on-path or same-LAN attacker can spoof/replace discovery and control messages.
 
-This revision has no key exchange, signatures, pairing secret, certificate pin, secure
-channel, or encryption. `EncryptionCapability.NONE` is the only supported value. The
-negotiator forcibly removes `FILE_PAYLOAD`, `RESUME`, and `SECURE_SESSION`, even if a remote
-profile advertises them. Every `NegotiatedSession` is explicitly
-`ControlOnlyUnauthenticated`. `PayloadTransferGate` returns
-`SECURE_SESSION_REQUIRED`; there is no Part A path that can issue the internal
-`ApprovedSecureSession` evidence. Do not treat TCP, a matching ephemeral id, or CRC32 as
-security.
+Part A itself has no key exchange, signatures, pairing secret, certificate pin, secure
+channel, or encryption. Its discovery/control advertisements use
+`EncryptionCapability.NONE`; the negotiator forcibly removes `FILE_PAYLOAD`, `RESUME`, and
+`SECURE_SESSION`, even if a remote profile advertises them. Every Part A
+`NegotiatedSession` is explicitly `ControlOnlyUnauthenticated`. Part B's separate secure
+upgrade uses a new in-channel transcript and explicit approval; it does not make Part A
+beacons, profile claims, TCP, a matching ephemeral id, or CRC32 authentic. The payload gate
+still returns `SECURE_SESSION_REQUIRED`, because Part B negotiates no payload capability.
 
 ## Lease lifecycle, bounds, and ownership
 
@@ -151,9 +155,11 @@ payloads.
 
 ## Tests and verification
 
-Pure JVM tests cover deterministic registry ordering/expiry/capacity, handshake round trips,
-malformed and oversized envelopes, selected-peer identity mismatch, capability intersection,
-and payload refusal. `:transport-lan` codec tests cover UTF-8, lengths, unknown types,
-versions and CRC rejection. Permission-matrix tests cover API 23–36 and prove LAN requests
-no runtime permission. Android compilation, Hilt/KSP, lint, APK packaging, and full-suite
-results are reported only from exact-SHA hosted CI in the current handoff.
+Pure JVM tests cover deterministic registry ordering/expiry/capacity, Part A handshake
+round trips, malformed and oversized envelopes, selected-peer identity mismatch, capability
+intersection, and payload refusal. Part B's codecs/state-machine/record tests and TLS loopback
+coverage are specified in [`security/milestone-4-part-b.md`](security/milestone-4-part-b.md).
+`:transport-lan` codec tests cover UTF-8, lengths, unknown types, versions and CRC rejection;
+permission-matrix tests cover API 23–36 and prove LAN requests no runtime permission.
+Android compilation, Hilt/KSP, lint, APK packaging, and full-suite results are reported only
+from exact-SHA hosted CI in the current handoff.

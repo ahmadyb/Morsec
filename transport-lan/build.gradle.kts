@@ -17,6 +17,7 @@ android {
 
     defaultConfig {
         minSdk = 23
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
     }
 
@@ -54,12 +55,67 @@ kotlin {
     }
 }
 
+val verifySecureDependencyGovernance by tasks.registering {
+    group = "verification"
+    description = "Checks the exact Part B crypto runtime artifacts and pinned transitive versions."
+    doLast {
+        val expectedConscryptVersion = "2.7.0"
+        val expectedBouncyCastleVersion = "1.86"
+        val resolved = configurations.getByName("debugRuntimeClasspath")
+            .resolvedConfiguration.resolvedArtifacts
+        val secureArtifacts = resolved.associate { artifact ->
+            val id = artifact.moduleVersion.id
+            "${id.group}:${id.name}" to id.version
+        }.filterKeys { it.startsWith("org.conscrypt:") || it.startsWith("org.bouncycastle:") }
+
+        check(secureArtifacts["org.conscrypt:conscrypt-android"] == expectedConscryptVersion) {
+            "Conscrypt runtime artifact is missing or not pinned to $expectedConscryptVersion"
+        }
+        check(secureArtifacts["org.bouncycastle:bcpkix-jdk18on"] == expectedBouncyCastleVersion) {
+            "Bouncy Castle PKIX runtime artifact is missing or not pinned to $expectedBouncyCastleVersion"
+        }
+        val expectedBouncyCastleArtifacts = setOf(
+            "org.bouncycastle:bcpkix-jdk18on",
+            "org.bouncycastle:bcutil-jdk18on",
+            "org.bouncycastle:bcprov-jdk18on",
+        )
+        val resolvedBouncyCastleArtifacts = secureArtifacts.keys.filter { it.startsWith("org.bouncycastle:") }.toSet()
+        check(resolvedBouncyCastleArtifacts == expectedBouncyCastleArtifacts) {
+            "Unexpected Bouncy Castle runtime graph: $resolvedBouncyCastleArtifacts"
+        }
+        check(resolvedBouncyCastleArtifacts.all { secureArtifacts[it] == expectedBouncyCastleVersion }) {
+            "All Bouncy Castle runtime artifacts must use version $expectedBouncyCastleVersion"
+        }
+        val licenseDirectory = file("../app/src/main/assets/third_party_licenses")
+        val apacheLicense = file("${licenseDirectory}/Apache-2.0.txt")
+        val nettyLicense = file("${licenseDirectory}/licenses/LICENSE.netty.txt")
+        val harmonyLicense = file("${licenseDirectory}/licenses/LICENSE.harmony.txt")
+        check(
+            apacheLicense.isFile &&
+                nettyLicense.isFile &&
+                harmonyLicense.isFile &&
+                file("${licenseDirectory}/Conscrypt-NOTICE.txt").isFile &&
+                file("${licenseDirectory}/BouncyCastle-LICENSE.txt").isFile
+        ) { "Pinned crypto artifact notices/licenses are missing from app assets" }
+        check(nettyLicense.readBytes().contentEquals(apacheLicense.readBytes()) &&
+            harmonyLicense.readBytes().contentEquals(apacheLicense.readBytes())
+        ) { "Conscrypt's Netty and Harmony Apache 2.0 license references must resolve exactly" }
+        logger.lifecycle("Secure crypto runtime graph verified: $secureArtifacts")
+    }
+}
+
+tasks.named("check") {
+    dependsOn(verifySecureDependencyGovernance)
+}
+
 dependencies {
     api(project(":core-model"))
     api(project(":core-transfer"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.conscrypt.android)
+    implementation(libs.bouncycastle.pkix)
 
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
@@ -68,4 +124,9 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.junit)
 }

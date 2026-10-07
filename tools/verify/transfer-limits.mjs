@@ -351,13 +351,14 @@ function* walk(dir) {
 
 const MAIN_ALLOWED = [
   /^app\.morsecode\.core\.(model|transfer)\./,
-  /^java\.nio\.(ByteBuffer|charset\.CharacterCodingException|charset\.CodingErrorAction)$/,
+  /^java\.nio\.(ByteBuffer|ByteOrder|charset\.CharacterCodingException|charset\.CodingErrorAction)$/,
   /^java\.security\.MessageDigest$/,
   /^kotlin\./,
 ];
 const TEST_ALLOWED = [
   ...MAIN_ALLOWED,
   /^org\.junit\.(Assert(\.\w+)?|Test)$/,
+  /^javax\.crypto\.(Cipher|spec\.GCMParameterSpec|spec\.SecretKeySpec)$/,
   /^java\.util\.zip\.CRC32$/, // the tests cross-check Crc32 against the JDK
 ];
 

@@ -23,9 +23,10 @@ public enum class SessionFeature(public val wireBit: Int) {
     }
 }
 
-/** Part A has no encryption or authenticated-channel implementation. */
+/** Part A advertises NONE; TLS 1.3 is reserved for the Part B authenticated upgrade. */
 public enum class EncryptionCapability(public val wireId: Int) {
-    NONE(0);
+    NONE(0),
+    TLS_1_3(1);
 
     public companion object {
         public fun fromWireId(id: Int): EncryptionCapability? = entries.firstOrNull { it.wireId == id }
@@ -175,9 +176,16 @@ public data class NegotiatedCapabilities(
         require(SessionFeature.RESUME !in features || SessionFeature.FILE_PAYLOAD in features) {
             "negotiated resume capability requires file payload"
         }
-        require(encryption == EncryptionCapability.NONE && SessionFeature.SECURE_SESSION !in features) {
-            "no secure session can be negotiated in this protocol revision"
+        val secureSession = SessionFeature.SECURE_SESSION in features
+        require((encryption == EncryptionCapability.TLS_1_3) == secureSession) {
+            "secure-session feature and TLS 1.3 capability must agree"
         }
+        require(!secureSession || (
+            SessionFeature.FILE_PAYLOAD !in features &&
+                SessionFeature.RESUME !in features &&
+                maxChunkSizeBytes == 0
+            )
+        ) { "Part B secure-control sessions cannot negotiate payload or resume" }
     }
 }
 
@@ -197,6 +205,15 @@ public data class NegotiatedSession(
         require(protocolVersion in remoteProfile.protocolRange.minimum..remoteProfile.protocolRange.maximum) {
             "negotiated protocol is outside the remote range"
         }
+        require(
+            if (security is ApprovedSecureSession) {
+                SessionFeature.SECURE_SESSION in capabilities.features &&
+                    capabilities.encryption == EncryptionCapability.TLS_1_3
+            } else {
+                SessionFeature.SECURE_SESSION !in capabilities.features &&
+                    capabilities.encryption == EncryptionCapability.NONE
+            },
+        ) { "session security marker and negotiated capabilities disagree" }
     }
 
     override fun toString(): String =
@@ -212,7 +229,7 @@ public sealed interface SessionSecurityState {
     }
 }
 
-/** Reserved for a future reviewed secure-session implementation; Part A has no issuer. */
+/** Issued only by the Part B reducer after approval and both authenticated confirmations. */
 public class ApprovedSecureSession internal constructor() : SessionSecurityState {
     override val label: String = "approved_secure_session"
     override fun toString(): String = "ApprovedSecureSession([redacted])"

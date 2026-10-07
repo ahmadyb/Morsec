@@ -18,6 +18,20 @@ import app.morsecode.core.transfer.session.CancellableOperation
 import app.morsecode.core.transfer.session.ControlConnectionListener
 import app.morsecode.core.transfer.session.ControlConnectionResult
 import app.morsecode.core.transfer.session.ControlSession
+import app.morsecode.core.transfer.session.PairableControlSession
+import app.morsecode.core.transfer.session.SecureApprovalDecision
+import app.morsecode.core.transfer.session.SecureApprovalHandle
+import app.morsecode.core.transfer.session.SecureApprovalResult
+import app.morsecode.core.transfer.session.SecureControlReceiveResult
+import app.morsecode.core.transfer.session.SecureControlSendResult
+import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
+import app.morsecode.core.transfer.session.SecurePairingResult
+import app.morsecode.core.transfer.session.SecurePairingState
+import app.morsecode.core.transfer.session.SecurePeerRole
+import app.morsecode.core.transfer.session.SecureRecordLayer
+import app.morsecode.core.transfer.session.SecureRecordType
+import app.morsecode.core.transfer.session.SecureSessionOperation
+import app.morsecode.core.transfer.session.SecureSessionStateMachine
 import app.morsecode.core.transfer.session.DiscoveredPeer
 import app.morsecode.core.transfer.session.DiscoveryDiagnostics
 import app.morsecode.core.transfer.session.DiscoveryLease
@@ -49,6 +63,10 @@ import app.morsecode.core.transfer.session.MAX_DISPLAY_NAME_BYTES
 import app.morsecode.transport.lan.discovery.LanBeacon
 import app.morsecode.transport.lan.discovery.LanBeaconCodec
 import app.morsecode.transport.lan.discovery.LanBeaconDecodeResult
+import app.morsecode.transport.lan.security.PairingInteraction
+import app.morsecode.transport.lan.security.SecureLanControlChannel
+import app.morsecode.transport.lan.security.SecureLanPairingCoordinator
+import app.morsecode.transport.lan.security.SecurePairingRunResult
 import java.io.DataInputStream
 import java.io.IOException
 import java.net.BindException
@@ -64,9 +82,11 @@ import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.SecureRandom
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.FutureTask
 import java.util.concurrent.RejectedExecutionException
@@ -486,6 +506,8 @@ public class LanPeerDiscoveryProvider(
                     stop(SessionFailureCode.DISCOVERY_LEASE_EXPIRED)
                     return
                 }
+                activeSessions.toList().forEach { it.expireSecureSessionIfNeeded(now) }
+                if (closed.get()) return
                 if (networkDirty.getAndSet(false)) {
                     val failure = bindCurrentNetwork()
                     if (failure != null) {
@@ -816,7 +838,12 @@ public class LanPeerDiscoveryProvider(
                         )) {
                             is SessionHandshakeDecision.Rejected -> attempt.fail(decision.failure.code)
                             is SessionHandshakeDecision.Accepted -> {
-                                val session = createControlSession(socket, decision.session, attempt::releasePermit)
+                                val session = createControlSession(
+                                    socket,
+                                    decision.session,
+                                    SecurePeerRole.INITIATOR,
+                                    attempt::releasePermit,
+                                )
                                 attempt.completeConnected(session)
                             }
                         }
@@ -852,7 +879,7 @@ public class LanPeerDiscoveryProvider(
                 return
             }
             val permitReleased = incomingPermits[socket] ?: AtomicBoolean(false)
-            val session = createControlSession(socket, negotiated) {
+            val session = createControlSession(socket, negotiated, SecurePeerRole.RESPONDER) {
                 if (permitReleased.compareAndSet(false, true)) releaseControlCapacity()
             }
             incomingPermits.remove(socket, permitReleased)
@@ -871,10 +898,15 @@ public class LanPeerDiscoveryProvider(
         private fun createControlSession(
             socket: Socket,
             negotiated: app.morsecode.core.transfer.session.NegotiatedSession,
+            role: SecurePeerRole,
             releasePermit: () -> Unit,
         ): LanControlSession {
             lateinit var session: LanControlSession
-            session = LanControlSession(socket, negotiated) {
+            session = LanControlSession(
+                initialSocket = socket,
+                negotiatedSession = negotiated,
+                role = role,
+            ) {
                 activeSessions.remove(session)
                 inFlightSockets.remove(socket)
                 releasePermit()
@@ -1171,19 +1203,320 @@ public class LanPeerDiscoveryProvider(
         }
 
         private inner class LanControlSession(
-            private val socket: Socket,
-            override val negotiated: app.morsecode.core.transfer.session.NegotiatedSession,
+            initialSocket: Socket,
+            negotiatedSession: app.morsecode.core.transfer.session.NegotiatedSession,
+            private val role: SecurePeerRole,
             private val onClosed: () -> Unit,
-        ) : ControlSession {
+        ) : PairableControlSession {
             private val closedSession = AtomicBoolean(false)
+            private val pairingStarted = AtomicBoolean(false)
+            private val activePairing = AtomicReference<LanSecureSessionOperation?>(null)
 
+            @Volatile
+            private var activeSocket: Socket = initialSocket
+
+            @Volatile
+            private var secureControlChannel: SecureLanControlChannel? = null
+
+            @Volatile
+            private var secureExpiresAtElapsedMillis: Long? = null
+
+            @Volatile
+            private var negotiatedValue: app.morsecode.core.transfer.session.NegotiatedSession = negotiatedSession
+
+            override val negotiated: app.morsecode.core.transfer.session.NegotiatedSession
+                get() = negotiatedValue
+
+            override fun beginSecurePairing(listener: app.morsecode.core.transfer.session.SecurePairingListener): SecureSessionOperation {
+                if (closed.get() || closedSession.get()) {
+                    postSecurePairingFailure(listener, SessionFailureCode.OPERATION_CANCELLED)
+                    return NoopSecureSessionOperation
+                }
+                if (!pairingStarted.compareAndSet(false, true)) {
+                    postSecurePairingFailure(listener, SessionFailureCode.SECURE_SESSION_ALREADY_STARTED)
+                    return NoopSecureSessionOperation
+                }
+                val operation = LanSecureSessionOperation(listener)
+                activePairing.set(operation)
+                if (closed.get() || closedSession.get()) {
+                    operation.cancel()
+                    return operation
+                }
+                operation.start()
+                return operation
+            }
+
+            fun expireSecureSessionIfNeeded(nowElapsedMillis: Long) {
+                val expiresAt = secureExpiresAtElapsedMillis ?: return
+                if (nowElapsedMillis >= expiresAt) close()
+            }
+
+            @Synchronized
+            private fun installSecureSession(
+                owner: LanSecureSessionOperation,
+                socket: Socket,
+                negotiated: app.morsecode.core.transfer.session.NegotiatedSession,
+                recordLayer: SecureRecordLayer,
+                expiresAtElapsedMillis: Long,
+            ): Boolean {
+                if (closed.get() || closedSession.get() || activePairing.get() !== owner || owner.isCancelled()) {
+                    return false
+                }
+                activeSocket = socket
+                secureExpiresAtElapsedMillis = expiresAtElapsedMillis
+                negotiatedValue = negotiated
+                secureControlChannel = SecureLanControlChannel(
+                    socket = socket,
+                    recordLayer = recordLayer,
+                    role = role,
+                    clock = clock,
+                    expiresAtElapsedMillis = expiresAtElapsedMillis,
+                    onTerminal = { close() },
+                )
+                return true
+            }
+
+            override fun sendSecureControlRecord(
+                type: SecureRecordType,
+                payload: ByteArray,
+            ): SecureControlSendResult {
+                if (closed.get() || closedSession.get()) {
+                    return SecureControlSendResult.Refused(SessionFailure(SessionFailureCode.OPERATION_CANCELLED))
+                }
+                val channel = secureControlChannel
+                    ?: return SecureControlSendResult.Refused(SessionFailure(SessionFailureCode.SECURE_SESSION_REQUIRED))
+                return channel.send(type, payload)
+            }
+
+            override fun receiveSecureControlRecord(): SecureControlReceiveResult {
+                if (closed.get() || closedSession.get()) {
+                    return SecureControlReceiveResult.Refused(SessionFailure(SessionFailureCode.OPERATION_CANCELLED))
+                }
+                val channel = secureControlChannel
+                    ?: return SecureControlReceiveResult.Refused(SessionFailure(SessionFailureCode.SECURE_SESSION_REQUIRED))
+                return channel.receive()
+            }
+
+            private fun postSecurePairingFailure(
+                listener: app.morsecode.core.transfer.session.SecurePairingListener,
+                code: SessionFailureCode,
+            ) {
+                postCallback(
+                    action = { listener.onCompleted(SecurePairingResult.Failed(SessionFailure(code))) },
+                    onFailure = {},
+                )
+            }
+
+            @Synchronized
             override fun close() {
                 if (!closedSession.compareAndSet(false, true)) return
-                closeSocket(socket)
+                activePairing.get()?.cancel()
+                secureControlChannel?.close()
+                secureControlChannel = null
+                secureExpiresAtElapsedMillis = null
+                closeSocket(activeSocket)
                 onClosed()
             }
 
             override fun toString(): String = "LanControlSession([redacted])"
+
+            private inner class LanSecureSessionOperation(
+                private val listener: app.morsecode.core.transfer.session.SecurePairingListener,
+            ) : SecureSessionOperation, PairingInteraction {
+                private val cancelled = AtomicBoolean(false)
+                private val completed = AtomicBoolean(false)
+                private val approvalDecisionLatch = CountDownLatch(1)
+
+                @Volatile
+                private var task: FutureTask<Unit>? = null
+
+                @Volatile
+                private var coordinator: SecureLanPairingCoordinator? = null
+
+                @Volatile
+                private var stateMachine: SecureSessionStateMachine? = null
+
+                @Volatile
+                private var approvalRequest: SecurePairingApprovalRequest? = null
+
+                override fun isCancelled(): Boolean = cancelled.get() || closedSession.get() || closed.get()
+
+                fun start() {
+                    val work = FutureTask<Unit>({
+                        runPairing()
+                        Unit
+                    })
+                    task = work
+                    if (isCancelled()) {
+                        work.cancel(true)
+                        cancel()
+                        return
+                    }
+                    try {
+                        requireNotNull(controlExecutor).execute(work)
+                    } catch (_: RejectedExecutionException) {
+                        completeFailure(SessionFailureCode.OPERATION_QUEUE_FULL)
+                    } catch (_: RuntimeException) {
+                        completeFailure(SessionFailureCode.INTERNAL_TRANSPORT_FAILURE)
+                    }
+                }
+
+                override fun decide(
+                    handle: SecureApprovalHandle,
+                    decision: SecureApprovalDecision,
+                ): SecureApprovalResult {
+                    if (completed.get() || isCancelled()) return SecureApprovalResult.Stale
+                    val machine = stateMachine ?: return SecureApprovalResult.NotReady
+                    val result = machine.decide(handle, decision)
+                    if (machine.state() != SecurePairingState.AWAITING_LOCAL_APPROVAL) {
+                        approvalDecisionLatch.countDown()
+                    }
+                    return result
+                }
+
+                override fun cancel() {
+                    if (completed.get() || !cancelled.compareAndSet(false, true)) return
+                    stateMachine?.cancel()
+                    approvalDecisionLatch.countDown()
+                    coordinator?.cancel()
+                    task?.cancel(true)
+                    this@LanControlSession.close()
+                    finish(
+                        SecurePairingResult.Failed(SessionFailure(SessionFailureCode.OPERATION_CANCELLED)),
+                        closeSession = false,
+                    )
+                }
+
+                override fun publishApproval(
+                    machine: SecureSessionStateMachine,
+                    request: SecurePairingApprovalRequest,
+                ): Boolean {
+                    stateMachine = machine
+                    approvalRequest = request
+                    if (isCancelled()) return false
+                    return postCallback(
+                        action = {
+                            if (isCancelled()) {
+                                cancel()
+                            } else if (machine.expireIfNeeded() != null ||
+                                machine.state() != SecurePairingState.AWAITING_LOCAL_APPROVAL
+                            ) {
+                                approvalDecisionLatch.countDown()
+                            } else {
+                                listener.onApprovalRequired(request)
+                            }
+                        },
+                        onFailure = { cancel() },
+                    )
+                }
+
+                override fun awaitApproval(machine: SecureSessionStateMachine): Boolean {
+                    stateMachine = machine
+                    val request = approvalRequest ?: return false
+                    val now = try {
+                        nowElapsedMillis()
+                    } catch (_: RuntimeException) {
+                        machine.fail(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
+                        return false
+                    }
+                    val waitMillis = (request.expiresAtElapsedMillis - now).coerceAtLeast(0L)
+                    val decided = try {
+                        approvalDecisionLatch.await(waitMillis, TimeUnit.MILLISECONDS)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        machine.cancel()
+                        return false
+                    }
+                    if (!decided) {
+                        machine.expireIfNeeded()
+                        if (machine.completion() == null) {
+                            machine.fail(SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED)
+                        }
+                        return false
+                    }
+                    machine.expireIfNeeded()
+                    return !isCancelled() && machine.state() in setOf(
+                        SecurePairingState.APPROVED,
+                        SecurePairingState.CONFIRMING,
+                    )
+                }
+
+                private fun runPairing() {
+                    try {
+                        if (isCancelled()) {
+                            completeFailure(SessionFailureCode.OPERATION_CANCELLED)
+                            return
+                        }
+                        val pairingCoordinator = SecureLanPairingCoordinator(
+                            rawSocket = activeSocket,
+                            controlSession = negotiatedValue,
+                            role = role,
+                            clock = clock,
+                            random = SecureRandom(),
+                            interaction = this,
+                        )
+                        coordinator = pairingCoordinator
+                        if (isCancelled()) {
+                            pairingCoordinator.cancel()
+                            completeFailure(SessionFailureCode.OPERATION_CANCELLED)
+                            return
+                        }
+                        val pairingResult = pairingCoordinator.run()
+                        coordinator = null
+                        when (pairingResult) {
+                            is SecurePairingRunResult.Failed -> finish(pairingResult.result)
+                            is SecurePairingRunResult.Authenticated -> {
+                                if (isCancelled() || !installSecureSession(
+                                        owner = this,
+                                        socket = pairingResult.secureSocket,
+                                        negotiated = pairingResult.negotiatedSession,
+                                        recordLayer = pairingResult.recordLayer,
+                                        expiresAtElapsedMillis = pairingResult.expiresAtElapsedMillis,
+                                    )
+                                ) {
+                                    pairingResult.recordLayer.close()
+                                    closeSocket(pairingResult.secureSocket)
+                                    completeFailure(SessionFailureCode.OPERATION_CANCELLED)
+                                } else {
+                                    finish(
+                                        SecurePairingResult.Authenticated(pairingResult.negotiatedSession),
+                                        closeSession = false,
+                                    )
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {
+                        completeFailure(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
+                    }
+                }
+
+                private fun completeFailure(code: SessionFailureCode) =
+                    finish(SecurePairingResult.Failed(SessionFailure(code)))
+
+                private fun finish(
+                    result: SecurePairingResult,
+                    closeSession: Boolean = result is SecurePairingResult.Failed,
+                ) {
+                    if (!completed.compareAndSet(false, true)) return
+                    approvalDecisionLatch.countDown()
+                    activePairing.compareAndSet(this, null)
+                    approvalRequest = null
+                    if (closeSession) this@LanControlSession.close()
+                    val delivered = postCallback(
+                        action = { listener.onCompleted(result) },
+                        onFailure = { this@LanControlSession.close() },
+                    )
+                    if (!delivered && result is SecurePairingResult.Authenticated) {
+                        this@LanControlSession.close()
+                    }
+                }
+            }
+        }
+
+        private object NoopSecureSessionOperation : SecureSessionOperation {
+            override fun cancel() = Unit
+            override fun decide(handle: SecureApprovalHandle, decision: SecureApprovalDecision): SecureApprovalResult =
+                SecureApprovalResult.Stale
         }
 
         private data class NetworkTarget(

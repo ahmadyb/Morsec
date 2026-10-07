@@ -230,6 +230,14 @@ public enum class SessionFailureCode(
     OPERATION_QUEUE_FULL("operation_queue_full", "The bounded transport work queue is full.", true, ErrorOrigin.LOCAL, ErrorCategory.TRANSPORT),
     OPERATION_CANCELLED("operation_cancelled", "The control operation was cancelled.", false, ErrorOrigin.LOCAL, ErrorCategory.LOCAL_ACTION),
     SECURE_SESSION_REQUIRED("secure_session_required", "Payload transfer is refused until an approved secure session is established.", false, ErrorOrigin.LOCAL, ErrorCategory.PERMISSION),
+    SECURE_SESSION_ALREADY_STARTED("secure_session_already_started", "Secure pairing has already been started for this control session.", false, ErrorOrigin.LOCAL, ErrorCategory.LOCAL_ACTION),
+    SECURE_SESSION_HANDSHAKE_FAILED("secure_session_handshake_failed", "The secure LAN session could not be established.", true, ErrorOrigin.UNKNOWN, ErrorCategory.TRANSPORT),
+    SECURE_SESSION_TRANSCRIPT_INVALID("secure_session_transcript_invalid", "The secure-session transcript was invalid or unsupported.", false, ErrorOrigin.REMOTE, ErrorCategory.PROTOCOL),
+    SECURE_SESSION_APPROVAL_EXPIRED("secure_session_approval_expired", "The secure-session approval request expired.", false, ErrorOrigin.LOCAL, ErrorCategory.LOCAL_ACTION),
+    SECURE_SESSION_APPROVAL_REJECTED("secure_session_approval_rejected", "The secure-session request was declined.", false, ErrorOrigin.LOCAL, ErrorCategory.LOCAL_ACTION),
+    SECURE_SESSION_CONFIRMATION_FAILED("secure_session_confirmation_failed", "Mutual secure-session key confirmation failed.", false, ErrorOrigin.REMOTE, ErrorCategory.PROTOCOL),
+    SECURE_SESSION_RECORD_INVALID("secure_session_record_invalid", "An authenticated control record was invalid or out of sequence.", false, ErrorOrigin.REMOTE, ErrorCategory.PROTOCOL),
+    SECURE_SESSION_LIMIT_REACHED("secure_session_limit_reached", "The secure session reached its bounded lifetime or record limit.", false, ErrorOrigin.LOCAL, ErrorCategory.LOCAL_ACTION),
     INTERNAL_TRANSPORT_FAILURE("internal_transport_failure", "The local transport could not complete the operation.", true, ErrorOrigin.LOCAL, ErrorCategory.UNKNOWN),
     ;
 }
@@ -311,6 +319,25 @@ public fun interface CancellableOperation {
 public interface ControlSession : AutoCloseable {
     public val negotiated: NegotiatedSession
     override fun close()
+}
+
+/** Explicit Part B upgrade seam for one already-selected Part A LAN control session. */
+public interface PairableControlSession : ControlSession {
+    public fun beginSecurePairing(listener: SecurePairingListener): SecureSessionOperation
+    public fun sendSecureControlRecord(type: SecureRecordType, payload: ByteArray): SecureControlSendResult
+    public fun receiveSecureControlRecord(): SecureControlReceiveResult
+}
+
+/** The caller must explicitly display and decide the exact expiring approval request. */
+public interface SecurePairingListener {
+    public fun onApprovalRequired(request: SecurePairingApprovalRequest)
+    public fun onCompleted(result: SecurePairingResult)
+}
+
+public interface SecureSessionOperation : AutoCloseable {
+    public fun decide(handle: SecureApprovalHandle, decision: SecureApprovalDecision): SecureApprovalResult
+    public fun cancel()
+    override fun close() = cancel()
 }
 
 public sealed interface PayloadTransferDecision {

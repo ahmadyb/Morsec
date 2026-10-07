@@ -38,6 +38,8 @@ androidxJunit = "1.2.1"
 espresso = "3.6.1"
 robolectric = "4.14.1"
 turbine = "1.2.0"
+conscrypt = "2.7.0"
+bouncyCastle = "1.86"
 
 [libraries]
 # --- AndroidX core -----------------------------------------------------------
@@ -96,6 +98,10 @@ media3-test-utils = { group = "androidx.media3", name = "media3-test-utils", ver
 
 # --- Nearby transport --------------------------------------------------------
 play-services-nearby = { group = "com.google.android.gms", name = "play-services-nearby", version.ref = "nearby" }
+
+# --- Reviewed TLS provider and certificate helpers for secure LAN pairing -----
+conscrypt-android = { group = "org.conscrypt", name = "conscrypt-android", version.ref = "conscrypt" }
+bouncycastle-pkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", version.ref = "bouncyCastle" }
 
 # --- Injection helpers for pure JVM modules ----------------------------------
 javax-inject = { group = "javax.inject", name = "javax.inject", version = "1" }

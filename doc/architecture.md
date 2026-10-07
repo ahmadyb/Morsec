@@ -19,6 +19,7 @@ Companion documents:
 - [`release.md`](release.md) — signing and release builds
 - [`transfer-restoration.md`](transfer-restoration.md) — explicit SAF checkpoint recovery and its bounded side-effect boundary
 - [`lan-session-foundation.md`](lan-session-foundation.md) — Milestone 4 Part A discovery/control protocol and limits
+- [`security/milestone-4-part-b.md`](security/milestone-4-part-b.md) — Milestone 4 Part B TLS/SAS/approval and AEAD control-record security model
 
 ## Module map
 
@@ -29,8 +30,8 @@ Companion documents:
 | `:core-design` | Android library | Mockup design tokens (colours, metrics, type) and the reusable Compose component set | **M1** |
 | `:core-data` | Android library | Room database (entities, DAOs, mappers), DataStore settings, repositories, logging + redaction, crash recorder | **M1 + M3 persistence** |
 | `:core-storage` | Android library | MediaStore / SAF / legacy-storage adapters, the runtime permission matrix, installed-apps reader, explicit SAF checkpoint restoration | **M1 + M3 storage** |
-| `:core-transfer` | Kotlin/JVM | Protocol framing, checksums, resume, queue/persistence contracts, transport-neutral discovery/session APIs, deterministic peer registry and versioned control-handshake codec | **M3 core + M4 Part A contracts** |
-| `:transport-lan` | Android library | Bounded UDP multicast discovery and selected-peer TCP control handshake; no payload/data channel | **M4 Part A foundation**, product readiness remains M6 |
+| `:core-transfer` | Kotlin/JVM | Protocol framing, checksums, resume, queue/persistence contracts, transport-neutral discovery/session APIs, deterministic peer registry, Part A control handshake, Part B pairing reducer, canonical transcript codec and bounded AEAD control-record state | **M3 core + M4 Part A/B contracts** |
+| `:transport-lan` | Android library | Bounded UDP multicast discovery and selected-peer control handshake; explicit Conscrypt TLS 1.3/SAS/approval upgrade and AEAD control records; no payload/data channel | **M4 Part A/B foundation**, product readiness remains M6 |
 | `:transport-nearby` | Android library | Google Play services Nearby Connections transport | M7 |
 | `:webshare-server` | Kotlin/JVM | Embedded HTTP/1.1 server + local JSON API (ADR-0002) | M11 |
 | `:media` | Android library | Media3 playback, MediaSession, metadata helpers | M10 |
@@ -63,9 +64,22 @@ wire formats are bounded hand-written byte layouts. `tools/verify/transfer-limit
 the build if a source outside the JDK allow-list is imported, or if a documented protocol
 limit stops matching the `ProtocolLimits` constant it names.
 
-`:transport-lan` now contains the explicit M4 Part A discovery/control foundation.
-`:transport-nearby`, `:webshare-server` and `:media` remain configured modules without
-production sources, so CI reports `NO-SOURCE` for their compile tasks.
+`:transport-lan` contains the explicit M4 Part A discovery/control foundation and the Part B
+secure-session upgrade seam. The Part B adapter uses Conscrypt TLS 1.3 and provider-backed
+AES-GCM, with no global JCA provider mutation. Pairing is invoked only from an explicit
+selected-peer control session. `:transport-nearby`, `:webshare-server` and `:media` remain
+configured modules without production sources, so CI reports `NO-SOURCE` for their compile
+tasks.
+
+### Milestone 4 Part B acceptance boundary
+
+The Part B foundation adds canonical transcript/SAS code, a deterministic exact-session
+approval and mutual-confirmation reducer, ephemeral TLS 1.3, and bounded `MSR1` control
+records. It adds neither file/chunk records nor a public transfer path. `CURRENT_MILESTONE`
+remains 2, payload and resume capabilities stay gated, and Room database/schema v1/v2 remain
+frozen. Exact-SHA hosted CI must compile and pass JVM/security/API-23 tests, dependency and
+license governance, Room comparison, zero-error lint, and both APK packaging tasks before
+Part B can be reported complete. See [`security/milestone-4-part-b.md`](security/milestone-4-part-b.md).
 
 ### Dependency rules
 

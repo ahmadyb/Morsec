@@ -1,8 +1,9 @@
 # Morsecode transfer protocol
 
 The original file-transfer wire protocol and engine were delivered by Milestone 3. The
-Milestone 4 Part A discovery/control-session envelope is documented separately in §11;
-it does not change the existing 44-byte transfer-frame format or add a payload path.
+Milestone 4 Part A discovery/control envelope and Part B authenticated control-session
+upgrade are documented separately in §11; neither changes the existing 44-byte
+transfer-frame format or adds a payload path.
 
 Everything described in the transfer-engine sections lives in `:core-transfer`, a
 **Kotlin/JVM** module: no Android class, Room, Hilt, coroutine, socket, system clock, or
@@ -15,6 +16,7 @@ Companion documents:
 
 - [`architecture.md`](architecture.md) — the module map and where each piece lives
 - [`lan-session-foundation.md`](lan-session-foundation.md) — Milestone 4 Part A discovery and control session
+- [`security/milestone-4-part-b.md`](security/milestone-4-part-b.md) — authenticated control-session upgrade, transcript, approval and records
 - [`AI_HANDOFF.md`](AI_HANDOFF.md) — session state and the completion gate
 - [`decisions/ADR-0001-toolchain.md`](decisions/ADR-0001-toolchain.md) — pinned versions
 
@@ -426,9 +428,24 @@ boundary, resource limits and permission matrix are specified in
 The `MSH1` handshake is not one of the fifteen `MSC1` file-transfer frames described above.
 The Part A negotiator forces payload, resume and secure-session bits off, even if a peer
 advertises them. Discovery ids, source addresses, profile fields and CRC32 do not
-authenticate peers. There is no cryptography, pairing, certificate, secure channel,
-transfer UI, or file payload method. A successful result is
-`ControlOnlyUnauthenticated`, not an authenticated peer or safe file-transfer session.
+authenticate peers. Part A alone has no cryptography or pairing and yields only
+`ControlOnlyUnauthenticated` control sessions.
+
+### Milestone 4 Part B: authenticated control-session upgrade
+
+Part B adds an explicit `PairableControlSession` seam for upgrading one existing selected-peer
+LAN control session. It uses pinned Conscrypt TLS 1.3 plus transcript-bound, human-compared
+approval, mutual encrypted key confirmation, and a bounded `MSR1` AEAD control-record layer.
+The exact transcript fields, failure policy, limits, key lifecycle, dependency/license
+policy, and API 23 evidence are specified in
+[`security/milestone-4-part-b.md`](security/milestone-4-part-b.md). Construction remains
+inert and there is no automatic approval. This does not authenticate discovery beacons or
+promote a peer based on LAN identity alone.
+
+The Part B secure-session marker is issued only after exact-request explicit local approval
+and both transcript-bound key confirmations. Payload, resume and file-data capabilities
+remain absent; `PayloadTransferGate` continues to return `SECURE_SESSION_REQUIRED`. No
+`MSC1` frame changes, file/chunk records, or transfer-engine calls are introduced.
 
 `PermissionMatrix.lanDiscovery()` requests no runtime permission; discovery does not scan
 Wi-Fi or read SSIDs. The LAN library declares its install-time network/multicast
@@ -446,5 +463,5 @@ v2 persistence and explicitly callable SAF restoration remain the separate Miles
 work; they add no Android or Room dependency to the pure core.
 
 `FeatureReadiness.CURRENT_MILESTONE` remains intentionally 2 and `TRANSFER_ENGINE` remains
-unavailable. The Part A transport foundation is not product integration and does not
-provide a usable file-sharing feature.
+unavailable. The Part A discovery and Part B secure-control foundations are not product
+integration and do not provide a usable file-sharing feature.

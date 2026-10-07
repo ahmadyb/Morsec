@@ -6,42 +6,61 @@ Continue the existing Android project; do not restart, redesign, replace, or reg
 
 GitHub repository: <https://github.com/ahmadyb/Morsec>
 
-This Arena session is fixed to `arena/268e777f-morsec`. Milestone 4 Part A starts from the
-accepted remote/local SHA `7b16cf286abbd681901831f21e1419e53cbed25d`; the completed implementation
-source snapshot is `ede3d5b5b490a8b0971d5a11cbcbc49fea11d615`. Do not switch or create branches,
-merge/rebase, rewrite history, force-push, or push anywhere except this branch. The original
-dirty checkout at `/home/user/Morsec` is preserved; the clean editing clone is
-`/home/user/Morsec-m4-part-a-7b16cf2`.
+This Arena session is fixed to `arena/268e777f-morsec`. Continue from accepted Part A commit
+`3868863015300c71e3ea163a601d9da706a45935`; do not switch or create branches, merge/rebase,
+rewrite history, force-push, or push anywhere except this branch. Preserve the separate dirty
+original checkout at `/home/user/Morsec`; perform Part B work only in its dedicated clean
+checkout. The accepted Part A implementation and its hosted evidence remain the baseline.
 
-## Current authoritative state — Milestone 4 Part A
+## Current authorized state — Milestone 4 Part B
 
-Implement **only** the LAN discovery/session foundation. Stop after Part A and its requested
-verification/handoff. No file payload transfer, Nearby transport, fallback, services,
-notifications, workers, wake locks, startup/background discovery, transfer UI, Media3,
-WebShare, Connection Doctor UI, or Room changes.
+Implement **only** Milestone 4 Part B: authenticated secure LAN control session and pairing
+foundation. Part A remains accepted and must not be recreated. Use a maintained, reviewed,
+API-23-compatible TLS/AEAD implementation; do not write custom key agreement, cipher, MAC,
+KDF, signature, PAKE, or RNG. If the approved library/API-level path fails, stop incomplete
+rather than falling back to plaintext or homemade cryptography.
 
-The implementation adds transport-neutral contracts, a deterministic bounded peer
-registry, monotonic clock seam, typed safe failures/diagnostics, a versioned control
-handshake codec, bounded UDP multicast beacons in `:transport-lan`, an explicit selected
-peer TCP control connection, lifecycle/network/resource ownership, Hilt provider binding,
-API-level permission tests, and the required Part A documentation set. Construction/DI is
-inert; discovery begins only through an explicit lease. Payload transfer is refused unless
-a future reviewed secure-session implementation issues approved evidence; Part A has no
-such issuer and no payload method.
+Part B adds an explicit upgrade seam on one already-selected Part A LAN control session: a
+bounded canonical transcript that binds all protocol, identity, nonce, role, session,
+capability, feature, transport, security-suite and resource-limit fields; a transcript-bound
+human verification code; an exact-session expiring explicit-approval capability; mutual
+role/direction-specific AEAD key confirmation; and a bounded control-record layer with
+strict replay/order/tamper/downgrade refusal and key lifecycle. Construction remains inert;
+there is no automatic approval, durable identity, trust persistence, file/chunk payload, or
+Room secret storage.
 
-Protocol/security limits: discovery is IPv4 multicast `239.255.33.45:33457`, max 192-byte
+No Nearby, background discovery/startup, UI, file or chunk transfer, resume-over-LAN,
+queue execution, services, workers/alarms, notifications, wake locks, or other product
+integration is authorized. Keep `CURRENT_MILESTONE = 2`, `TRANSFER_ENGINE` unavailable,
+payload/resume capabilities gated, and Room database/schema v1/v2 byte-identical with no
+v3. Stop after Part B.
+
+**Audit-order deviation:** the required initial repository/source/dependency/API-23/security
+audit report was delivered after cryptographic implementation had already begun. Preserve
+this process deviation in the final handoff; do not imply the required ordering was met.
+
+### Accepted Part A baseline and evidence
+
+Part A added transport-neutral contracts, a deterministic bounded peer registry, monotonic
+clock seam, typed safe failures/diagnostics, a versioned control handshake codec, bounded
+UDP multicast beacons in `:transport-lan`, an explicit selected-peer TCP control connection,
+lifecycle/network/resource ownership, Hilt provider binding, API-level permission tests, and
+its documentation. Construction/DI is inert; discovery begins only through an explicit
+lease. Part A has no payload method.
+
+Part A protocol limits: discovery is IPv4 multicast `239.255.33.45:33457`, max 192-byte
 `MSD1` datagrams with CRC32; control is TCP `33456`, max 512-byte `MSH1` frames. IDs are
 ephemeral correlation values, not trust anchors. Address/profile equality checks detect
-stale/mismatched observations but do not authenticate a peer. CRC32 is not a MAC. There is
-no cryptography, key exchange, pairing, signature, encryption, or safe payload channel.
-The negotiator always strips payload/resume/secure-session claims. LAN discovery scans no
+stale/mismatched observations but do not authenticate a peer. CRC32 is not a MAC. Part A
+itself has no cryptography, key exchange, pairing, signature, encryption, or safe payload
+channel. Its negotiator strips payload/resume/secure-session claims. LAN discovery scans no
 Wi-Fi networks and reads no SSIDs; `PermissionMatrix.lanDiscovery()` requests no runtime
 permission. Install-time network/multicast permissions live in the LAN library manifest.
 
-`CURRENT_MILESTONE = 2`, `TRANSFER_ENGINE` unavailable, and Room v1/v2 frozen. Part A does
+`CURRENT_MILESTONE = 2`, `TRANSFER_ENGINE` unavailable, and Room v1/v2 frozen. Part A did
 not enable product readiness or add schema/tables/migrations.
 
-### Current status and evidence
+### Accepted Part A exact-SHA status and evidence
 
 - Fixed branch: `arena/268e777f-morsec`; source commit:
   `ede3d5b5b490a8b0971d5a11cbcbc49fea11d615`.
@@ -68,13 +87,23 @@ not enable product readiness or add schema/tables/migrations.
   [37576934886](https://github.com/ahmadyb/Morsec/actions/runs/37576934886) passed all tests,
   lint and APK/schema steps; the final source-only fix removed its one additional lint
   warning, and final run 37577299393 is green at 45 warnings.
-- The Part A source implementation and its exact-SHA evidence above are complete. The
+- The Part A source implementation and exact-SHA evidence above are complete and remain the
+  accepted baseline at Part A commit `3868863015300c71e3ea163a601d9da706a45935`. The
   documentation-only closure snapshot `a9866c1b089f2a4ffd94b7ae6a25003d54adc118` also passed
   exact-SHA Android CI run [37577870037](https://github.com/ahmadyb/Morsec/actions/runs/37577870037).
-  This handoff remains at the Part A boundary; no further implementation scope is planned.
+  The explicit Part B authorization above supersedes the old Part A-only stop instruction.
 
-Older session notes below are historical base-state evidence only and do not supersede this
-Part A scope or branch instruction.
+### Milestone 4 Part B completion record
+
+Part B implementation and verification are in progress. Do not claim completion until a
+commit is pushed directly to `arena/268e777f-morsec`, local and remote SHA match, and the
+hosted run for that exact SHA is green for JVM/API-level security tests, dependency/license
+governance, Room immutability, zero-error lint, and debug/instrumentation APK packaging.
+Record the final SHA, CI run URL, test/lint counts, API 23 result, and any remaining process
+or audit-order deviation here before closing the milestone.
+
+Older session notes below are historical base-state evidence only and do not supersede the
+Part B authorization, scope, or branch instruction.
 
 ---
 
