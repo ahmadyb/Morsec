@@ -306,7 +306,7 @@ public class LanPeerDiscoveryProvider(
                 return SessionFailureCode.MULTICAST_PERMISSION_MISSING
             }
 
-            val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             if (wifiManager == null) {
                 stop(SessionFailureCode.MULTICAST_LOCK_FAILED)
                 return SessionFailureCode.MULTICAST_LOCK_FAILED
