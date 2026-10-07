@@ -66,8 +66,8 @@ kotlin {
 val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGovernance") {
     group = "verification"
     description = "Checks the exact Part B crypto runtime artifacts and pinned transitive versions."
-    actions.add(org.gradle.api.Action<org.gradle.api.Task> { task ->
-        val taskProject = task.project
+    doLast {
+        val taskProject = this.project
         val expectedConscryptVersion = "2.7.0"
         val expectedBouncyCastleVersion = "1.86"
         val runtimeConfiguration = taskProject.configurations.findByName("debugRuntimeClasspath")
@@ -114,7 +114,7 @@ val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGov
             harmonyLicense.readBytes().contentEquals(apacheLicense.readBytes())
         ) { "Conscrypt's Netty and Harmony Apache 2.0 license references must resolve exactly" }
         taskProject.logger.lifecycle("Secure crypto runtime graph verified: $secureArtifacts")
-    })
+    }
 }
 
 tasks.named("check") {
