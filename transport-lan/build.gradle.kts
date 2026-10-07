@@ -66,12 +66,16 @@ kotlin {
 val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGovernance") {
     group = "verification"
     description = "Checks the exact Part B crypto runtime artifacts and pinned transitive versions."
-    doLast {
-        val taskProject = this.project
+    actions.add(org.gradle.api.Action<org.gradle.api.Task> { task ->
+        val taskProject = task.project
         val expectedConscryptVersion = "2.7.0"
         val expectedBouncyCastleVersion = "1.86"
-        val resolved = taskProject.configurations.getByName("debugRuntimeClasspath")
-            .resolvedConfiguration.resolvedArtifacts
+        val runtimeConfiguration = taskProject.configurations.findByName("debugRuntimeClasspath")
+            ?: throw org.gradle.api.GradleException(
+                "debugRuntimeClasspath is unavailable in ${taskProject.path}; " +
+                    "configurations=${taskProject.configurations.names.sorted()}"
+            )
+        val resolved = runtimeConfiguration.resolvedConfiguration.resolvedArtifacts
         val secureArtifacts = resolved.associate { artifact ->
             val id = artifact.moduleVersion.id
             "${id.group}:${id.name}" to id.version
@@ -110,7 +114,7 @@ val verifySecureDependencyGovernance = tasks.register("verifySecureDependencyGov
             harmonyLicense.readBytes().contentEquals(apacheLicense.readBytes())
         ) { "Conscrypt's Netty and Harmony Apache 2.0 license references must resolve exactly" }
         taskProject.logger.lifecycle("Secure crypto runtime graph verified: $secureArtifacts")
-    }
+    })
 }
 
 tasks.named("check") {
