@@ -1,34 +1,67 @@
 # Morsecode project handoff
 
-You are continuing an existing Android project. Do not restart, redesign,
-replace, or regenerate the repository.
+Continue the existing Android project; do not restart, redesign, replace, or regenerate it.
 
-## Repository
+## Repository and branch
 
-GitHub repository:
-https://github.com/ahmadyb/Morsec
+GitHub repository: <https://github.com/ahmadyb/Morsec>
 
-Working branch for this Arena session:
-arena/268e777f-morsec
+This Arena session is fixed to `arena/268e777f-morsec`. Milestone 4 Part A starts from the
+accepted remote/local SHA `7b16cf286abbd681901831f21e1419e53cbed25d`. Do not switch or create
+branches, merge/rebase, rewrite history, force-push, or push anywhere except this branch.
+The original dirty checkout at `/home/user/Morsec` is preserved; the clean editing clone is
+`/home/user/Morsec-m4-part-a-7b16cf2`.
 
-Accepted Milestone 3 implementation SHA:
-`0abcc3603df37f5ce1f0aa47fa3c1d551c0a61e9`. This session is fixed to
-`arena/268e777f-morsec`; do not switch branches, create another branch, or push anywhere
-else. Preserve any live rescue artifacts. Never rewrite history, force-push, or run
-`git clean` without explicit path-by-path review.
+## Current authoritative state — Milestone 4 Part A
 
-Older session notes below name prior Arena branches and heads; they are historical
-records, not branch instructions. The current authoritative scope and latest status are
-recorded first below.
+Implement **only** the LAN discovery/session foundation. Stop after Part A and its requested
+verification/handoff. No file payload transfer, Nearby transport, fallback, services,
+notifications, workers, wake locks, startup/background discovery, transfer UI, Media3,
+WebShare, Connection Doctor UI, or Room changes.
+
+The implementation adds transport-neutral contracts, a deterministic bounded peer
+registry, monotonic clock seam, typed safe failures/diagnostics, a versioned control
+handshake codec, bounded UDP multicast beacons in `:transport-lan`, an explicit selected
+peer TCP control connection, lifecycle/network/resource ownership, Hilt provider binding,
+API-level permission tests, and the required Part A documentation set. Construction/DI is
+inert; discovery begins only through an explicit lease. Payload transfer is refused unless
+a future reviewed secure-session implementation issues approved evidence; Part A has no
+such issuer and no payload method.
+
+Protocol/security limits: discovery is IPv4 multicast `239.255.33.45:33457`, max 192-byte
+`MSD1` datagrams with CRC32; control is TCP `33456`, max 512-byte `MSH1` frames. IDs are
+ephemeral correlation values, not trust anchors. Address/profile equality checks detect
+stale/mismatched observations but do not authenticate a peer. CRC32 is not a MAC. There is
+no cryptography, key exchange, pairing, signature, encryption, or safe payload channel.
+The negotiator always strips payload/resume/secure-session claims. LAN discovery scans no
+Wi-Fi networks and reads no SSIDs; `PermissionMatrix.lanDiscovery()` requests no runtime
+permission. Install-time network/multicast permissions live in the LAN library manifest.
+
+`CURRENT_MILESTONE = 2`, `TRANSFER_ENGINE` unavailable, and Room v1/v2 frozen. Part A does
+not enable product readiness or add schema/tables/migrations.
+
+### Current status and evidence
+
+- Starting branch/SHA: `arena/268e777f-morsec` at
+  `7b16cf286abbd681901831f21e1419e53cbed25d`.
+- Current Part A commit SHA and exact-SHA hosted CI run: pending final commit and workflow.
+- The sandbox has no Java, Gradle, or Kotlin compiler. Android compile, full JVM tests, lint,
+  KSP/schema checks, and APK assembly must be evidenced by the hosted Android CI workflow.
+- Before completion: run static Node verifiers and `git diff --check`; inspect scope and
+  Room/readiness invariants; commit and push directly to the fixed branch; monitor exact-SHA
+  CI; repair any failures; then synchronize this handoff to the green final SHA/run and run
+  CI again if that documentation update changes the commit.
+
+Older session notes below are historical base-state evidence only and do not supersede this
+Part A scope or branch instruction.
 
 ---
 
-## Current authoritative state — 2026-10-06: Milestone 3 complete; next milestone unapproved
+## Historical accepted base — Milestone 3 completion
 
-The authorized repository-level Milestone 3 transfer foundation, Android storage, Room v2
-persistence, and callable SAF restoration are complete. Formal closure is documentation-only.
-No additional functional work is authorized; do not begin Milestone 4 or transport, service,
-or transfer UI work. The next milestone remains unapproved.
+At the accepted M3 base, the next milestone had not yet been authorized. That restriction was
+superseded by the explicit M4 Part A task above. The M3 code, schema and CI evidence remain
+part of the repository history and must remain preserved.
 
 ### Final accepted state
 

@@ -18,6 +18,7 @@ Companion documents:
 - [`fidelity-notes.md`](fidelity-notes.md) — how the UI tracks the Material 3 mockup
 - [`release.md`](release.md) — signing and release builds
 - [`transfer-restoration.md`](transfer-restoration.md) — explicit SAF checkpoint recovery and its bounded side-effect boundary
+- [`lan-session-foundation.md`](lan-session-foundation.md) — Milestone 4 Part A discovery/control protocol and limits
 
 ## Module map
 
@@ -28,20 +29,23 @@ Companion documents:
 | `:core-design` | Android library | Mockup design tokens (colours, metrics, type) and the reusable Compose component set | **M1** |
 | `:core-data` | Android library | Room database (entities, DAOs, mappers), DataStore settings, repositories, logging + redaction, crash recorder | **M1 + M3 persistence** |
 | `:core-storage` | Android library | MediaStore / SAF / legacy-storage adapters, the runtime permission matrix, installed-apps reader, explicit SAF checkpoint restoration | **M1 + M3 storage** |
-| `:core-transfer` | Kotlin/JVM | Protocol framing, checksums, resume, the queue scheduler, snapshot persistence contracts — the pure engine; wiring it to a transport is M5 | **M3 core**, M5 wiring |
-| `:transport-lan` | Android library | UDP discovery beacons, TCP control and data channels | M6 |
+| `:core-transfer` | Kotlin/JVM | Protocol framing, checksums, resume, queue/persistence contracts, transport-neutral discovery/session APIs, deterministic peer registry and versioned control-handshake codec | **M3 core + M4 Part A contracts** |
+| `:transport-lan` | Android library | Bounded UDP multicast discovery and selected-peer TCP control handshake; no payload/data channel | **M4 Part A foundation**, product readiness remains M6 |
 | `:transport-nearby` | Android library | Google Play services Nearby Connections transport | M7 |
 | `:webshare-server` | Kotlin/JVM | Embedded HTTP/1.1 server + local JSON API (ADR-0002) | M11 |
 | `:media` | Android library | Media3 playback, MediaSession, metadata helpers | M10 |
 | `webshare-ui` | npm (not Gradle) | TypeScript/CSS browser client; its production bundle is embedded into `:app` assets | M12 |
 
 `core-transfer` holds the pure transfer foundation — framing, checksums, resume, the
-queue scheduler and persistence contracts — delivered by Milestone 3 and covered by 439
-JVM tests. See [`transfer-protocol.md`](transfer-protocol.md). The repository-level
-Milestone 3 delivery also includes Android storage, Room v2 persistence, and explicitly
-callable SAF restoration; these do not add Android or Room dependencies to `:core-transfer`.
-This foundation is not a user-accessible transfer feature: `FeatureReadiness.TRANSFER_ENGINE`
-remains pinned to milestone 5 for product integration and activation.
+queue scheduler and persistence contracts — delivered by Milestone 3, plus the
+transport-neutral session contracts and bounded handshake codec from Milestone 4 Part A.
+The original Milestone 3 engine is covered by 439 JVM tests; Part A adds dedicated
+contract/codec tests. See [`transfer-protocol.md`](transfer-protocol.md) and
+[`lan-session-foundation.md`](lan-session-foundation.md). The repository-level Milestone 3
+delivery also includes Android storage, Room v2 persistence, and explicitly callable SAF
+restoration; these do not add Android or Room dependencies to `:core-transfer`. Part A is a
+foundation only: `FeatureReadiness.CURRENT_MILESTONE` stays 2 and
+`FeatureReadiness.TRANSFER_ENGINE` remains unavailable.
 
 Final exact-SHA Android CI run [37514300366](https://github.com/ahmadyb/Morsec/actions/runs/37514300366)
 verified commit `0abcc3603df37f5ce1f0aa47fa3c1d551c0a61e9`: 2,627 JVM tests passed, zero
@@ -52,16 +56,16 @@ version 2 with 13 tables and a byte-identical committed schema export.
 `FeatureReadiness.CURRENT_MILESTONE` intentionally remains 2 and `TRANSFER_ENGINE` remains
 unavailable until its product integration milestone.
 
-Its only declared dependencies are `:core-model` and JUnit. It declares no coroutines, no
-serialization and no injection, because it needs none of them: the reducer is a synchronous
-function, the wire format is a hand-rolled byte layout, and there is nothing to inject into
-a value. `tools/verify/transfer-limits.mjs` fails the build if a source outside the JDK
-allow-list is imported, or if a documented protocol limit stops matching the
-`ProtocolLimits` constant it names.
+Its only declared dependencies are `:core-model` and JUnit. It declares no coroutines,
+serialization, Android types, sockets, system clock or injection: the reducer and registry
+are deterministic values/functions, the clock is an injected monotonic interface, and the
+wire formats are bounded hand-written byte layouts. `tools/verify/transfer-limits.mjs` fails
+the build if a source outside the JDK allow-list is imported, or if a documented protocol
+limit stops matching the `ProtocolLimits` constant it names.
 
-`:transport-lan`, `:transport-nearby`, `:webshare-server` and `:media` still exist as
-configured modules with a build script and no sources, which is why CI reports `NO-SOURCE`
-for their compile and KSP tasks.
+`:transport-lan` now contains the explicit M4 Part A discovery/control foundation.
+`:transport-nearby`, `:webshare-server` and `:media` remain configured modules without
+production sources, so CI reports `NO-SOURCE` for their compile tasks.
 
 ### Dependency rules
 
@@ -183,27 +187,32 @@ Videos and Music flows merge MediaStore rows with matching files discovered recu
 inside valid SAF grants; the folder browser keeps using direct children so it remains
 hierarchical. MediaStore permission is not required to read a file the user granted via SAF.
 
-`permissions/PermissionMatrix` is the single source of truth for *which* permission a
-feature needs *at this API level* — media read (split at 33), media write (23–28 only),
-LAN discovery (fine location ≤ 32), Nearby (Bluetooth scan/advertise/connect ≥ 31),
-notifications (≥ 33). Screens ask for their own set at the moment the user triggers the
-action; nothing is requested at launch.
+`permissions/PermissionMatrix` is the single source of truth for *which* runtime
+permission a feature needs *at this API level* — media read (split at 33), media write
+(23–28 only), **LAN discovery (none at every supported API)**, Nearby (location through API
+30; Bluetooth scan/advertise/connect from API 31), and notifications (API 33+). LAN uses
+install-time network/multicast manifest permissions and does not scan Wi-Fi or read SSIDs.
+Screens ask for any required runtime permission contextually; nothing is requested at launch.
 
-### Transports, media, WebShare (later milestones)
+### Transports, media, WebShare
 
-`:transport-lan` (M6) will own the UDP beacon on 33457 and the TCP control/data channels on
-33456; `:transport-nearby` (M7) the Play services path, with `DOCTOR_NEARBY` checks landing
-in the same milestone. Both will implement the transport contract declared in
-`:core-transfer`, whose pure engine already exists (M3) and whose wiring to a real socket is
-M5. `:media` (M10) wraps Media3 for received audio/video. `:webshare-server` (M11) and
-`webshare-ui` (M12) implement ADR-0002.
+Milestone 4 Part A adds a dormant, explicitly started LAN discovery/session foundation:
+`:transport-lan` owns the bounded UDP multicast beacon on 33457 and a TCP control-only
+handshake listener on 33456. It has no payload socket or file-transfer method. Each lease
+owns its multicast lock, network callback, sockets and bounded worker/callback queues, and
+closes them on cancellation, failure, or its five-minute cap. The Part A code does not
+activate a user-facing feature; `LAN_TRANSPORT` remains gated until its product-readiness
+milestone (M6). `:transport-nearby` (M7) remains the future Play services path, with
+`DOCTOR_NEARBY` checks in that milestone. Both use the transport-neutral contracts in
+`:core-transfer`. `:media` (M10) wraps Media3 for received audio/video. `:webshare-server`
+(M11) and `webshare-ui` (M12) implement ADR-0002.
 
 ### `:core-transfer` — the pure engine (M3)
 
-`:core-transfer` is Kotlin/JVM with no Android, Room, Hilt, coroutine, socket or clock
-dependency, and that constraint is what makes it testable at all: the whole engine runs on
-the JVM in milliseconds, so the rules it encodes are enforced by tests rather than by
-convention.
+`:core-transfer` is Kotlin/JVM with no Android, Room, Hilt, coroutine, socket or system
+clock dependency. Session contracts expose only an injected monotonic-clock seam; the
+module itself reads no time. That boundary keeps the core testable on the JVM, so the rules
+it encodes are enforced by tests rather than by convention.
 
 | Package | Responsibility |
 | --- | --- |
@@ -467,7 +476,7 @@ artifact hosts are unreachable from some environments; see
 3. File browsing depth (folders, sort, multi-select, Apps tab)
 4. Diagnostics depth (Doctor checks, logs, crash reports, exports)
 5. `TRANSFER_ENGINE` — framing, checksums, resume, queue
-6. `LAN_TRANSPORT` — UDP discovery, TCP control/data
+6. `LAN_TRANSPORT` — full user-facing LAN transport integration beyond the dormant M4 Part A control foundation
 7. `NEARBY_TRANSPORT` + `DOCTOR_NEARBY`
 8. `BACKGROUND_SERVICE` — foreground service, notifications, wake locks
 9. `SESSIONS_AND_BROADCAST` — sessions, pairing, broadcast

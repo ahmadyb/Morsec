@@ -1,7 +1,8 @@
 /*
- * transport-lan — UDP beacon discovery (:33457) plus the TCP control/data
- * transport (:33456). Multicast and Wi-Fi locks are acquired here and released
- * deterministically.
+ * transport-lan — bounded UDP multicast discovery (:33457) plus the selected-peer
+ * TCP control handshake (:33456). The discovery lease owns and releases its
+ * multicast lock, sockets, network callback and bounded workers. Part A has no
+ * file-data channel.
  */
 plugins {
     alias(libs.plugins.android.library)

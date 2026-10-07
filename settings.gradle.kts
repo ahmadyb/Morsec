@@ -32,7 +32,7 @@ rootProject.name = "Morsecode"
  *   core-data        – Room persistence, DataStore settings, repositories
  *   core-storage     – MediaStore / SAF / legacy storage adapters, permissions
  *   core-transfer    – protocol framing, checksums, resume + queue engine (JVM)
- *   transport-lan    – UDP discovery, TCP control/data transport
+ *   transport-lan    – bounded UDP discovery, selected-peer TCP control handshake
  *   transport-nearby – Google Play services Nearby Connections transport
  *   webshare-server  – embedded HTTP/1.1 server + local JSON API (JVM)
  *   media            – Media3 playback, MediaSession, metadata helpers

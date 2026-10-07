@@ -23,13 +23,9 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
-    <!-- LAN discovery and the embedded WebShare server. -->
+    <!-- Embedded WebShare; the LAN library owns its network/multicast declarations. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <!-- Required for UDP beacons to be delivered while the screen is on. -->
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Keeps a transfer alive while the screen is off. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 

@@ -45,14 +45,12 @@ public object PermissionMatrix {
         if (sdk <= 28) listOf(Manifest.permission.WRITE_EXTERNAL_STORAGE) else emptyList()
 
     /**
-     * LAN discovery: Wi-Fi state plus a multicast lock so UDP beacons are
-     * delivered while the screen is on.
+     * LAN discovery does not scan for Wi-Fi networks or read SSIDs. Its network
+     * and multicast permissions are install-time manifest declarations, so no
+     * runtime permission is requested on any supported API level.
      */
-    public fun lanDiscovery(sdk: Int = Build.VERSION.SDK_INT): List<String> = when {
-        // API 23-32: a Wi-Fi scan/read requires location permission.
-        sdk <= 32 -> listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        else -> emptyList()
-    }
+    @Suppress("UNUSED_PARAMETER")
+    public fun lanDiscovery(sdk: Int = Build.VERSION.SDK_INT): List<String> = emptyList()
 
     /**
      * Nearby Connections. API 31+ replaced the location requirement with the
@@ -98,8 +96,9 @@ public object PermissionMatrix {
         isGranted(context, Manifest.permission.CHANGE_WIFI_MULTICAST_STATE)
 
     /**
-     * True when the platform will deliver Wi-Fi scan results: location must be
-     * enabled on API 23-32, and on API 33+ the nearby permissions cover it.
+     * True when an actual Wi-Fi scan is blocked by location being disabled on
+     * API 23-32. LAN multicast discovery does not perform a Wi-Fi scan and never
+     * consults this check.
      */
     public fun wifiScanBlockedByLocation(context: Context, sdk: Int = Build.VERSION.SDK_INT): Boolean =
         sdk <= 32 && !isLocationEnabled(context)

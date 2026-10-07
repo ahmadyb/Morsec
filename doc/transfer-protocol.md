@@ -1,19 +1,20 @@
 # Morsecode transfer protocol
 
-The wire protocol and the transfer core that implements it, as delivered by
-Milestone 3.
+The original file-transfer wire protocol and engine were delivered by Milestone 3. The
+Milestone 4 Part A discovery/control-session envelope is documented separately in §11;
+it does not change the existing 44-byte transfer-frame format or add a payload path.
 
-Everything described here lives in `:core-transfer`, which is a **Kotlin/JVM**
-module: no Android class, no Room, no Hilt, no coroutine, no socket, no clock and
-no `Thread.sleep` appears anywhere in its sources. That is not an aesthetic
-choice — it is what lets the 439 tests that cover this document run on the JVM in
-milliseconds, and what lets the same engine be driven by a LAN socket, by Nearby
-Connections or by a test harness without changing a line of it. Its only declared
-dependencies are `:core-model` and JUnit.
+Everything described in the transfer-engine sections lives in `:core-transfer`, a
+**Kotlin/JVM** module: no Android class, Room, Hilt, coroutine, socket, system clock, or
+`Thread.sleep` appears in its sources. It exposes only an injected monotonic-clock interface
+for deterministic peer expiry. The original 439 engine tests run on the JVM, and the same
+core remains usable from LAN, Nearby or a test harness. Its only declared dependencies are
+`:core-model` and JUnit.
 
 Companion documents:
 
 - [`architecture.md`](architecture.md) — the module map and where each piece lives
+- [`lan-session-foundation.md`](lan-session-foundation.md) — Milestone 4 Part A discovery and control session
 - [`AI_HANDOFF.md`](AI_HANDOFF.md) — session state and the completion gate
 - [`decisions/ADR-0001-toolchain.md`](decisions/ADR-0001-toolchain.md) — pinned versions
 
@@ -407,23 +408,43 @@ and no stack trace reaches a log line, a UI row or a peer.
 
 ---
 
-## 11. What this document does not cover
+## 11. Milestone 4 Part A: discovery and control handshake
 
-This section describes the boundary of the pure JVM `:core-transfer` module, not the
-scope of repository-level Milestone 3. None of the following Android, transport, or
-application concerns belongs in `:core-transfer`. Separately, repository-level Milestone 3
-delivered Android storage, Room v2 persistence, and explicitly callable SAF restoration;
-those adapters do not add Android or Room dependencies to the pure module.
+The transport-neutral contracts live in `:core-transfer/session`; their Android LAN
+implementation lives in `:transport-lan`. The complete packet layout, lifecycle, security
+boundary, resource limits and permission matrix are specified in
+[`lan-session-foundation.md`](lan-session-foundation.md). In summary, Part A adds:
 
-- sockets, LAN/UDP discovery, Nearby Connections, Wi-Fi Direct
-- foreground services, notifications, wake locks
-- Android storage adapters and the Room implementation (outside this module, but delivered
-  separately as the repository's Milestone 3 storage/persistence work)
-- Compose repositories and transfer UI
-- Media3 and the WebShare server and client
+- bounded `MSD1` multicast beacon discovery on UDP 33457, with a CRC32 damage check;
+- an explicitly started, five-minute-bounded discovery lease and monotonic deterministic
+  peer registry;
+- a selected-peer TCP 33456 control handshake using the separate bounded `MSH1` envelope;
+- typed safe failures and aggregate-only diagnostics; and
+- a `PayloadTransferGate` that refuses unless a future reviewed secure-session issuer
+  supplies evidence. No such issuer exists in Part A.
 
-`FeatureReadiness.TRANSFER_ENGINE` remains pinned to milestone 5, and
-`FeatureReadiness.CURRENT_MILESTONE` remains intentionally 2. Milestone 3 delivered the
-transfer/storage/persistence foundation, not an activated user-facing transfer feature.
-Milestone 5 remains the product integration and activation gate; this document does not
-claim that a transport, service, or transfer UI is implemented.
+The `MSH1` handshake is not one of the fifteen `MSC1` file-transfer frames described above.
+The Part A negotiator forces payload, resume and secure-session bits off, even if a peer
+advertises them. Discovery ids, source addresses, profile fields and CRC32 do not
+authenticate peers. There is no cryptography, pairing, certificate, secure channel,
+transfer UI, or file payload method. A successful result is
+`ControlOnlyUnauthenticated`, not an authenticated peer or safe file-transfer session.
+
+`PermissionMatrix.lanDiscovery()` requests no runtime permission; discovery does not scan
+Wi-Fi or read SSIDs. The LAN library declares its install-time network/multicast
+permissions. `CURRENT_MILESTONE` remains 2 and `TRANSFER_ENGINE` remains gated; a dormant
+provider binding does not activate the feature.
+
+## 12. Boundary between the transfer engine and LAN foundation
+
+This section distinguishes the pure JVM `:core-transfer` module from the Android adapter.
+Sockets, Android network callbacks, multicast locks and their resource ownership are in
+`:transport-lan`, never in `:core-transfer`. Nearby Connections and Wi-Fi Direct are not
+implemented by Part A. Foreground services, notifications, wake locks, WorkManager,
+transfer UI, Media3 and WebShare remain outside this scope. Android storage adapters, Room
+v2 persistence and explicitly callable SAF restoration remain the separate Milestone 3
+work; they add no Android or Room dependency to the pure core.
+
+`FeatureReadiness.CURRENT_MILESTONE` remains intentionally 2 and `TRANSFER_ENGINE` remains
+unavailable. The Part A transport foundation is not product integration and does not
+provide a usable file-sharing feature.
