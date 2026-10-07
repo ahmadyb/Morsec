@@ -69,11 +69,18 @@ this process deviation in the final handoff; do not imply the required ordering 
   role/direction-separated; records are replay/order/tamper checked and close before
   sequence/byte/lifetime limits. Production exposes only empty PING/PONG/CLOSE controls;
   it has no file/chunk transfer or plaintext fallback.
-- Verification at this late audit: refs 31/31, token parity 195/195, transfer limits/core
-  isolation 21/21, Room baseline 11/11, secure dependency/license governance 13/13, TOML
-  parse and `git diff --check` pass. The new JVM/instrumentation tests, build, lint, APKs and
-  API-23 emulator still require exact-SHA hosted CI. This sandbox has no `java`, `javac`,
+- Local static verification at the late audit: refs 31/31, token parity 195/195, transfer
+  limits/core isolation 21/21, Room baseline 11/11, secure dependency/license governance
+  13/13, TOML parse and `git diff --check` pass. This sandbox has no `java`, `javac`,
   `kotlinc`, or Gradle executable; do not report local compilation/test evidence.
+- Exact-SHA hosted Android CI for the Part B implementation commit
+  `dc35fad7fdcef6be0f0fd0eb5269d936054d479b` passed in [run 37669345970](https://github.com/ahmadyb/Morsec/actions/runs/37669345970).
+  It reports 2,673 JVM tests passed (0 failed, 0 skipped), Android lint with 0 errors and
+  48 warnings across 7 reports, and successful secure runtime dependency-graph verification,
+  Room schema validation, debug APK (32.20 MiB), instrumentation APK (1.10 MiB), and bundled
+  Conscrypt TLS 1.3 compatibility instrumentation on API 23. The committed Room v1/v2
+  exports remained unchanged. This proves the implementation commit's checks only; any later
+  documentation-only closeout commit must also pass CI on its exact SHA.
 - Prohibited product scope remains untouched: no UI, Nearby, payload/chunks, services,
   workers/alarms, notifications, wake locks, background discovery, permanent identity,
   trusted-device persistence, Room changes, WebShare or Media3 work.
@@ -134,12 +141,15 @@ not enable product readiness or add schema/tables/migrations.
 
 ### Milestone 4 Part B completion record
 
-Part B implementation and verification are in progress. Do not claim completion until a
-commit is pushed directly to `arena/268e777f-morsec`, local and remote SHA match, and the
-hosted run for that exact SHA is green for JVM/API-level security tests, dependency/license
-governance, Room immutability, zero-error lint, and debug/instrumentation APK packaging.
-Record the final SHA, CI run URL, test/lint counts, API 23 result, and any remaining process
-or audit-order deviation here before closing the milestone.
+The Part B implementation commit `dc35fad7fdcef6be0f0fd0eb5269d936054d479b` was pushed
+on `arena/268e777f-morsec` and passed its exact-SHA hosted CI; see run 37669345970 and the
+evidence above. This handoff update is documentation-only and remains subject to the same
+exact-SHA CI requirement before closeout. The required audit-before-cryptography ordering was
+violated: the audit report came after cryptographic implementation began, and this process
+deviation cannot be retroactively cured. Under the strict task instructions, do not call the
+milestone complete without an explicit waiver of that acceptance condition. Record the final
+branch SHA, exact-SHA CI run, test/lint counts, API 23 result, and this unresolved process
+deviation in the final closeout.
 
 Older session notes below are historical base-state evidence only and do not supersede the
 Part B authorization, scope, or branch instruction.
