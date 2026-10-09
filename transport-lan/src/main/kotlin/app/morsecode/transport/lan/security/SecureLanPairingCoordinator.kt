@@ -63,6 +63,13 @@ internal class SecureLanPairingCoordinator(
     private val clock: MonotonicClock,
     private val random: SecureRandom,
     private val interaction: PairingInteraction,
+    /**
+     * Process-local denial-of-service throttle. Optional so a caller that has no lease-scoped
+     * limiter still gets the deadline protection; it is never a substitute for the SAS comparison.
+     */
+    private val attemptLimiter: SecurePairingAttemptLimiter? = null,
+    private val peerIdentityKey: String = controlSession.remoteProfile.peerInstanceId.value,
+    private val sourceKey: String = UNKNOWN_SOURCE,
 ) {
     @Volatile
     private var tls: EstablishedTlsSession? = null
@@ -79,6 +86,26 @@ internal class SecureLanPairingCoordinator(
             closeSocket(rawSocket)
             return failed(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         }
+        val limiter = attemptLimiter
+        var admitted = false
+        if (limiter != null) {
+            when (val admission = limiter.tryStart(peerIdentityKey, sourceKey)) {
+                is PairingAdmission.Granted -> admitted = true
+                is PairingAdmission.Refused -> {
+                    // An exhausted start budget means this discovery identity is spent: it must be
+                    // rediscovered rather than retried. Concurrency and cooldown refusals are not
+                    // the peer's fault, so they do not invalidate it.
+                    if (admission.reason == PairingAdmission.RefusalReason.IDENTITY_START_BUDGET_EXHAUSTED ||
+                        admission.reason == PairingAdmission.RefusalReason.PAIR_START_BUDGET_EXHAUSTED
+                    ) {
+                        limiter.invalidateIdentity(peerIdentityKey)
+                    }
+                    closeSocket(rawSocket)
+                    return failed(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
+                }
+            }
+        }
+        var authenticated = false
         var localHello: SecurePairingHello? = null
         var remoteHello: SecurePairingHello? = null
         var transcript: SecurePairingTranscript? = null
@@ -87,10 +114,18 @@ internal class SecureLanPairingCoordinator(
         try {
             if (interaction.isCancelled()) return failed(SessionFailureCode.OPERATION_CANCELLED)
             rawSocket.soTimeout = SecureSessionLimits.TLS_HANDSHAKE_TIMEOUT_MILLIS
-            val established = ConscryptSecureSessionEngine(random).establish(
-                rawSocket,
-                initiator = role == SecurePeerRole.INITIATOR,
-            )
+            // soTimeout bounds a single read; this bounds the whole handshake, so a peer that
+            // dribbles handshake bytes cannot hold the worker past the deadline.
+            val established = guarded(
+                label = "tls-handshake",
+                socket = rawSocket,
+                budgetMillis = SecureSessionLimits.TLS_HANDSHAKE_DEADLINE_MILLIS,
+            ) {
+                ConscryptSecureSessionEngine(random).establish(
+                    rawSocket,
+                    initiator = role == SecurePeerRole.INITIATOR,
+                )
+            }
             tls = established
             if (interaction.isCancelled()) return failed(SessionFailureCode.OPERATION_CANCELLED)
             val socket = established.socket
@@ -101,25 +136,31 @@ internal class SecureLanPairingCoordinator(
             val secureId = if (role == SecurePeerRole.INITIATOR) randomSessionId() else null
             val localNonce = randomBytes(SecureSessionLimits.NONCE_BYTES)
             val localFingerprint = established.localFingerprintBytes()
-            try {
-                if (role == SecurePeerRole.INITIATOR) {
-                    val id = requireNotNull(secureId)
-                    localHello = createHello(id, localNonce, localFingerprint)
-                    writeHello(output, requireNotNull(localHello))
-                    remoteHello = readHello(input, socket)
-                } else {
-                    remoteHello = readHello(input, socket)
-                    validateRemoteHello(requireNotNull(remoteHello), null, established.peerFingerprintBytes())
-                    localHello = createHello(
-                        secureSessionId = requireNotNull(remoteHello).secureSessionId,
-                        nonce = localNonce,
-                        certificateFingerprint = localFingerprint,
-                    )
-                    writeHello(output, requireNotNull(localHello))
+            guarded(
+                label = "pairing-hello",
+                socket = socket,
+                budgetMillis = SecureSessionLimits.PAIRING_HELLO_DEADLINE_MILLIS,
+            ) {
+                try {
+                    if (role == SecurePeerRole.INITIATOR) {
+                        val id = requireNotNull(secureId)
+                        localHello = createHello(id, localNonce, localFingerprint)
+                        writeHello(output, requireNotNull(localHello))
+                        remoteHello = readHello(input, socket)
+                    } else {
+                        remoteHello = readHello(input, socket)
+                        validateRemoteHello(requireNotNull(remoteHello), null, established.peerFingerprintBytes())
+                        localHello = createHello(
+                            secureSessionId = requireNotNull(remoteHello).secureSessionId,
+                            nonce = localNonce,
+                            certificateFingerprint = localFingerprint,
+                        )
+                        writeHello(output, requireNotNull(localHello))
+                    }
+                } finally {
+                    localNonce.fill(0)
+                    localFingerprint.fill(0)
                 }
-            } finally {
-                localNonce.fill(0)
-                localFingerprint.fill(0)
             }
 
             val remote = requireNotNull(remoteHello)
@@ -196,19 +237,23 @@ internal class SecureLanPairingCoordinator(
             }
             val firstFrame = (encodedConfirmation as? SecureRecordResult.Encoded)?.frameBytes()
                 ?: return failed(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
-            try {
-                output.write(firstFrame)
-                output.flush()
-            } finally {
-                firstFrame.fill(0)
-            }
-            val localConfirmationResult = pairingMachine.markLocalConfirmationSentAfterProtectedWrite()
-            if (localConfirmationResult is SecurePairingResult.Failed) {
-                return SecurePairingRunResult.Failed(localConfirmationResult)
-            }
-
-            val incoming = readRecord(input, requireNotNull(recordLayer), local.secureSessionId, role, socket)
-                ?: return failed(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
+            val incoming = guarded(
+                label = "key-confirmation",
+                socket = socket,
+                budgetMillis = SecureSessionLimits.CONFIRMATION_DEADLINE_MILLIS,
+            ) {
+                try {
+                    output.write(firstFrame)
+                    output.flush()
+                } finally {
+                    firstFrame.fill(0)
+                }
+                val localConfirmationResult = pairingMachine.markLocalConfirmationSentAfterProtectedWrite()
+                if (localConfirmationResult is SecurePairingResult.Failed) {
+                    return SecurePairingRunResult.Failed(localConfirmationResult)
+                }
+                readRecord(input, requireNotNull(recordLayer), local.secureSessionId, role, socket)
+            } ?: return failed(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
             val record = (incoming as? SecureRecordResult.Decoded)?.record
                 ?: return failed(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
             if (record.type != SecureRecordType.KEY_CONFIRMATION) {
@@ -235,6 +280,7 @@ internal class SecureLanPairingCoordinator(
             val expiresAt = saturatingAdd(pairStartedAt, SecureSessionLimits.MAX_SESSION_LIFETIME_MILLIS)
             if (now >= expiresAt) return failed(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
             keptSocket = true
+            authenticated = true
             return SecurePairingRunResult.Authenticated(
                 secureSocket = socket,
                 negotiatedControlSession = controlSession,
@@ -248,6 +294,10 @@ internal class SecureLanPairingCoordinator(
         } catch (_: Exception) {
             return failedFromMachine(machine, SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         } finally {
+            if (admitted) {
+                if (authenticated) limiter?.recordSuccess(peerIdentityKey, sourceKey) else limiter?.recordFailure(peerIdentityKey, sourceKey)
+                limiter?.releaseConcurrency()
+            }
             localHello?.clearSensitive()
             remoteHello?.clearSensitive()
             transcript?.clearSensitive()
@@ -508,14 +558,64 @@ internal class SecureLanPairingCoordinator(
         return now
     }
 
+    /**
+     * Closes a socket under a total deadline. `close()` can block on a lingering send buffer or a
+     * stalled peer; if it does, the deadline abortively closes the same socket and releases the
+     * worker rather than leaving a detached blocked task behind.
+     */
     private fun closeSocket(socket: Socket) {
+        val deadline = MonotonicSocketDeadline(
+            label = "bounded-close",
+            socket = socket,
+            budgetMillis = SecureSessionLimits.BOUNDED_CLOSE_DEADLINE_MILLIS,
+            monotonicMillis = clock::nowMillis,
+        )
+        deadline.arm()
         try {
             socket.close()
         } catch (_: IOException) {
             // Close failure never becomes diagnostic detail.
         } catch (_: RuntimeException) {
             // Android may observe concurrent close during cancellation.
+        } finally {
+            deadline.complete()
         }
+    }
+
+    /**
+     * Thrown when a phase's total monotonic deadline elapsed. It is an [IOException] so the
+     * existing redacted failure mapping applies, and it carries no peer or socket detail.
+     */
+    private class DeadlineExceededException : IOException("secure session phase deadline elapsed")
+
+    /**
+     * Runs one blocking phase under a single total monotonic deadline.
+     *
+     * Inline so the phase body can use a non-local `return` for its own failure paths. Expiry
+     * closes the socket the phase owns, which is what unblocks a thread parked in `read`/`write`;
+     * a phase that appeared to succeed at the instant the deadline fired is then reported as a
+     * failure, because the session it produced is already dead.
+     */
+    private inline fun <T> guarded(
+        label: String,
+        socket: Socket,
+        budgetMillis: Long,
+        block: () -> T,
+    ): T {
+        val deadline = MonotonicSocketDeadline(
+            label = label,
+            socket = socket,
+            budgetMillis = budgetMillis,
+            monotonicMillis = clock::nowMillis,
+        )
+        deadline.arm()
+        val result = try {
+            block()
+        } finally {
+            deadline.complete()
+        }
+        if (deadline.isExpired()) throw DeadlineExceededException()
+        return result
     }
 
     private fun failed(code: SessionFailureCode): SecurePairingRunResult.Failed =
@@ -540,5 +640,8 @@ internal class SecureLanPairingCoordinator(
         const val S2C_KEY_LABEL: String = "EXPORTER-MORSEC-S2C-KEY-V1"
         const val S2C_IV_LABEL: String = "EXPORTER-MORSEC-S2C-IV-V1"
         const val EXPORTER_BYTES: Int = 32
+
+        /** Used when a source address cannot be read; it must never be treated as an identity. */
+        const val UNKNOWN_SOURCE: String = "unknown-source"
     }
 }

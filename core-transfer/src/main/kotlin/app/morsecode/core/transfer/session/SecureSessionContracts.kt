@@ -34,6 +34,40 @@ public object SecureSessionLimits {
     public const val APPROVAL_LIFETIME_MILLIS: Long = 60_000L
     public const val TLS_HANDSHAKE_TIMEOUT_MILLIS: Int = 5_000
     public const val CONTROL_RECORD_IO_TIMEOUT_MILLIS: Int = 5_000
+
+    /*
+     * Total monotonic deadlines.
+     *
+     * The two constants above are per-read/per-write inactivity timeouts: they bound one socket
+     * operation and restart on every successful read. A peer that dribbles one byte every few
+     * seconds never trips them and can pin a worker for as long as it likes. The deadlines below
+     * bound an entire phase instead, and expiry closes the socket that the phase owns, which is
+     * what actually releases a thread blocked in read() or write().
+     *
+     * The inactivity timeouts are retained as additional defence, not as the bound.
+     */
+
+    /** Total budget for the TLS handshake, including certificate construction and validation. */
+    public const val TLS_HANDSHAKE_DEADLINE_MILLIS: Long = 15_000L
+
+    /** Total budget for both pairing hellos to be written and read. */
+    public const val PAIRING_HELLO_DEADLINE_MILLIS: Long = 10_000L
+
+    /**
+     * Total budget for the mutual key-confirmation exchange: the protected write plus the peer's
+     * authenticated confirmation record.
+     */
+    public const val CONFIRMATION_DEADLINE_MILLIS: Long = 15_000L
+
+    /** Total budget for tearing a session socket down, including the abortive close. */
+    public const val BOUNDED_CLOSE_DEADLINE_MILLIS: Long = 2_000L
+
+    /**
+     * Total budget for waiting on the explicit human decision. The approval wait blocks on a latch
+     * rather than a socket, so it is bounded by the request's own monotonic expiry; this constant
+     * is the outer bound that keeps a malformed expiry from producing an unbounded wait.
+     */
+    public const val APPROVAL_DEADLINE_MILLIS: Long = APPROVAL_LIFETIME_MILLIS + 5_000L
     public const val KEY_CONFIRMATION_BYTES: Int = 38
     public const val AEAD_TAG_BYTES: Int = 16
     public const val NONCE_BYTES_FOR_AES_GCM: Int = 12

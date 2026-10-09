@@ -107,9 +107,10 @@ is no file, chunk, metadata-transfer, or payload record. After authentication, t
 `PairableControlSession` seam can send/receive only the empty `PING`, `PONG`, and
 `SESSION_CLOSE` controls through the installed AEAD layer. Calls before authentication are
 refused; there is no plaintext fallback or background reader. Record reads have a five-second
-per-read inactivity timeout, and malformed/truncated records close the session. A slow-drip
-peer that keeps producing bytes inside that window is **not** bounded by it; bounding that case
-is the purpose of the not-yet-wired `MonotonicSocketDeadline` described above.
+per-read inactivity timeout, and malformed/truncated records close the session. A slow-drip peer
+that keeps producing bytes inside that window is **not** bounded by it; the pairing phases are
+bounded by the total deadlines described above, and long-lived post-authentication record I/O is
+not yet.
 
 Bounds are 4,096 plaintext bytes per record, 4,096 records per direction, 16 MiB plaintext
 per direction, and five minutes per secure session. Approval expires after one minute;
@@ -126,28 +127,34 @@ claims, and the difference is the whole point of a security remediation.
 | Item | State |
 | --- | --- |
 | M1 — 25-bit base-32 SAS | Implemented. Pinned by `HumanVerificationCodeTest` hand-derived vectors and by the governance verifier. |
-| M1 — attempt limiter | Implemented as `SecurePairingAttemptLimiter` with unit tests. **Not yet wired** into the pairing path; no production caller exists yet. |
+| M1 — attempt limiter | Implemented and wired: `LanPeerDiscoveryProvider` owns one `SecurePairingAttemptLimiter` per provider and passes it to every pairing, keyed on the peer instance id and the peer address. |
 | M2 — capability trust boundary | Implemented and enforced in CI by `tools/verify/secure-authority-surface.mjs`. |
 | M3 — canonical transcript v2 | **Not implemented.** The hello is still `MPS1` and the transcript is still `MST1`. |
-| M4 — total monotonic deadlines | Implemented as `MonotonicSocketDeadline` with tests, including real-socket proof that a blocked read is unblocked. **Not yet wired** into the coordinator or control channel. |
+| M4 — total monotonic deadlines | Implemented and wired into `SecureLanPairingCoordinator`: TLS handshake, pairing hello exchange, mutual key-confirmation exchange and bounded close each run under one total deadline. |
 | L1 — dependency artifact-byte verification | **Not implemented.** |
 | Formal external protocol review | **Absent. This is an acceptance blocker.** |
 
-Two consequences deserve to be stated plainly rather than left to the table.
+Three consequences deserve to be stated plainly rather than left to the table.
 
-**The inactivity timeout is still the only bound in the wired path.** `soTimeout` and
-`CONTROL_RECORD_IO_TIMEOUT_MILLIS` bound a *single* read. They are not a total deadline: a peer
-that dribbles one byte every few seconds never trips them and can hold a worker indefinitely.
-That is exactly the M4 finding, and until `MonotonicSocketDeadline` is armed around the TLS
-handshake, pairing hello, approval wait, confirmation exchange, record I/O and bounded close,
-the finding is **not remediated in production code**. A green unit test on the primitive does
-not close it.
+**What the total deadlines do and do not cover.** `SecureLanPairingCoordinator` now arms one
+`MonotonicSocketDeadline` per blocking phase: `tls-handshake` (15 s), `pairing-hello` (10 s),
+`key-confirmation` (15 s) and `bounded-close` (2 s). Expiry abortively closes the socket that
+phase owns, which is what releases a worker parked in `read`/`write`; a phase that appeared to
+succeed at the instant its deadline fired is reported as a failure, because the session it
+produced is already dead. The approval wait is bounded separately, by the approval request's own
+monotonic expiry with `APPROVAL_DEADLINE_MILLIS` as the outer bound, because it blocks on a latch
+rather than a socket. The per-read `soTimeout` and `CONTROL_RECORD_IO_TIMEOUT_MILLIS` remain as
+additional defence, not as the bound.
 
-**The attempt limiter currently throttles nothing in production.** It is exercised only by its
-own tests. Its limits are also a denial-of-service bound and not authentication: all state is
-process-local, so it resets when the process dies or the discovery lease ends, and a peer that
-changes source address resets the per-source counters. It must never be described as a
-substitute for the human SAS comparison or for reviewed protocol design.
+**What is still not covered by a total deadline.** Post-authentication secure record I/O on an
+established session still relies on the per-read inactivity timeout. The slow-drip exposure
+described in the audit is therefore closed for pairing, and **not yet closed for a long-lived
+authenticated session**.
+
+**The attempt limiter is a throttle, not authentication.** All of its state is process-local, so
+it resets when the process dies or the discovery lease ends, and a peer that changes source
+address resets the per-source counters. Its limits must never be described as a substitute for
+the human SAS comparison or for reviewed protocol design.
 
 **M1 is not resolved by hardening the SAS.** The pairing protocol remains a project-defined
 composition. Raising the comparison entropy from 19 to 25 bits and adding a throttle does not

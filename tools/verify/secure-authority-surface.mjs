@@ -285,6 +285,42 @@ check(
   );
 }
 
+// --------------------------------- 11. total deadlines are actually armed
+// The M4 finding is only remediated if the production path arms these. A green unit test on the
+// primitive proves nothing about the coordinator, so pin the call sites.
+{
+  const coordPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecureLanPairingCoordinator.kt',
+  );
+  const coordinator = existsSync(coordPath) ? read(coordPath) : '';
+  for (const label of ['tls-handshake', 'pairing-hello', 'key-confirmation']) {
+    check(
+      `coordinator arms a total deadline for ${label}`,
+      new RegExp(`label = "${label}"[\\s\\S]{0,200}?budgetMillis = SecureSessionLimits\\.[A-Z_]+_DEADLINE_MILLIS`).test(coordinator),
+    );
+  }
+  check(
+    'socket close runs under a bounded deadline',
+    /private fun closeSocket\(socket: Socket\) \{[\s\S]{0,400}?MonotonicSocketDeadline\([\s\S]{0,300}?BOUNDED_CLOSE_DEADLINE_MILLIS/.test(coordinator),
+  );
+  check(
+    'an expired deadline fails the phase rather than reporting success',
+    /if \(deadline\.isExpired\(\)\) throw DeadlineExceededException\(\)/.test(coordinator),
+  );
+
+  const providerPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'LanPeerDiscoveryProvider.kt',
+  );
+  const provider = existsSync(providerPath) ? read(providerPath) : '';
+  check(
+    'the pairing path has a real attempt-limiter caller',
+    /private val pairingAttemptLimiter = SecurePairingAttemptLimiter/.test(provider) &&
+      /attemptLimiter = pairingAttemptLimiter/.test(provider),
+  );
+}
+
 console.log('\nPart B capability trust boundary verification');
 console.log(checks.join('\n'));
 console.log(`\n${checks.length - failures}/${checks.length} checks passed, ${failures} failed`);
