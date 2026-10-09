@@ -7,15 +7,15 @@ import java.util.concurrent.atomic.AtomicLong
 /** Outcome of asking the limiter whether a pairing attempt may proceed. */
 internal sealed interface PairingAdmission {
     /** The attempt may start; the caller must later call [SecurePairingAttemptLimiter.releaseConcurrency]. */
-    internal data object Granted : PairingAdmission
+    data object Granted : PairingAdmission
 
     /** Refused. [retryAfterMillis] is a monotonic-relative delay, 0 when the identity is dead. */
-    internal data class Refused(
-        internal val reason: RefusalReason,
-        internal val retryAfterMillis: Long,
+    data class Refused(
+        val reason: RefusalReason,
+        val retryAfterMillis: Long,
     ) : PairingAdmission
 
-    internal enum class RefusalReason {
+    enum class RefusalReason {
         /** This peer identity burned its start budget. */
         IDENTITY_START_BUDGET_EXHAUSTED,
 

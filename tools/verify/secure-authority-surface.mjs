@@ -250,6 +250,41 @@ check(
   })(),
 );
 
+// ------------------------------- 10. no visibility modifier inside an interface
+// Kotlin rejects `internal`/`private`/`protected` on interface members, so a bulk visibility change
+// is a compile error, not a warning. A `private` member of a *class* nested in an interface is
+// legal, so the enclosing type has to be tracked rather than approximated.
+{
+  const offenders = [];
+  const count = (text, ch) => text.split(ch).length - 1;
+  for (const { path } of mainSources) {
+    const stack = [];
+    const lines = read(path).split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      const code = lines[i].replace(/\/\/.*$/, '');
+      for (let c = 0; c < count(code, '}'); c += 1) stack.pop();
+      const decl = code.match(
+        /^\s*(?:public |internal |private |protected )?(?:sealed |fun |data |enum |abstract )*(interface|class|object)\s+[A-Za-z_][A-Za-z0-9_]*/,
+      );
+      const innermostIsInterface = stack[stack.length - 1] === 'interface';
+      // The offending line is itself a declaration (`internal data object ...`), so this must not
+      // be gated on the line being a non-declaration. `internal` and `protected` are never legal
+      // on an interface member; `private` is legal when the member has a body, so it is not
+      // checked here rather than risk a false positive.
+      if (innermostIsInterface && /^\s*(internal|protected)\s/.test(code)) {
+        offenders.push(`${relative(ROOT, path)}:${i + 1}`);
+      }
+      const opens = count(code, '{');
+      for (let o = 0; o < opens; o += 1) stack.push(decl && o === 0 ? decl[1] : 'other');
+    }
+  }
+  check(
+    'no interface member carries a non-public visibility modifier',
+    offenders.length === 0,
+    offenders.join(', '),
+  );
+}
+
 console.log('\nPart B capability trust boundary verification');
 console.log(checks.join('\n'));
 console.log(`\n${checks.length - failures}/${checks.length} checks passed, ${failures} failed`);

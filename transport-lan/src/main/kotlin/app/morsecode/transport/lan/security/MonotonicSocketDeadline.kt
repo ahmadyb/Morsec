@@ -66,10 +66,10 @@ internal object SharedDeadlineScheduler : DeadlineScheduler {
 /** How a deadline terminated. Exactly one of these is ever produced per deadline. */
 internal sealed interface DeadlineOutcome {
     /** The guarded operation finished, or was cancelled, before the deadline fired. */
-    internal data object Resolved : DeadlineOutcome
+    data object Resolved : DeadlineOutcome
 
     /** The total budget elapsed first and the owning socket was abortively closed. */
-    internal data object Expired : DeadlineOutcome
+    data object Expired : DeadlineOutcome
 }
 
 /**
