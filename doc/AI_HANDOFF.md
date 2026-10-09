@@ -1651,3 +1651,58 @@ Only after I explicitly approve Milestone 1 may you begin Milestone 2.
 
 Begin by verifying the repository and branch. Then report what you found
 and execute only the CI-validation task described above.
+
+---
+
+## Milestone 4 Part B remediation — factual verification status
+
+Appended additively; the master prompt above is unchanged. This section records only what was
+actually verified, and separates it from what was not.
+
+### What was verified, and how
+
+| Claim | Evidence |
+| --- | --- |
+| Remote branch tip after the fix-forward push | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `17094cfc384bfc4cfb055eb5d1968517b655ae3a` |
+| Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
+| `tools/verify/secure-authority-surface.mjs` passes | Executed locally: `25/25 checks passed, 0 failed` |
+| That verifier can actually fail | Mutation-tested: re-adding the authority marker failed 2 checks; re-exporting the reducer from `:core-transfer` failed 3 |
+| SAS arithmetic | Modelled independently and confirmed against CI output: exporter bytes `AB CD E0 00` produce `PH8Y2`, which is what the compiled Kotlin reported |
+| CI compiler diagnostics | Run `37966213386` on `ef145a4` failed with 13 internal-access errors in `SecureSessionStateMachine.kt` and one stale SAS assertion; all three failures are addressed in `17094cf` |
+
+### What was NOT verified
+
+- **No local Kotlin compilation or test execution.** There is no `javac`, `kotlinc` or Gradle in
+  this environment and the package mirrors are unreachable. GitHub Actions is the compiler of
+  record. Everything Kotlin in this remediation is unverified until a run goes green.
+- **CI on `17094cf` had not completed when this was written.** The previous run on `ef145a4`
+  failed; the fix-forward addresses exactly those failures but has not been proven.
+- **No APKs.** The failing build did not reach `assembleDebug`, so the APK upload step reported
+  `No files were found with the provided path`.
+- **`MonotonicSocketDeadline` and `SecurePairingAttemptLimiter` have no production caller.** They
+  are implemented and unit-tested but not wired into the pairing path. The M4 total-deadline
+  finding is therefore *not* remediated in production code, and the limiter currently throttles
+  nothing outside its own tests.
+- **M3 (MPS2/MST2 canonical transcript) is not implemented.** Hello and transcript remain
+  `MPS1`/`MST1`.
+- **L1 dependency artifact-byte verification is not implemented.** Coordinate pinning and the
+  existing governance verifier are not the same thing as verifying resolved artifact bytes, and
+  must not be described as such.
+- **No formal external cryptographic or protocol review has taken place.** Hardening the SAS from
+  19 to 25 bits does not resolve the principal M1 finding; the protocol remains a
+  project-defined composition. This is an acceptance blocker.
+
+### Permanent process deviation
+
+The required audit-before-cryptography ordering was missed for Part B. This is recorded here
+permanently and cannot be retroactively cured by a later audit. Acceptance of Part B requires an
+independent reaudit.
+
+### Work-loss note
+
+An earlier attempt at this remediation produced two commits (`f2c363f`, `e33b294`) in a sandbox
+worktree that was not persisted. Those commits no longer exist anywhere — not in any object
+store, not as dangling objects, and no bundle or patch of them survives. The work in this
+section is a re-implementation, not a recovery. The lesson is recorded deliberately: commits
+that exist only in a sandbox are not saved work, and pushing early costs less than losing the
+only copy.
