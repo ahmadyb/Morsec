@@ -255,15 +255,17 @@ class MonotonicSocketDeadlineTest {
             Thread.sleep(150L)
             assertTrue("reader should still be blocked before expiry", unblocked.count > 0)
 
+            // A short budget and a generous await: the timer must be what ends the read, and the
+            // window must not close at the same instant the deadline fires.
             val deadline = MonotonicSocketDeadline(
                 "secure-record-io",
                 client,
-                5_000L,
+                500L,
                 { System.nanoTime() / 1_000_000L },
                 SharedDeadlineScheduler,
             )
             deadline.arm()
-            assertTrue("real read must be unblocked by abortive close", unblocked.await(5, TimeUnit.SECONDS))
+            assertTrue("real read must be unblocked by abortive close", unblocked.await(10, TimeUnit.SECONDS))
             assertTrue("the socket must be closed", client.isClosed)
             assertEquals(1, deadline.closeCount())
             assertTrue(

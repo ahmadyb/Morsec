@@ -6,7 +6,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Schedules the single expiry task of a [MonotonicSocketDeadline].
@@ -30,8 +30,6 @@ internal fun interface DeadlineTask {
  * a flag), and [shutdown] releases it when the transport module is torn down.
  */
 internal object SharedDeadlineScheduler : DeadlineScheduler {
-    private val started = AtomicBoolean(false)
-
     @Volatile
     private var executor: ScheduledExecutorService? = null
 
@@ -52,7 +50,6 @@ internal object SharedDeadlineScheduler : DeadlineScheduler {
                 },
             )
             executor = created
-            started.set(true)
             created
         }
     }
@@ -61,7 +58,6 @@ internal object SharedDeadlineScheduler : DeadlineScheduler {
     public fun shutdown() = synchronized(this) {
         executor?.shutdownNow()
         executor = null
-        started.set(false)
     }
 
     internal fun isRunning(): Boolean = executor?.isShutdown == false
@@ -115,8 +111,15 @@ internal class MonotonicSocketDeadline(
     /** Sticky record of the budget that was armed; asserted by tests and by diagnostics. */
     public val totalBudgetMillis: Long = budgetMillis
 
-    private val resolved = AtomicBoolean(false)
-    private val expiryFired = AtomicBoolean(false)
+    /**
+     * One settled outcome per deadline. A single compare-and-set over this field is what makes
+     * expiry and completion mutually exclusive, and it lets a repeated [complete] report the
+     * outcome that was actually reached instead of reporting "expired" merely because it lost a
+     * race against an earlier call.
+     */
+    private enum class Phase { PENDING, RESOLVED, EXPIRED }
+
+    private val phase = AtomicReference(Phase.PENDING)
     private val lock = Any()
 
     @Volatile
@@ -126,7 +129,7 @@ internal class MonotonicSocketDeadline(
     private var closeCount: Int = 0
 
     /** True once the deadline fired. Never returns to false. */
-    public fun isExpired(): Boolean = expiryFired.get()
+    public fun isExpired(): Boolean = phase.get() == Phase.EXPIRED
 
     /** Number of abortive closes performed by this deadline. Always 0 or 1. */
     public fun closeCount(): Int = closeCount
@@ -144,12 +147,12 @@ internal class MonotonicSocketDeadline(
      */
     public fun arm(onExpiry: (() -> Unit)? = null) {
         synchronized(lock) {
-            if (resolved.get()) return
+            if (phase.get() != Phase.PENDING) return
             if (task != null) return
             val delay = remainingMillis()
             val scheduled = scheduler.schedule(if (delay <= 0L) 0L else delay) { expireNow(onExpiry) }
             // Completion may have raced ahead while the task was being scheduled.
-            if (resolved.get()) {
+            if (phase.get() != Phase.PENDING) {
                 scheduled.cancel()
                 task = null
             } else {
@@ -167,16 +170,15 @@ internal class MonotonicSocketDeadline(
             task?.cancel()
             task = null
         }
-        return if (resolved.compareAndSet(false, true)) {
-            DeadlineOutcome.Resolved
-        } else {
-            DeadlineOutcome.Expired
-        }
+        // Settle if still pending, then report whatever phase is settled. Calling this twice after
+        // a normal completion returns Resolved both times; it returns Expired only if the deadline
+        // genuinely fired, which is the distinction callers need before touching the socket.
+        phase.compareAndSet(Phase.PENDING, Phase.RESOLVED)
+        return if (phase.get() == Phase.EXPIRED) DeadlineOutcome.Expired else DeadlineOutcome.Resolved
     }
 
     private fun expireNow(onExpiry: (() -> Unit)?) {
-        if (!resolved.compareAndSet(false, true)) return
-        expiryFired.set(true)
+        if (!phase.compareAndSet(Phase.PENDING, Phase.EXPIRED)) return
         synchronized(lock) {
             task = null
         }

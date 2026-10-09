@@ -202,8 +202,12 @@ internal class SecurePairingAttemptLimiter(
         invalidatedIdentities.add(peerIdentityKey)
     }
 
-    public fun isIdentityInvalidated(peerIdentityKey: String): Boolean =
-        invalidatedIdentities.contains(peerIdentityKey) || identities[peerIdentityKey]?.invalidated?.get() != 0L
+    public fun isIdentityInvalidated(peerIdentityKey: String): Boolean {
+        if (invalidatedIdentities.contains(peerIdentityKey)) return true
+        // An untracked identity is not an invalidated one; `null != 0L` would say otherwise.
+        val stamp = identities[peerIdentityKey]?.invalidated?.get() ?: return false
+        return stamp != 0L
+    }
 
     public fun concurrentPairings(): Int = inFlight.get()
 
