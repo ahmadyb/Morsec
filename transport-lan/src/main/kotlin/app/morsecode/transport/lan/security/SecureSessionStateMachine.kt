@@ -289,7 +289,7 @@ internal class SecureSessionStateMachine(
     }
 
     private fun clearProofAndTranscript() {
-        approvalProof?.clear()
+        approvalProof?.clearSensitive()
         approvalProof = null
         transcriptDigest?.fill(0)
         transcriptDigest = null

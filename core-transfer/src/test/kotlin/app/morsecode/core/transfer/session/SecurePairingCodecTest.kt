@@ -217,7 +217,8 @@ public class SecurePairingCodecTest {
         assertEquals("", proof.displayText())
 
         val zeroProof = HumanVerificationCode.fromExporterMaterial(ByteArray(32))
-        assertEquals("000000", zeroProof.displayText())
+        // All-zero exporter material maps to value 0, which is alphabet[0] repeated.
+        assertEquals("22222", zeroProof.displayText())
         zeroProof.clearSensitive()
     }
 
