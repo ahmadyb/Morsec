@@ -67,20 +67,30 @@ function parseManifest() {
     });
 }
 
-/** Gradle stores each artifact under group/name/version/<hash-dir>/<filename>. */
+/**
+ * Gradle stores each artifact under <group-as-path>/<name>/<version>/<hash-dir>/<filename>.
+ *
+ * The group is stored as a directory tree, not a dotted string: org.conscrypt becomes
+ * org/conscrypt. Joining the dotted group directly looks plausible and silently finds nothing,
+ * which reports every artifact as unresolved. Both forms are tried so a future layout change
+ * fails loudly rather than quietly.
+ */
 function locate(root, group, name, version, extension) {
-  const base = join(root, group, name, version);
-  if (!existsSync(base)) return null;
   const target = `${name}-${version}.${extension}`;
+  const bases = [join(root, group.split('.').join('/'), name, version), join(root, group, name, version)];
   const found = [];
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir)) {
-      const full = join(dir, entry);
-      if (statSync(full).isDirectory()) walk(full);
-      else if (entry === target) found.push(full);
-    }
-  };
-  walk(base);
+  for (const base of bases) {
+    if (!existsSync(base)) continue;
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (entry === target) found.push(full);
+      }
+    };
+    walk(base);
+    if (found.length > 0) return found;
+  }
   return found.length === 0 ? null : found;
 }
 
@@ -108,7 +118,12 @@ if (entries) {
     if (!cachePresent) continue;
     const paths = locate(root, group, name, version, entry.extension);
     if (paths === null) {
-      check(`${label} was resolved into the cache`, false, 'not found in module cache');
+      check(
+        `${label} was resolved into the cache`,
+        false,
+        `not found under ${join(root, group.split('.').join('/'), name, version)}; ` +
+        `cache root is ${root}`,
+      );
       continue;
     }
     const digests = [...new Set(paths.map(sha256))];
@@ -125,4 +140,12 @@ if (!args.includes('--quiet')) {
   console.log(checks.join('\n'));
 }
 console.log(`\n${checks.length - failures}/${checks.length} checks passed, ${failures} failed`);
-if (failures) process.exit(1);
+if (failures) {
+  // Job logs are not always retrievable after a run finishes, so surface the reason where the
+  // check-run annotations API can still read it.
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    const reasons = checks.filter((c) => c.includes('FAIL')).map((c) => c.replace(/^\s*FAIL\s*/, ''));
+    console.log(`::error title=secure artifact bytes::${reasons.join(' | ')}`.slice(0, 900));
+  }
+  process.exit(1);
+}
