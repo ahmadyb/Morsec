@@ -186,6 +186,24 @@ jobs:
           if [ "$gradle_status" -ne 0 ]; then exit "$gradle_status"; fi
           node tools/verify/secure-dependency-governance.mjs --resolved ci-logs/22-secure-runtime-dependencies.log
 
+      # The step above verifies the resolved *coordinates* as text. That cannot see the bytes:
+      # a poisoned module cache or a mirror serving different content under the same coordinate
+      # both pass it. This step recomputes SHA-256 over the crypto artifacts Gradle actually
+      # resolved and compares against the reviewed manifest in gradle/. It runs here because the
+      # compile and test steps above are what populated the module cache.
+      #
+      # Scoped to Conscrypt and the Bouncy Castle modules on purpose. It is not a whole-graph
+      # lockfile, and because the expected digests come from Maven Central -- the same place
+      # Gradle downloads from -- a match proves cache integrity and pins the bytes for review.
+      # It does not prove vendor provenance; that would need signature verification.
+      - name: Verify secure artifact bytes against reviewed checksums
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          node tools/verify/secure-artifact-bytes.mjs 2>&1 | tee ci-logs/23-secure-artifact-bytes.log
+          exit "${PIPESTATUS[0]}"
+
       # KSP writes the Room schema while :core-data compiles, which the unit-test
       # task above has just done. The export is published twice on purpose:
       #

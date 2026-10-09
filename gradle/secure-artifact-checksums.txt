@@ -1,0 +1,44 @@
+# Reviewed SHA-256 digests for the security-critical Milestone 4 Part B artifacts.
+#
+# WHAT THIS IS
+#   The exact bytes this repository intends to consume for the TLS provider and the
+#   certificate/signature library. CI computes the SHA-256 of the artifact Gradle actually
+#   resolved out of its module cache and compares it to the value below, so a substituted,
+#   truncated or corrupted artifact fails the build instead of being compiled into an APK.
+#   Any future change to these digests is a one-line diff that has to survive review.
+#
+# WHAT THIS IS NOT
+#   It is not provenance. These digests were taken from Maven Central, which is also where
+#   Gradle downloads from, so a match proves the bytes in the build cache are the bytes
+#   Maven Central serves -- not that they are the bytes Conscrypt or Bouncy Castle signed.
+#   Proving that needs signature verification against the vendors' keys, which this
+#   repository does not do. See doc/security/milestone-4-part-b.md, "Dependency bytes".
+#
+# SCOPE
+#   Deliberately limited to the artifacts that perform cryptography or feed it: the bundled
+#   TLS provider and the three Bouncy Castle modules in the resolved runtime graph. It is
+#   not a whole-graph lock; the remaining AndroidX/Kotlin/Gradle transitives are pinned by
+#   coordinate only. Expanding coverage means reviewing and adding digests here, not
+#   generating them wholesale and trusting the output.
+#
+# FORMAT
+#   <group>:<name>:<version> <extension> <sha256-hex-lowercase>
+#
+# Sources, retrieved 2026-10-09 from https://repo1.maven.org/maven2/ :
+#   org/conscrypt/conscrypt-android/2.7.0/conscrypt-android-2.7.0.aar.sha256
+#   org/conscrypt/conscrypt-android/2.7.0/conscrypt-android-2.7.0.pom.sha256
+#   org/bouncycastle/bcpkix-jdk18on/1.86/bcpkix-jdk18on-1.86.jar.sha256
+#   org/bouncycastle/bcpkix-jdk18on/1.86/bcpkix-jdk18on-1.86.pom.sha256
+#   org/bouncycastle/bcprov-jdk18on/1.86/bcprov-jdk18on-1.86.jar.sha256
+#   org/bouncycastle/bcprov-jdk18on/1.86/bcprov-jdk18on-1.86.pom.sha256
+#   org/bouncycastle/bcutil-jdk18on/1.86/bcutil-jdk18on-1.86.jar.sha256
+#   org/bouncycastle/bcutil-jdk18on/1.86/bcutil-jdk18on-1.86.pom.sha256
+
+org.conscrypt:conscrypt-android:2.7.0 aar 86072ce711795e188e1e82214d023789d2983fafe342bcae83f046125cf64e7f
+org.conscrypt:conscrypt-android:2.7.0 pom d512487a0802e9f6242cfdc4048d0a8a348b20d394b8164ed4d35099ed515e4c
+org.bouncycastle:bcpkix-jdk18on:1.86 jar 8d8b41a4b149bdae8d331f059a578870954d1e3ff29f8269a9eb3ee19a7e4ef7
+org.bouncycastle:bcpkix-jdk18on:1.86 pom 44989844fb17b39eb08eabeaf81e1fd16ac50c994d5c02119f891220c3ac5878
+org.bouncycastle:bcprov-jdk18on:1.86 jar 2af190b300cbb0b35e248ccf5f4a06b6072030aeb3da7a98ec73abe5b4cb371f
+org.bouncycastle:bcprov-jdk18on:1.86 pom 970b70cb75a184639b6fb9ba3c465aca6a4e1a5f3fff4d65ce8574b2fd79ef38
+org.bouncycastle:bcutil-jdk18on:1.86 jar 1c268e15f785aafb1e4670d8d6e5f856f69475e96c162dadcd1ff9b350e9139f
+org.bouncycastle:bcutil-jdk18on:1.86 pom 2209b3e5d1eb2bb3c593b824c1b8f142b05dea8e9df7400b0f33f2b91a0741fa

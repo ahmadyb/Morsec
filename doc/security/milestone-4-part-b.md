@@ -131,7 +131,7 @@ claims, and the difference is the whole point of a security remediation.
 | M2 — capability trust boundary | Implemented and enforced in CI by `tools/verify/secure-authority-surface.mjs`. |
 | M3 — canonical transcript v2 | **Not implemented.** The hello is still `MPS1` and the transcript is still `MST1`. |
 | M4 — total monotonic deadlines | Implemented and wired into `SecureLanPairingCoordinator`: TLS handshake, pairing hello exchange, mutual key-confirmation exchange and bounded close each run under one total deadline. |
-| L1 — dependency artifact-byte verification | **Not implemented.** |
+| L1 — dependency artifact-byte verification | Implemented for the crypto artifacts: reviewed SHA-256 manifest in `gradle/secure-artifact-checksums.txt`, verified in CI over the bytes Gradle resolved. Not a whole-graph lockfile. |
 | Formal external protocol review | **Absent. This is an acceptance blocker.** |
 
 Three consequences deserve to be stated plainly rather than left to the table.
@@ -165,6 +165,44 @@ product", its protocol documentation was last updated around November 2021, and 
 handshake conformance-vector corpus nor a complete application-level approval/attempt/fallback
 policy could be established from inspection. That assessment is preliminary and is not a
 protocol review either way. **Acceptance of Part B requires independent review.**
+
+## Dependency bytes
+
+Four different claims get collapsed into "the dependencies are locked". They are not the same
+thing, and only some of them are true here.
+
+**Coordinate pinning — yes.** `gradle/libs.versions.toml` pins `org.conscrypt:conscrypt-android`
+to `2.7.0` and `org.bouncycastle:bcpkix-jdk18on` to `1.86`. `tools/verify/secure-dependency-governance.mjs`
+reads the resolved runtime graph and fails if the selected coordinates, the transitive Bouncy
+Castle modules, or the API-23 gate drift. This proves *which* version was selected.
+
+**Artifact-byte verification — yes, scoped.** `gradle/secure-artifact-checksums.txt` holds
+reviewed SHA-256 digests for the Conscrypt AAR and POM and the `bcpkix`/`bcprov`/`bcutil`
+1.86 JARs and POMs. `tools/verify/secure-artifact-bytes.mjs` locates each one in the Gradle
+module cache, recomputes its SHA-256 and compares. A substituted, truncated or corrupted
+artifact fails the build instead of being compiled into an APK, and any change to a digest is a
+one-line diff that has to survive review.
+
+Two limits, stated because they are the difference between this and a real supply-chain control:
+
+- *Scope.* Only the eight reviewed crypto artifacts are covered. The remaining AndroidX, Kotlin
+  and Gradle transitives are pinned by coordinate only. Expanding coverage means reviewing and
+  adding digests, not generating them wholesale and trusting the output.
+- *Provenance.* The expected digests were retrieved from Maven Central, which is also where
+  Gradle downloads from. A match therefore proves cache integrity — that the bytes in the build
+  are the bytes the repository serves — and pins them so substitution is visible. It does **not**
+  prove Conscrypt or Bouncy Castle signed them. That requires signature verification against the
+  vendors' keys, which this repository does not perform.
+
+**Dependency locking — no.** There are no `*.lockfile` files and no
+`gradle/verification-metadata.xml`. Transitive versions are resolved by Gradle at build time
+within the pinned constraints, then checked after the fact by the governance verifier. Calling
+this "locked" would be wrong.
+
+**License attribution — yes.** The third-party license assets carry the Bouncy Castle MIT-style
+licence and Conscrypt's Apache attribution with the complete referenced Apache 2.0 terms, and the
+governance verifier checks the NOTICE attributions. Attribution is a licence obligation and says
+nothing about the integrity of the code.
 
 ## Verification requirements
 
