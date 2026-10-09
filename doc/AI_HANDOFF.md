@@ -1663,22 +1663,26 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Remote branch tip after the fix-forward push | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `17094cfc384bfc4cfb055eb5d1968517b655ae3a` |
+| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `9f86b92836535fc87d2de7c3a9d562c41b7b6896` |
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
-| `tools/verify/secure-authority-surface.mjs` passes | Executed locally: `25/25 checks passed, 0 failed` |
-| That verifier can actually fail | Mutation-tested: re-adding the authority marker failed 2 checks; re-exporting the reducer from `:core-transfer` failed 3 |
+| **Green CI on that exact SHA** | Run 37976410142 — https://github.com/ahmadyb/Morsec/actions/runs/37976410142 — `success` |
+| Tests | `2739 tests, 0 failed, 0 skipped in 162 report(s)` |
+| Lint | `0 errors, 48 warnings in 7 report(s)` |
+| APKs | `app-debug.apk = 32.22 MiB`, `app-debug-androidTest.apk = 1.10 MiB` |
+| Room schemas | v1 `29767` bytes and v2 `50652` bytes, both byte-compared; no schema changed |
+| API 23 | step 20, "Run bundled Conscrypt TLS 1.3 compatibility test on API 23" — success |
+| Governance verifiers | step 10 success. Locally: refs 31/31, token-parity 195/195, transfer-limits 21/21, secure-dependency-governance 13/13, secure-authority-surface 26/26, room-schema --baseline-only |
+| The new verifier can actually fail | Mutation-tested: re-adding the authority marker fails 2 checks; re-exporting the reducer from `:core-transfer` fails 3; putting `internal` on an interface member fails 1 and points at the exact line |
 | SAS arithmetic | Modelled independently and confirmed against CI output: exporter bytes `AB CD E0 00` produce `PH8Y2`, which is what the compiled Kotlin reported |
-| CI compiler diagnostics | Run `37966213386` on `ef145a4` failed with 13 internal-access errors in `SecureSessionStateMachine.kt` and one stale SAS assertion; all three failures are addressed in `17094cf` |
+| CI as the compiler | Five red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, and `internal` on interface members |
 
 ### What was NOT verified
 
 - **No local Kotlin compilation or test execution.** There is no `javac`, `kotlinc` or Gradle in
   this environment and the package mirrors are unreachable. GitHub Actions is the compiler of
-  record. Everything Kotlin in this remediation is unverified until a run goes green.
-- **CI on `17094cf` had not completed when this was written.** The previous run on `ef145a4`
-  failed; the fix-forward addresses exactly those failures but has not been proven.
-- **No APKs.** The failing build did not reach `assembleDebug`, so the APK upload step reported
-  `No files were found with the provided path`.
+  record; the green run above is the only compilation evidence for this work.
+- **CI green is not acceptance.** It proves the code compiles, the tests pass and the gates hold.
+  It does not prove the protocol is secure, and it is not the required independent reaudit.
 - **`MonotonicSocketDeadline` and `SecurePairingAttemptLimiter` have no production caller.** They
   are implemented and unit-tested but not wired into the pairing path. The M4 total-deadline
   finding is therefore *not* remediated in production code, and the limiter currently throttles
