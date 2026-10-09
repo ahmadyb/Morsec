@@ -103,9 +103,14 @@ if (entries) {
     const parts = (entry.coordinate ?? '').split(':');
     const wellFormed =
       parts.length === 3 &&
-      ['jar', 'aar', 'pom'].includes(entry.extension) &&
+      ['jar', 'aar'].includes(entry.extension) &&
       /^[0-9a-f]{64}$/.test(entry.digest ?? '');
-    check(`manifest entry is well formed: ${entry.coordinate} ${entry.extension}`, wellFormed, entry.line);
+    check(
+      `manifest entry is well formed: ${entry.coordinate} ${entry.extension}`,
+      wellFormed,
+      `${entry.line} (only jar and aar are checkable: Gradle does not materialize .pom files ` +
+      'under files-2.1, so a pom entry would report "not resolved" however correct its digest)',
+    );
   }
 
   const root = cacheRoot();

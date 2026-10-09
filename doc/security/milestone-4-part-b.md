@@ -177,15 +177,20 @@ reads the resolved runtime graph and fails if the selected coordinates, the tran
 Castle modules, or the API-23 gate drift. This proves *which* version was selected.
 
 **Artifact-byte verification — yes, scoped.** `gradle/secure-artifact-checksums.txt` holds
-reviewed SHA-256 digests for the Conscrypt AAR and POM and the `bcpkix`/`bcprov`/`bcutil`
-1.86 JARs and POMs. `tools/verify/secure-artifact-bytes.mjs` locates each one in the Gradle
+reviewed SHA-256 digests for the Conscrypt 2.7.0 AAR and the `bcpkix`/`bcprov`/`bcutil`
+1.86 JARs. `tools/verify/secure-artifact-bytes.mjs` locates each one in the Gradle
 module cache, recomputes its SHA-256 and compares. A substituted, truncated or corrupted
 artifact fails the build instead of being compiled into an APK, and any change to a digest is a
 one-line diff that has to survive review.
 
 Two limits, stated because they are the difference between this and a real supply-chain control:
 
-- *Scope.* Only the eight reviewed crypto artifacts are covered. The remaining AndroidX, Kotlin
+- *Scope.* Only the four reviewed crypto *binaries* are covered — the Conscrypt AAR and the
+  `bcpkix`, `bcprov` and `bcutil` JARs. POM entries were listed at first and CI showed they cannot
+  be verified this way: Gradle does not materialize `.pom` files under
+  `caches/modules-2/files-2.1`, so every POM lookup reported the artifact unresolved while all
+  four binaries matched. Declared transitive coordinates are covered by the governance verifier
+  reading the resolved graph instead. The remaining AndroidX, Kotlin
   and Gradle transitives are pinned by coordinate only. Expanding coverage means reviewing and
   adding digests, not generating them wholesale and trusting the output.
 - *Provenance.* The expected digests were retrieved from Maven Central, which is also where

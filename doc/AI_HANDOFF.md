@@ -1674,7 +1674,7 @@ actually verified, and separates it from what was not.
 | Governance verifiers | step 10 success. Locally: refs 31/31, token-parity 195/195, transfer-limits 21/21, secure-dependency-governance 13/13, secure-authority-surface 26/26, room-schema --baseline-only |
 | The new verifier can actually fail | Mutation-tested: re-adding the authority marker fails 2 checks; re-exporting the reducer from `:core-transfer` fails 3; putting `internal` on an interface member fails 1 and points at the exact line |
 | SAS arithmetic | Modelled independently and confirmed against CI output: exporter bytes `AB CD E0 00` produce `PH8Y2`, which is what the compiled Kotlin reported |
-| CI as the compiler | Five red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, and `internal` on interface members |
+| CI as the compiler | Eight red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, and the module-cache group path |
 
 ### What was NOT verified
 
@@ -1683,18 +1683,53 @@ actually verified, and separates it from what was not.
   record; the green run above is the only compilation evidence for this work.
 - **CI green is not acceptance.** It proves the code compiles, the tests pass and the gates hold.
   It does not prove the protocol is secure, and it is not the required independent reaudit.
-- **`MonotonicSocketDeadline` and `SecurePairingAttemptLimiter` have no production caller.** They
-  are implemented and unit-tested but not wired into the pairing path. The M4 total-deadline
-  finding is therefore *not* remediated in production code, and the limiter currently throttles
-  nothing outside its own tests.
 - **M3 (MPS2/MST2 canonical transcript) is not implemented.** Hello and transcript remain
-  `MPS1`/`MST1`.
-- **L1 dependency artifact-byte verification is not implemented.** Coordinate pinning and the
-  existing governance verifier are not the same thing as verifying resolved artifact bytes, and
-  must not be described as such.
+  `MPS1`/`MST1`. The existing transcript is thorough about what it does bind — wire versions,
+  transport, suite, both roles, control and secure session IDs, both peer IDs, the selected
+  protocol version and both advertised ranges, the feature mask, all four session limits, both
+  app versions, both nonces, both certificate fingerprints, and the TLS protocol and cipher —
+  but it binds only the *selected* feature mask, never each peer's capability *offer*, it has no
+  explicit presence/zero encoding and no extension section, and it does not bind chunk size,
+  resume support or the encryption mode. Those are the M3 gaps and they are open.
 - **No formal external cryptographic or protocol review has taken place.** Hardening the SAS from
   19 to 25 bits does not resolve the principal M1 finding; the protocol remains a
   project-defined composition. This is an acceptance blocker.
+
+### What was wired, and the limits of that wiring
+
+Both mechanisms that an earlier revision of this section described as having no production caller
+now have one. The earlier text was wrong and has been replaced.
+
+- **M4 total deadlines.** `SecureLanPairingCoordinator` arms one `MonotonicSocketDeadline` per
+  blocking phase through an `inline guarded(label, socket, budgetMillis) { }` wrapper:
+  `tls-handshake` 15 s, `pairing-hello` 10 s, `key-confirmation` 15 s, `bounded-close` 2 s.
+  Expiry abortively closes the exact socket the phase owns, which is what releases a worker
+  parked in `read`/`write`. After `complete()` the coordinator re-checks `isExpired()` and throws
+  `DeadlineExceededException`, so a phase that appeared to succeed at the instant its deadline
+  fired is not reported as success. `soTimeout` and `CONTROL_RECORD_IO_TIMEOUT_MILLIS` remain as
+  additional defence, not as the deadline.
+- **M1 attempt limiter.** One `SecurePairingAttemptLimiter` at file scope in
+  `LanPeerDiscoveryProvider.kt` is passed to every coordinator as `attemptLimiter`, with
+  `peerIdentityKey` from the negotiated remote instance ID and `sourceKey` from the peer socket
+  address. Admission happens before the handshake and `releaseConcurrency()` runs in the existing
+  `finally`. Budget exhaustion invalidates the identity; cooldown and concurrency refusals do not.
+- **L1 artifact bytes.** `gradle/secure-artifact-checksums.txt` plus
+  `tools/verify/secure-artifact-bytes.mjs`, enforced by CI step 13.
+
+Three limits that the wiring does **not** close, recorded so they are not read as closed:
+
+- **Post-authentication secure record I/O still has no total deadline.** On an established session,
+  a slow-drip peer is bounded only by the per-read inactivity timeout. The M4 slow-drip exposure
+  is closed for pairing and *not* for an established session. This is the single largest open M4
+  gap.
+- **The deadline is proven by fake-clock unit tests and one API 23 round trip, not by a blocked
+  TLS write.** A fake clock cannot demonstrate that closing a socket actually releases a real
+  blocking write on a real `SSLSocket`; the API 23 test shows a real handshake completing, not one
+  being unblocked under duress. Bounded integration evidence for the unblocking case is still
+  missing.
+- **The limiter is process-local by construction.** Its counters reset when the process dies, and
+  its source-address limits are bypassable by changing address. That is documented behaviour, not
+  a defect to be quietly assumed away.
 
 ### Permanent process deviation
 
