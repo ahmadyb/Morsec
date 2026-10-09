@@ -103,7 +103,10 @@ public class SecureLanPairingCoordinatorApi23Test {
                 ) is app.morsecode.core.transfer.session.PayloadTransferDecision.Refused,
             )
             assertEquals(initiatorInteraction.proofAtDisplay, responderInteraction.proofAtDisplay)
-            assertTrue(requireNotNull(initiatorInteraction.proofAtDisplay).matches(Regex("[0-9]{6}")))
+            assertTrue(
+                requireNotNull(initiatorInteraction.proofAtDisplay)
+                    .matches(Regex("[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{5}")),
+            )
 
             val clientSecureChannel = SecureLanControlChannel(
                 socket = client.secureSocket,

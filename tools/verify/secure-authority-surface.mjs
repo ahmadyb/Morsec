@@ -210,6 +210,28 @@ check(
   payloadEnabling.join(', '),
 );
 
+// ------------------------------------------------- 8. SAS entropy budget is pinned
+// The human comparison is the only authentication step, so its bit budget must not be able to
+// shrink quietly. These constants are the documented 25-bit budget.
+check(
+  'SAS alphabet is the pinned 32-symbol unambiguous set',
+  /public const val SAS_ALPHABET: String = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"/.test(secureContracts),
+);
+check(
+  'SAS is five symbols of five bits each (25 bits total)',
+  /public const val SAS_SYMBOL_COUNT: Int = 5/.test(secureContracts) &&
+    /public const val SAS_ENTROPY_BITS: Int = SAS_SYMBOL_COUNT \* 5/.test(secureContracts),
+);
+check(
+  'SAS alphabet excludes the ambiguous pairs 0/O and 1/I',
+  (() => {
+    const match = secureContracts.match(/SAS_ALPHABET: String = "([^"]+)"/);
+    if (!match) return false;
+    const alphabet = match[1];
+    return alphabet.length === 32 && new Set(alphabet).size === 32 && !/[0O1I]/.test(alphabet);
+  })(),
+);
+
 console.log('\nPart B capability trust boundary verification');
 console.log(checks.join('\n'));
 console.log(`\n${checks.length - failures}/${checks.length} checks passed, ${failures} failed`);

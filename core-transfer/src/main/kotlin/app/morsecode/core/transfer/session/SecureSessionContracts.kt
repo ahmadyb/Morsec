@@ -45,22 +45,39 @@ public fun interface SecureEntropy {
     public fun nextBytes(destination: ByteArray)
 }
 
-/** Human-comparable, session-only six-digit short authentication string. */
+/**
+ * Human-comparable, session-only short authentication string (SAS).
+ *
+ * The code is five symbols drawn from a 32-symbol alphabet, so it carries exactly
+ * [SAS_ENTROPY_BITS] = 25 bits of comparison entropy. That number is the whole security budget of
+ * the human check: an attacker who can complete a handshake and simply guess the code succeeds with
+ * probability 2^-25 per attempt, and the only thing limiting the number of attempts is the
+ * process-local attempt limiter, which is a denial-of-service bound and not authentication.
+ *
+ * The previous six-digit decimal form carried 19 bits — 10^6 is not 2^20, and the zero-padded
+ * decimal rendering wasted roughly 0.8 bits per symbol. Base 32 over an unambiguous alphabet
+ * recovers that and, more importantly, removes the character pairs a human is likely to misread.
+ *
+ * The alphabet deliberately excludes 0 and O, and 1 and I, so no symbol in a correctly transcribed
+ * code can be confused with another. Comparison must still be done by a human reading both devices;
+ * nothing here authenticates the human.
+ */
 public class HumanVerificationCode private constructor(value: CharArray) {
-    private val digits: CharArray = value.copyOf()
+    private val symbols: CharArray = value.copyOf()
     private var cleared: Boolean = false
 
     init {
-        require(digits.size == 6 && digits.all { it in '0'..'9' })
+        require(symbols.size == SAS_SYMBOL_COUNT) { "SAS must be $SAS_SYMBOL_COUNT symbols" }
+        require(symbols.all { it in SAS_ALPHABET }) { "SAS contains a symbol outside the alphabet" }
     }
 
     /** The only API that reveals the short code; callers must not log or persist the result. */
     @Synchronized
-    public fun displayText(): String = if (cleared) "" else String(digits)
+    public fun displayText(): String = if (cleared) "" else String(symbols)
 
     @Synchronized
     public fun clearSensitive() {
-        digits.fill('\u0000')
+        symbols.fill('\u0000')
         cleared = true
     }
 
@@ -70,21 +87,43 @@ public class HumanVerificationCode private constructor(value: CharArray) {
 
     public companion object {
         /**
-         * Converts TLS exporter output into a 19-bit, zero-padded decimal SAS.
-         * The input buffer is wiped whether conversion succeeds or fails.
+         * Crockford-style base-32 without 0, O, 1 and I. Length 32, so each symbol is exactly
+         * 5 bits and no symbol is visually ambiguous with another.
+         */
+        public const val SAS_ALPHABET: String = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+        public const val SAS_SYMBOL_COUNT: Int = 5
+
+        /** 5 symbols x 5 bits. Documented so no future change can silently shrink the budget. */
+        public const val SAS_ENTROPY_BITS: Int = SAS_SYMBOL_COUNT * 5
+
+        private const val ALPHABET_RADIX: Int = 32
+
+        private const val MINIMUM_EXPORTER_BYTES: Int = 4
+
+        /**
+         * Converts TLS exporter output into the SAS by taking the leading [SAS_ENTROPY_BITS] bits.
+         *
+         * Requires [MINIMUM_EXPORTER_BYTES] bytes: three bytes supply 24 bits and the most
+         * significant bit of the fourth supplies the 25th. The remaining bits are discarded rather
+         * than folded in, because folding would make the mapping harder to reason about without
+         * adding entropy. The input buffer is wiped whether conversion succeeds or fails.
          */
         public fun fromExporterMaterial(material: ByteArray): HumanVerificationCode {
             try {
-                require(material.size >= 3) { "exporter output is too short" }
+                require(material.size >= MINIMUM_EXPORTER_BYTES) {
+                    "exporter output is too short: ${material.size} < $MINIMUM_EXPORTER_BYTES"
+                }
                 val value =
-                    ((material[0].toInt() and 0xFF) shl 11) or
-                        ((material[1].toInt() and 0xFF) shl 3) or
-                        ((material[2].toInt() and 0xE0) ushr 5)
-                val chars = CharArray(6)
+                    ((material[0].toInt() and 0xFF) shl 17) or
+                        ((material[1].toInt() and 0xFF) shl 9) or
+                        ((material[2].toInt() and 0xFF) shl 1) or
+                        ((material[3].toInt() and 0x80) ushr 7)
+                val chars = CharArray(SAS_SYMBOL_COUNT)
                 var remaining = value
                 for (index in chars.lastIndex downTo 0) {
-                    chars[index] = ('0'.code + (remaining % 10)).toChar()
-                    remaining /= 10
+                    chars[index] = SAS_ALPHABET[remaining % ALPHABET_RADIX]
+                    remaining /= ALPHABET_RADIX
                 }
                 return try {
                     HumanVerificationCode(chars)
