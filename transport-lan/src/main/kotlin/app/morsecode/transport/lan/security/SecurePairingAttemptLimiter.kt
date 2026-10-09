@@ -7,15 +7,15 @@ import java.util.concurrent.atomic.AtomicLong
 /** Outcome of asking the limiter whether a pairing attempt may proceed. */
 internal sealed interface PairingAdmission {
     /** The attempt may start; the caller must later call [SecurePairingAttemptLimiter.releaseConcurrency]. */
-    public data object Granted : PairingAdmission
+    internal data object Granted : PairingAdmission
 
     /** Refused. [retryAfterMillis] is a monotonic-relative delay, 0 when the identity is dead. */
-    public data class Refused(
-        public val reason: RefusalReason,
-        public val retryAfterMillis: Long,
+    internal data class Refused(
+        internal val reason: RefusalReason,
+        internal val retryAfterMillis: Long,
     ) : PairingAdmission
 
-    public enum class RefusalReason {
+    internal enum class RefusalReason {
         /** This peer identity burned its start budget. */
         IDENTITY_START_BUDGET_EXHAUSTED,
 
@@ -58,7 +58,7 @@ internal class SecurePairingAttemptLimiter(
     private val limits: Limits = Limits(),
 ) {
     /** Tunable bounds. Defaults match the values documented in `doc/security/milestone-4-part-b.md`. */
-    public data class Limits(
+    internal data class Limits(
         val maxStartsPerIdentity: Int = 3,
         val maxStartsPerSource: Int = 8,
         val maxStartsPerPair: Int = 2,
@@ -99,7 +99,7 @@ internal class SecurePairingAttemptLimiter(
      * [PairingAdmission.Granted]; every grant must be paired with [releaseConcurrency].
      */
     @Synchronized
-    public fun tryStart(peerIdentityKey: String, sourceKey: String): PairingAdmission {
+    internal fun tryStart(peerIdentityKey: String, sourceKey: String): PairingAdmission {
         require(peerIdentityKey.isNotBlank()) { "peer identity key must not be blank" }
         require(sourceKey.isNotBlank()) { "source key must not be blank" }
         val now = monotonicMillis()
@@ -147,7 +147,7 @@ internal class SecurePairingAttemptLimiter(
     }
 
     /** Releases a concurrency slot. Idempotent per grant: callers must invoke it exactly once. */
-    public fun releaseConcurrency() {
+    internal fun releaseConcurrency() {
         while (true) {
             val current = inFlight.get()
             if (current <= 0) return
@@ -161,7 +161,7 @@ internal class SecurePairingAttemptLimiter(
      * budgets are exhausted. An invalidated identity can only pair again after rediscovery.
      */
     @Synchronized
-    public fun recordFailure(peerIdentityKey: String, sourceKey: String) {
+    internal fun recordFailure(peerIdentityKey: String, sourceKey: String) {
         val identity = counterFor(identities, peerIdentityKey, limits.maxTrackedIdentities)
         val pair = counterFor(pairs, pairKey(peerIdentityKey, sourceKey), limits.maxTrackedPairs)
         val now = monotonicMillis()
@@ -185,7 +185,7 @@ internal class SecurePairingAttemptLimiter(
 
     /** Records a success, which clears the failure escalation for this identity and pair. */
     @Synchronized
-    public fun recordSuccess(peerIdentityKey: String, sourceKey: String) {
+    internal fun recordSuccess(peerIdentityKey: String, sourceKey: String) {
         identities[peerIdentityKey]?.failures?.set(0)
         identities[peerIdentityKey]?.nextAllowedAtMillis?.set(0L)
         pairs[pairKey(peerIdentityKey, sourceKey)]?.failures?.set(0)
@@ -197,23 +197,23 @@ internal class SecurePairingAttemptLimiter(
      * exhausted: the cached identity can no longer pair and the peer must be rediscovered.
      */
     @Synchronized
-    public fun invalidateIdentity(peerIdentityKey: String) {
+    internal fun invalidateIdentity(peerIdentityKey: String) {
         identities[peerIdentityKey]?.invalidated?.set(monotonicMillis())
         invalidatedIdentities.add(peerIdentityKey)
     }
 
-    public fun isIdentityInvalidated(peerIdentityKey: String): Boolean {
+    internal fun isIdentityInvalidated(peerIdentityKey: String): Boolean {
         if (invalidatedIdentities.contains(peerIdentityKey)) return true
         // An untracked identity is not an invalidated one; `null != 0L` would say otherwise.
         val stamp = identities[peerIdentityKey]?.invalidated?.get() ?: return false
         return stamp != 0L
     }
 
-    public fun concurrentPairings(): Int = inFlight.get()
+    internal fun concurrentPairings(): Int = inFlight.get()
 
     /** Drops every counter. Used by lease teardown; also documents the process-local reset. */
     @Synchronized
-    public fun reset() {
+    internal fun reset() {
         identities.clear()
         sources.clear()
         pairs.clear()

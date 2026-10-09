@@ -55,7 +55,7 @@ internal object SharedDeadlineScheduler : DeadlineScheduler {
     }
 
     /** Test and teardown hook. Never called on a production request path. */
-    public fun shutdown() = synchronized(this) {
+    internal fun shutdown() = synchronized(this) {
         executor?.shutdownNow()
         executor = null
     }
@@ -66,10 +66,10 @@ internal object SharedDeadlineScheduler : DeadlineScheduler {
 /** How a deadline terminated. Exactly one of these is ever produced per deadline. */
 internal sealed interface DeadlineOutcome {
     /** The guarded operation finished, or was cancelled, before the deadline fired. */
-    public data object Resolved : DeadlineOutcome
+    internal data object Resolved : DeadlineOutcome
 
     /** The total budget elapsed first and the owning socket was abortively closed. */
-    public data object Expired : DeadlineOutcome
+    internal data object Expired : DeadlineOutcome
 }
 
 /**
@@ -109,7 +109,7 @@ internal class MonotonicSocketDeadline(
     private val expiresAtMillis: Long = saturatingAdd(startedAtMillis, budgetMillis)
 
     /** Sticky record of the budget that was armed; asserted by tests and by diagnostics. */
-    public val totalBudgetMillis: Long = budgetMillis
+    internal val totalBudgetMillis: Long = budgetMillis
 
     /**
      * One settled outcome per deadline. A single compare-and-set over this field is what makes
@@ -129,13 +129,13 @@ internal class MonotonicSocketDeadline(
     private var closeCount: Int = 0
 
     /** True once the deadline fired. Never returns to false. */
-    public fun isExpired(): Boolean = phase.get() == Phase.EXPIRED
+    internal fun isExpired(): Boolean = phase.get() == Phase.EXPIRED
 
     /** Number of abortive closes performed by this deadline. Always 0 or 1. */
-    public fun closeCount(): Int = closeCount
+    internal fun closeCount(): Int = closeCount
 
     /** Milliseconds left in the total budget at the injected monotonic time, floored at zero. */
-    public fun remainingMillis(): Long {
+    internal fun remainingMillis(): Long {
         val now = monotonicMillis()
         val left = expiresAtMillis - now
         return if (left <= 0L) 0L else left
@@ -145,7 +145,7 @@ internal class MonotonicSocketDeadline(
      * Starts the timer. [onExpiry] runs on the scheduler thread after the socket is closed, so an
      * adapter can release its worker or mark its attempt as timed out.
      */
-    public fun arm(onExpiry: (() -> Unit)? = null) {
+    internal fun arm(onExpiry: (() -> Unit)? = null) {
         synchronized(lock) {
             if (phase.get() != Phase.PENDING) return
             if (task != null) return
@@ -165,7 +165,7 @@ internal class MonotonicSocketDeadline(
      * Ends the guarded operation. Returns [DeadlineOutcome.Expired] if the deadline already fired,
      * which tells the caller that the socket is gone and that no further state may advance.
      */
-    public fun complete(): DeadlineOutcome {
+    internal fun complete(): DeadlineOutcome {
         synchronized(lock) {
             task?.cancel()
             task = null
