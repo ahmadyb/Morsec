@@ -148,6 +148,28 @@ private fun closeSocket(socket: Socket) {
  * Android LAN implementation. Construction is inert; a discovery lease is the
  * sole owner of its sockets, multicast lock, network callback and worker queues.
  */
+/**
+ * Fallback throttle key used when a peer address cannot be read. It is deliberately shared rather
+ * than per-peer, so failing to read an address cannot mint an unlimited number of budgets.
+ */
+private const val UNKNOWN_PAIRING_SOURCE: String = "unknown-source"
+
+/**
+ * Process-local throttle for authenticated LAN pairing attempts.
+ *
+ * It bounds how many handshakes one peer identity, source address or identity/source pair can
+ * start, and how many run concurrently. It is a denial-of-service bound, not authentication: its
+ * state dies with the process, and a peer that changes source address resets the per-source
+ * counters. Pairing security rests on the SAS comparison and the TLS transcript binding.
+ */
+private val pairingAttemptLimiter = SecurePairingAttemptLimiter { SystemClock.elapsedRealtime() }
+
+/** Derives the throttle key for a peer address. */
+private fun pairingSourceKey(socket: Socket): String {
+    val address = runCatching { socket.inetAddress?.hostAddress }.getOrNull()
+    return if (address.isNullOrBlank()) UNKNOWN_PAIRING_SOURCE else address
+}
+
 public class LanPeerDiscoveryProvider(
     context: Context,
     private val clock: MonotonicClock = MonotonicClock { SystemClock.elapsedRealtime() },
@@ -156,15 +178,6 @@ public class LanPeerDiscoveryProvider(
     private val appContext: Context = context.applicationContext
     private var activeLease: LanDiscoveryLease? = null
 
-    /**
-     * Process-local pairing throttle shared by every pairing this provider runs.
-     *
-     * It bounds how many handshakes one peer identity, source address or identity/source pair can
-     * start, and how many run concurrently. It is a denial-of-service bound, not authentication:
-     * its state dies with the process, and a peer that changes source address resets the per-source
-     * counters. Pairing security rests on the SAS comparison and the TLS transcript binding.
-     */
-    private val pairingAttemptLimiter = SecurePairingAttemptLimiter { clock.nowMillis() }
 
     override val transport: TransportKind = TransportKind.LAN
 
@@ -210,15 +223,6 @@ public class LanPeerDiscoveryProvider(
     @Synchronized
     private fun clearLease(lease: LanDiscoveryLease) {
         if (activeLease === lease) activeLease = null
-    }
-
-    /**
-     * Derives the throttle key for a peer address. An unreadable address becomes a shared fallback
-     * key rather than a per-peer identity, so a failure to read it cannot mint unlimited budgets.
-     */
-    private fun pairingSourceKey(socket: Socket): String {
-        val address = runCatching { socket.inetAddress?.hostAddress }.getOrNull()
-        return if (address.isNullOrBlank()) SecureLanPairingCoordinator.UNKNOWN_SOURCE else address
     }
 
     private fun isPartARequest(request: DiscoveryRequest): Boolean {
