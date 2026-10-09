@@ -56,9 +56,16 @@ Both sides encode the same role-ordered canonical transcript (including both hel
 nonces/fingerprints, versions/ranges/capabilities/limits and negotiated TLS protocol/cipher
 suite) and compute SHA-256. A role-specific TLS exporter label and that transcript digest
 produce the pairing proof and independent client-to-server/server-to-client AES-128-GCM
-keys and 96-bit nonce bases. The six-digit, zero-padded SAS is the first 19 exporter bits;
-it is for human comparison only, never logged, stored, returned as a diagnostic, or accepted
-automatically. The short-lived approval request contains only the two session identifiers,
+keys and 96-bit nonce bases. The SAS is five symbols from the 32-symbol alphabet
+`23456789ABCDEFGHJKLMNPQRSTUVWXYZ`, drawn from the first 25 exporter bits; it is for human
+comparison only, never logged, stored, returned as a diagnostic, or accepted automatically.
+
+The alphabet omits `0`/`O` and `1`/`I` so no two symbols can be confused when read aloud or
+transcribed. Five symbols of five bits give exactly **25 bits of comparison entropy**, and
+that is the entire security value of the human step: an attacker who completes the TLS
+handshake and simply guesses the code succeeds with probability 2^-25 per attempt. The
+previous six-digit decimal form carried 19 bits, not 20 — 10^6 < 2^20 — and decimal rendering
+wasted roughly 0.8 bits per symbol while forcing the reader to distinguish 0/O and 1/I. The short-lived approval request contains only the two session identifiers,
 peer identifiers, the SAS, an opaque in-memory request handle and monotonic expiry. The
 handle is object-identity and secret-byte bound to that exact request. A stale handle cannot
 approve another request; repeating the same in-flight decision is idempotent; approve and
@@ -68,9 +75,21 @@ Room.
 
 Authentication is a conjunction, not a state label: local explicit approval, a successful
 local role/direction-specific encrypted key-confirmation record, and a peer confirmation
-whose AEAD tag, role and exact transcript digest all verify. Only then can the reducer issue
-`ApprovedSecureSession`. The pure reducer does not parse or authenticate raw network bytes;
-the LAN coordinator calls it only after the record layer has decoded the first AEAD record.
+whose AEAD tag, role and exact transcript digest all verify. The pure reducer does not parse
+or authenticate raw network bytes; the LAN coordinator calls it only after the record layer
+has decoded the first AEAD record.
+
+Reaching that conjunction produces **no security marker of any kind**. `ApprovedSecureSession`
+has been deleted, `SecurePairingResult.Authenticated` is a status-only object that confers
+nothing, and `NegotiatedSession` now refuses to carry a secure-session or TLS capability
+claim. Post-pairing authority is the opaque `SecureLanControlChannel`, which is `internal` to
+`:transport-lan` and can only come into existence after the protected write and the
+authenticated peer confirmation actually happened. `PayloadTransferGate.evaluate` returns
+`Refused` unconditionally and `PayloadTransferDecision.Authorized` no longer exists, so no
+combination of session state, negotiated features or caller behaviour can enable payload
+transfer. The pairing reducer is itself `internal` to `:transport-lan`; no other module can
+construct one. `tools/verify/secure-authority-surface.mjs` enforces all of this in CI, and
+was mutation-tested so that re-opening the boundary fails the check.
 
 ## Bounded `MSR1` control records
 
@@ -88,7 +107,9 @@ is no file, chunk, metadata-transfer, or payload record. After authentication, t
 `PairableControlSession` seam can send/receive only the empty `PING`, `PONG`, and
 `SESSION_CLOSE` controls through the installed AEAD layer. Calls before authentication are
 refused; there is no plaintext fallback or background reader. Record reads have a five-second
-monotonic deadline, and malformed/truncated/slow records close the session.
+per-read inactivity timeout, and malformed/truncated records close the session. A slow-drip
+peer that keeps producing bytes inside that window is **not** bounded by it; bounding that case
+is the purpose of the not-yet-wired `MonotonicSocketDeadline` described above.
 
 Bounds are 4,096 plaintext bytes per record, 4,096 records per direction, 16 MiB plaintext
 per direction, and five minutes per secure session. Approval expires after one minute;
@@ -96,6 +117,47 @@ TLS/control handshake I/O is bounded by five seconds. Sequence values never wrap
 closes and wipes the session before another nonce could be used. Session close,
 discovery-lease close, cancellation, socket failure and expiry release the record keys and
 TLS socket.
+
+## Remediation status
+
+This section exists because "the class exists" and "the production path uses it" are different
+claims, and the difference is the whole point of a security remediation.
+
+| Item | State |
+| --- | --- |
+| M1 — 25-bit base-32 SAS | Implemented. Pinned by `HumanVerificationCodeTest` hand-derived vectors and by the governance verifier. |
+| M1 — attempt limiter | Implemented as `SecurePairingAttemptLimiter` with unit tests. **Not yet wired** into the pairing path; no production caller exists yet. |
+| M2 — capability trust boundary | Implemented and enforced in CI by `tools/verify/secure-authority-surface.mjs`. |
+| M3 — canonical transcript v2 | **Not implemented.** The hello is still `MPS1` and the transcript is still `MST1`. |
+| M4 — total monotonic deadlines | Implemented as `MonotonicSocketDeadline` with tests, including real-socket proof that a blocked read is unblocked. **Not yet wired** into the coordinator or control channel. |
+| L1 — dependency artifact-byte verification | **Not implemented.** |
+| Formal external protocol review | **Absent. This is an acceptance blocker.** |
+
+Two consequences deserve to be stated plainly rather than left to the table.
+
+**The inactivity timeout is still the only bound in the wired path.** `soTimeout` and
+`CONTROL_RECORD_IO_TIMEOUT_MILLIS` bound a *single* read. They are not a total deadline: a peer
+that dribbles one byte every few seconds never trips them and can hold a worker indefinitely.
+That is exactly the M4 finding, and until `MonotonicSocketDeadline` is armed around the TLS
+handshake, pairing hello, approval wait, confirmation exchange, record I/O and bounded close,
+the finding is **not remediated in production code**. A green unit test on the primitive does
+not close it.
+
+**The attempt limiter currently throttles nothing in production.** It is exercised only by its
+own tests. Its limits are also a denial-of-service bound and not authentication: all state is
+process-local, so it resets when the process dies or the discovery lease ends, and a peer that
+changes source address resets the per-source counters. It must never be described as a
+substitute for the human SAS comparison or for reviewed protocol design.
+
+**M1 is not resolved by hardening the SAS.** The pairing protocol remains a project-defined
+composition. Raising the comparison entropy from 19 to 25 bits and adding a throttle does not
+make it a reviewed standard, and no formal external cryptographic or protocol review has taken
+place. Assessment of maintained alternatives (UKEY2, Noise implementations) did not establish a
+suitable complete replacement: UKEY2's own README calls it "not an officially supported Google
+product", its protocol documentation was last updated around November 2021, and neither a public
+handshake conformance-vector corpus nor a complete application-level approval/attempt/fallback
+policy could be established from inspection. That assessment is preliminary and is not a
+protocol review either way. **Acceptance of Part B requires independent review.**
 
 ## Verification requirements
 
