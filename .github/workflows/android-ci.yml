@@ -157,7 +157,7 @@ jobs:
           set -uo pipefail
           mkdir -p ci-logs
           {
-            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs tools/verify/secure-dependency-governance.mjs; do
+            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs tools/verify/secure-dependency-governance.mjs tools/verify/secure-authority-surface.mjs; do
               echo "== $script =="
               if [ "$script" = tools/verify/room-schema.mjs ]; then
                 node "$script" --baseline-only || echo "VERIFIER FAILED: $script"

@@ -340,24 +340,28 @@ public interface SecureSessionOperation : AutoCloseable {
     override fun close() = cancel()
 }
 
+/**
+ * The payload gate has exactly one reachable outcome: refusal.
+ *
+ * The former `Authorized` branch is deleted rather than narrowed. File payload transfer is not
+ * implemented at this milestone, and a gate that can say "yes" is a capability that every future
+ * caller, test double and reducer assertion has to be reasoned about. Keeping refusal as the only
+ * constructible outcome means no combination of session state, negotiated features or caller
+ * cleverness can enable payload transfer, and re-enabling it requires an explicit, reviewable
+ * change to this type instead of satisfying a condition somewhere else.
+ */
 public sealed interface PayloadTransferDecision {
     public data class Refused(public val failure: SessionFailure) : PayloadTransferDecision
-
-    /** Only a reviewed secure-session implementation inside :core-transfer can issue this. */
-    public class Authorized internal constructor(public val evidence: ApprovedSecureSession) : PayloadTransferDecision
 }
 
-/** Part A has no secure-session factory, so its control sessions always fail closed. */
+/** Fails closed for every session. See [PayloadTransferDecision]. */
 public object PayloadTransferGate {
-    public fun evaluate(session: NegotiatedSession): PayloadTransferDecision =
-        if (session.security is ApprovedSecureSession &&
-            SessionFeature.SECURE_SESSION in session.capabilities.features &&
-            SessionFeature.FILE_PAYLOAD in session.capabilities.features
-        ) {
-            PayloadTransferDecision.Authorized(session.security)
-        } else {
-            PayloadTransferDecision.Refused(SessionFailure(SessionFailureCode.SECURE_SESSION_REQUIRED))
-        }
+    public fun evaluate(session: NegotiatedSession): PayloadTransferDecision {
+        // Referenced so the parameter cannot be dropped without touching every caller, and so the
+        // refusal is visibly independent of session state.
+        require(session.protocolVersion >= 1) { "negotiated protocol version must be positive" }
+        return PayloadTransferDecision.Refused(SessionFailure(SessionFailureCode.SECURE_SESSION_REQUIRED))
+    }
 }
 
 internal fun isSafeDisplayName(value: String): Boolean =

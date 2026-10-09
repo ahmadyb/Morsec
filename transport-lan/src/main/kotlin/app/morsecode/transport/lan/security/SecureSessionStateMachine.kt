@@ -1,7 +1,25 @@
-package app.morsecode.core.transfer.session
+package app.morsecode.transport.lan.security
 
 import app.morsecode.core.model.TransportKind
 import app.morsecode.core.transfer.identity.SessionId
+import app.morsecode.core.transfer.session.EncryptionCapability
+import app.morsecode.core.transfer.session.HumanVerificationCode
+import app.morsecode.core.transfer.session.MonotonicClock
+import app.morsecode.core.transfer.session.NegotiatedSession
+import app.morsecode.core.transfer.session.SecureApprovalDecision
+import app.morsecode.core.transfer.session.SecureApprovalHandle
+import app.morsecode.core.transfer.session.SecureApprovalResult
+import app.morsecode.core.transfer.session.SecureEntropy
+import app.morsecode.core.transfer.session.SecureKeyConfirmation
+import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
+import app.morsecode.core.transfer.session.SecurePairingResult
+import app.morsecode.core.transfer.session.SecurePairingState
+import app.morsecode.core.transfer.session.SecurePeerRole
+import app.morsecode.core.transfer.session.SecureSessionLimits
+import app.morsecode.core.transfer.session.SessionFailure
+import app.morsecode.core.transfer.session.SessionFailureCode
+import app.morsecode.core.transfer.session.SessionFeature
+import app.morsecode.core.transfer.session.SessionSecurityState
 import java.security.MessageDigest
 
 /**
@@ -9,10 +27,10 @@ import java.security.MessageDigest
  * This reducer is not an AEAD verifier: callers must pass a peer confirmation only after the
  * production record layer has authenticated and decoded its first encrypted record.
  */
-public class SecureSessionStateMachine(
+internal class SecureSessionStateMachine(
     private val controlSession: NegotiatedSession,
-    public val secureSessionId: SessionId,
-    public val localRole: SecurePeerRole,
+    internal val secureSessionId: SessionId,
+    internal val localRole: SecurePeerRole,
     private val clock: MonotonicClock,
     private val entropy: SecureEntropy,
 ) {
@@ -47,14 +65,14 @@ public class SecureSessionStateMachine(
     }
 
     @Synchronized
-    public fun state(): SecurePairingState = phase
+    internal fun state(): SecurePairingState = phase
 
     @Synchronized
-    public fun completion(): SecurePairingResult? = completion
+    internal fun completion(): SecurePairingResult? = completion
 
     /** Called once, after TLS and both fixed-schema hellos have produced a shared transcript. */
     @Synchronized
-    public fun requestApproval(
+    internal fun requestApproval(
         transcriptDigest: ByteArray,
         proof: HumanVerificationCode,
     ): SecurePairingApprovalRequest? {
@@ -105,7 +123,7 @@ public class SecureSessionStateMachine(
 
     /** A handle can decide only this exact request; repeats of the same decision are idempotent. */
     @Synchronized
-    public fun decide(
+    internal fun decide(
         handle: SecureApprovalHandle,
         decision: SecureApprovalDecision,
     ): SecureApprovalResult {
@@ -135,9 +153,17 @@ public class SecureSessionStateMachine(
         return SecureApprovalResult.Applied
     }
 
-    /** The local role-specific AEAD key-confirmation record was written successfully. */
+    /**
+     * Records that the local role-specific AEAD key-confirmation record has been written through the
+     * protected record layer and flushed to the socket.
+     *
+     * The name carries the precondition on purpose. This reducer cannot verify a write: it is a pure
+     * state machine. Only the transport adapter knows whether the bytes really left through the
+     * encrypted record layer, so this may be called only after that protected write succeeded. A
+     * caller that invokes it after a failed or skipped write is forging local confirmation.
+     */
     @Synchronized
-    public fun markLocalConfirmationSent(): SecurePairingResult? {
+    internal fun markLocalConfirmationSentAfterProtectedWrite(): SecurePairingResult? {
         if (isTerminal()) return completion
         if (localDecision != SecureApprovalDecision.APPROVE) return null
         if (activeNow() == null) return completion
@@ -153,7 +179,7 @@ public class SecureSessionStateMachine(
      * precondition; this pure reducer never treats a raw network frame as a confirmation.
      */
     @Synchronized
-    public fun receivePeerConfirmation(confirmation: SecureKeyConfirmation): SecurePairingResult? {
+    internal fun receivePeerConfirmationFromAuthenticatedRecord(confirmation: SecureKeyConfirmation): SecurePairingResult? {
         if (isTerminal()) return completion
         if (activeNow() == null) return completion
         val expectedDigest = transcriptDigest
@@ -175,7 +201,7 @@ public class SecureSessionStateMachine(
 
     /** Polls injected monotonic time while the transport waits for an explicit human decision. */
     @Synchronized
-    public fun expireIfNeeded(): SecurePairingResult? {
+    internal fun expireIfNeeded(): SecurePairingResult? {
         val now = activeNow() ?: return completion
         val requestExpiry = approvalRequest?.expiresAtElapsedMillis
         if (phase == SecurePairingState.AWAITING_LOCAL_APPROVAL && requestExpiry != null && now >= requestExpiry) {
@@ -186,7 +212,7 @@ public class SecureSessionStateMachine(
 
     /** Terminal cancellation clears the short code, handle material and transcript digest. */
     @Synchronized
-    public fun cancel(): SecurePairingResult? {
+    internal fun cancel(): SecurePairingResult? {
         if (completion != null) return completion
         phase = SecurePairingState.CANCELLED
         completion = SecurePairingResult.Failed(SessionFailure(SessionFailureCode.OPERATION_CANCELLED))
@@ -196,28 +222,27 @@ public class SecureSessionStateMachine(
     }
 
     @Synchronized
-    public fun fail(code: SessionFailureCode): SecurePairingResult? {
+    internal fun fail(code: SessionFailureCode): SecurePairingResult? {
         if (completion != null) return completion
         finishFailed(code)
         return completion
     }
 
+    /**
+     * Both halves of mutual key confirmation are now established: the local confirmation was written
+     * through the protected record layer, and the peer confirmation was decoded from an
+     * authenticated record with the opposite role and the exact transcript digest.
+     *
+     * This produces a status-only result and no session object. The reducer does not and cannot
+     * manufacture post-pairing authority; the transport adapter owns the opaque secure control
+     * channel that embodies it.
+     */
     private fun completeIfConfirmed(): SecurePairingResult? {
         if (localDecision != SecureApprovalDecision.APPROVE || !localConfirmationSent || !peerConfirmationVerified) {
             return null
         }
-        val securedCapabilities = NegotiatedCapabilities(
-            features = setOf(SessionFeature.CONTROL_HANDSHAKE, SessionFeature.SECURE_SESSION),
-            maxChunkSizeBytes = 0,
-            resumeSupported = false,
-            encryption = EncryptionCapability.TLS_1_3,
-        )
-        val securedSession = controlSession.copy(
-            capabilities = securedCapabilities,
-            security = ApprovedSecureSession(),
-        )
         phase = SecurePairingState.AUTHENTICATED
-        completion = SecurePairingResult.Authenticated(securedSession)
+        completion = SecurePairingResult.Authenticated
         clearProofAndTranscript()
         approvalHandle?.clear()
         return completion

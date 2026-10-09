@@ -31,7 +31,7 @@ import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordLayer
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionOperation
-import app.morsecode.core.transfer.session.SecureSessionStateMachine
+import app.morsecode.transport.lan.security.SecureSessionStateMachine
 import app.morsecode.core.transfer.session.DiscoveredPeer
 import app.morsecode.core.transfer.session.DiscoveryDiagnostics
 import app.morsecode.core.transfer.session.DiscoveryLease
@@ -1469,7 +1469,7 @@ public class LanPeerDiscoveryProvider(
                                 if (isCancelled() || !installSecureSession(
                                         owner = this,
                                         socket = pairingResult.secureSocket,
-                                        negotiated = pairingResult.negotiatedSession,
+                                        negotiated = pairingResult.negotiatedControlSession,
                                         recordLayer = pairingResult.recordLayer,
                                         expiresAtElapsedMillis = pairingResult.expiresAtElapsedMillis,
                                     )
@@ -1479,7 +1479,7 @@ public class LanPeerDiscoveryProvider(
                                     completeFailure(SessionFailureCode.OPERATION_CANCELLED)
                                 } else {
                                     finish(
-                                        SecurePairingResult.Authenticated(pairingResult.negotiatedSession),
+                                        SecurePairingResult.Authenticated,
                                         closeSession = false,
                                     )
                                 }

@@ -79,15 +79,29 @@ public class SecureLanPairingCoordinatorApi23Test {
 
             val client = clientResult as SecurePairingRunResult.Authenticated
             val peer = serverResult as SecurePairingRunResult.Authenticated
-            assertTrue(client.negotiatedSession.security is app.morsecode.core.transfer.session.ApprovedSecureSession)
-            assertTrue(peer.negotiatedSession.security is app.morsecode.core.transfer.session.ApprovedSecureSession)
-            assertEquals(client.negotiatedSession.capabilities, peer.negotiatedSession.capabilities)
+            // M2 authority boundary, asserted on a real API 23 handshake: a completed pairing hands
+            // back no public authenticated-session marker. The negotiated session still reports the
+            // unauthenticated control state, and the payload gate still refuses. Authority is the
+            // module-internal SecureLanControlChannel built below, not anything a caller can name.
             assertEquals(
-                setOf(SessionFeature.CONTROL_HANDSHAKE, SessionFeature.SECURE_SESSION),
-                client.negotiatedSession.capabilities.features,
+                app.morsecode.core.transfer.session.SessionSecurityState.ControlOnlyUnauthenticated,
+                client.negotiatedControlSession.security,
             )
-            assertEquals(0, client.negotiatedSession.capabilities.maxChunkSizeBytes)
-            assertEquals(EncryptionCapability.TLS_1_3, client.negotiatedSession.capabilities.encryption)
+            assertEquals(
+                app.morsecode.core.transfer.session.SessionSecurityState.ControlOnlyUnauthenticated,
+                peer.negotiatedControlSession.security,
+            )
+            assertEquals(client.negotiatedControlSession.capabilities, peer.negotiatedControlSession.capabilities)
+            assertEquals(
+                setOf(SessionFeature.CONTROL_HANDSHAKE),
+                client.negotiatedControlSession.capabilities.features,
+            )
+            assertEquals(EncryptionCapability.NONE, client.negotiatedControlSession.capabilities.encryption)
+            assertTrue(
+                app.morsecode.core.transfer.session.PayloadTransferGate.evaluate(
+                    client.negotiatedControlSession,
+                ) is app.morsecode.core.transfer.session.PayloadTransferDecision.Refused,
+            )
             assertEquals(initiatorInteraction.proofAtDisplay, responderInteraction.proofAtDisplay)
             assertTrue(requireNotNull(initiatorInteraction.proofAtDisplay).matches(Regex("[0-9]{6}")))
 

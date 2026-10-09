@@ -21,7 +21,6 @@ import app.morsecode.core.transfer.session.SecureRecordLayer
 import app.morsecode.core.transfer.session.SecureRecordResult
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionLimits
-import app.morsecode.core.transfer.session.SecureSessionStateMachine
 import app.morsecode.core.transfer.session.SessionFailure
 import app.morsecode.core.transfer.session.SessionFailureCode
 import java.io.DataInputStream
@@ -33,9 +32,16 @@ import java.security.SecureRandom
 import javax.net.ssl.SSLSocket
 
 internal sealed interface SecurePairingRunResult {
+    /**
+     * A completed pairing. [negotiatedControlSession] is the *control* session and still reports
+     * `ControlOnlyUnauthenticated`: there is no public authenticated-session marker to hand back.
+     * The authority produced here is the pair of opaque, module-internal handles — [secureSocket]
+     * and [recordLayer] — which exist only because a protected write and an authenticated peer
+     * confirmation actually happened.
+     */
     class Authenticated(
         val secureSocket: SSLSocket,
-        val negotiatedSession: NegotiatedSession,
+        val negotiatedControlSession: NegotiatedSession,
         val recordLayer: SecureRecordLayer,
         val expiresAtElapsedMillis: Long,
     ) : SecurePairingRunResult
@@ -196,7 +202,7 @@ internal class SecureLanPairingCoordinator(
             } finally {
                 firstFrame.fill(0)
             }
-            val localConfirmationResult = pairingMachine.markLocalConfirmationSent()
+            val localConfirmationResult = pairingMachine.markLocalConfirmationSentAfterProtectedWrite()
             if (localConfirmationResult is SecurePairingResult.Failed) {
                 return SecurePairingRunResult.Failed(localConfirmationResult)
             }
@@ -219,10 +225,11 @@ internal class SecureLanPairingCoordinator(
             if (peerConfirmation == null) {
                 return failed(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
             }
-            val completion = pairingMachine.receivePeerConfirmation(peerConfirmation)
+            val completion = pairingMachine.receivePeerConfirmationFromAuthenticatedRecord(peerConfirmation)
             peerConfirmation.clearSensitive()
-            val authenticated = completion as? SecurePairingResult.Authenticated
-                ?: return failedFromMachine(pairingMachine, SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+            if (completion !is SecurePairingResult.Authenticated) {
+                return failedFromMachine(pairingMachine, SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+            }
 
             val now = safeNow() ?: return failed(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
             val expiresAt = saturatingAdd(pairStartedAt, SecureSessionLimits.MAX_SESSION_LIFETIME_MILLIS)
@@ -230,7 +237,7 @@ internal class SecureLanPairingCoordinator(
             keptSocket = true
             return SecurePairingRunResult.Authenticated(
                 secureSocket = socket,
-                negotiatedSession = authenticated.negotiatedSession,
+                negotiatedControlSession = controlSession,
                 recordLayer = requireNotNull(recordLayer),
                 expiresAtElapsedMillis = expiresAt,
             )

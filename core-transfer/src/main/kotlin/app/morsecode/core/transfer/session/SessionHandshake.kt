@@ -205,15 +205,18 @@ public data class NegotiatedSession(
         require(protocolVersion in remoteProfile.protocolRange.minimum..remoteProfile.protocolRange.maximum) {
             "negotiated protocol is outside the remote range"
         }
+        // A NegotiatedSession always describes the *unauthenticated* control session. There is no
+        // public "authenticated session" marker on purpose: a marker is data, and data can be
+        // synthesized by any caller that can name the type. Post-pairing authority lives in the
+        // opaque, non-serializable secure control channel owned by :transport-lan, which can only
+        // come into existence after a protected write and an authenticated peer confirmation.
+        require(security === SessionSecurityState.ControlOnlyUnauthenticated) {
+            "a negotiated session must carry the unauthenticated control marker"
+        }
         require(
-            if (security is ApprovedSecureSession) {
-                SessionFeature.SECURE_SESSION in capabilities.features &&
-                    capabilities.encryption == EncryptionCapability.TLS_1_3
-            } else {
-                SessionFeature.SECURE_SESSION !in capabilities.features &&
-                    capabilities.encryption == EncryptionCapability.NONE
-            },
-        ) { "session security marker and negotiated capabilities disagree" }
+            SessionFeature.SECURE_SESSION !in capabilities.features &&
+                capabilities.encryption == EncryptionCapability.NONE,
+        ) { "a negotiated control session must not claim secure-session capability" }
     }
 
     override fun toString(): String =
@@ -227,12 +230,6 @@ public sealed interface SessionSecurityState {
     public data object ControlOnlyUnauthenticated : SessionSecurityState {
         override val label: String = "control_only_unauthenticated"
     }
-}
-
-/** Issued only by the Part B reducer after approval and both authenticated confirmations. */
-public class ApprovedSecureSession internal constructor() : SessionSecurityState {
-    override val label: String = "approved_secure_session"
-    override fun toString(): String = "ApprovedSecureSession([redacted])"
 }
 
 public sealed interface SessionHandshakeDecision {

@@ -157,11 +157,19 @@ public enum class SecurePairingState {
     CANCELLED,
 }
 
-/** Domain result contains negotiated metadata and an in-module security marker only. */
+/**
+ * Outcome reported to the pairing listener.
+ *
+ * `Authenticated` is deliberately a status-only object: it reports that the reducer reached the
+ * authenticated phase and carries nothing else. It used to carry a `NegotiatedSession` whose
+ * security marker was treated as authority, which let a public caller mint the appearance of an
+ * authenticated session without performing the handshake. Post-pairing authority is the opaque
+ * secure control channel, which is internal to :transport-lan and is only produced by a protected
+ * write followed by an authenticated peer confirmation read.
+ */
 public sealed interface SecurePairingResult {
-    public class Authenticated(public val negotiatedSession: NegotiatedSession) : SecurePairingResult {
-        override fun toString(): String = "SecurePairingResult.Authenticated([redacted])"
-    }
+    /** Informational only. Confers no capability and grants no payload authority. */
+    public data object Authenticated : SecurePairingResult
 
     public class Failed(public val failure: SessionFailure) : SecurePairingResult {
         override fun toString(): String = "SecurePairingResult.Failed(${failure.code.id})"
