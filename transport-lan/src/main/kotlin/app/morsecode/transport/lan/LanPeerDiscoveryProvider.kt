@@ -162,7 +162,12 @@ private const val UNKNOWN_PAIRING_SOURCE: String = "unknown-source"
  * state dies with the process, and a peer that changes source address resets the per-source
  * counters. Pairing security rests on the SAS comparison and the TLS transcript binding.
  */
-private val pairingAttemptLimiter = SecurePairingAttemptLimiter { SystemClock.elapsedRealtime() }
+// Named argument, not a trailing lambda: the constructor's second parameter has a default, and
+// Kotlin binds a trailing lambda to the last parameter, so the shorthand would pass the clock as
+// the Limits and leave monotonicMillis unset.
+private val pairingAttemptLimiter = SecurePairingAttemptLimiter(
+    monotonicMillis = { SystemClock.elapsedRealtime() },
+)
 
 /** Derives the throttle key for a peer address. */
 private fun pairingSourceKey(socket: Socket): String {
