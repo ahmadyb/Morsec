@@ -141,7 +141,7 @@ class MonotonicSocketDeadlineTest {
             val deadline = MonotonicSocketDeadline("close", socket, 5_000L, clock::read, scheduler)
             deadline.arm { observedClosedInCallback.set(socket.isClosed) }
             scheduler.fireAll()
-            assertEquals(Boolean.TRUE, observedClosedInCallback.get())
+            assertEquals(true, observedClosedInCallback.get())
         } finally {
             runCatching { socket.close() }
         }
@@ -212,8 +212,8 @@ class MonotonicSocketDeadlineTest {
         val clock = FakeMonotonic()
         val scheduler = ManualDeadlineScheduler()
         val socket = unusedSocket()
+        val deadline = MonotonicSocketDeadline("tls", socket, 5_000L, clock::read, scheduler)
         try {
-            val deadline = MonotonicSocketDeadline("tls", socket, 5_000L, clock::read, scheduler)
             deadline.arm()
             deadline.arm()
             deadline.arm()

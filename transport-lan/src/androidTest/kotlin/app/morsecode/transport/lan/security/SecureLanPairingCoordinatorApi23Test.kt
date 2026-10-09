@@ -17,7 +17,6 @@ import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
 import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionLimits
-import app.morsecode.core.transfer.session.SecureSessionStateMachine
 import app.morsecode.core.transfer.session.SessionCapabilities
 import app.morsecode.core.transfer.session.SessionFeature
 import app.morsecode.core.transfer.session.SessionPeerProfile
