@@ -210,6 +210,24 @@ check(
   payloadEnabling.join(', '),
 );
 
+// --------------------------- 9. handle comparison is still identity-based
+// SecureApprovalHandle.matches and SecurePairingApprovalRequest's constructor had to become public
+// when the reducer moved to :transport-lan. That is only safe because accepting a decision requires
+// the candidate to be the very object the reducer registered. If that identity check is ever
+// dropped, the public constructor becomes an authority hole, so pin it here.
+check(
+  'handle matching still requires object identity',
+  /public fun matches\(candidate: SecureApprovalHandle\): Boolean =\s*this === candidate &&/.test(secureContracts),
+);
+check(
+  'the reducer still gates decisions on its own registered handle',
+  /approvalHandle\?\.matches\(handle\) != true\) return SecureApprovalResult\.Stale/.test(reducer),
+);
+check(
+  'handle secret bytes cannot be supplied by callers',
+  /public class SecureApprovalHandle internal constructor\(/.test(secureContracts),
+);
+
 // ------------------------------------------------- 8. SAS entropy budget is pinned
 // The human comparison is the only authentication step, so its bit budget must not be able to
 // shrink quietly. These constants are the documented 25-bit budget.

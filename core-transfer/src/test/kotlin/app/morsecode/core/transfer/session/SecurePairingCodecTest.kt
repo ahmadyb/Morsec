@@ -208,7 +208,9 @@ public class SecurePairingCodecTest {
         }
         val proof = HumanVerificationCode.fromExporterMaterial(exporter)
 
-        assertEquals("351855", proof.displayText())
+        // AB CD E0 00 -> 10101011 11001101 11100000 0 -> 10101 01111 00110 11100 00010
+        // indices 21, 15, 6, 28, 2 -> P H 8 Y 2. Derived by hand, not pasted from a run.
+        assertEquals("PH8Y2", proof.displayText())
         assertTrue(exporter.all { it == 0.toByte() })
         assertEquals("HumanVerificationCode([redacted])", proof.toString())
         proof.clearSensitive()

@@ -77,28 +77,24 @@ internal class SecureSessionStateMachine(
         proof: HumanVerificationCode,
     ): SecurePairingApprovalRequest? {
         if (phase != SecurePairingState.TRANSCRIPT_PENDING) {
-            proof.clear()
+            proof.clearSensitive()
             return null
         }
         val now = activeNow() ?: run {
-            proof.clear()
+            proof.clearSensitive()
             return null
         }
         if (transcriptDigest.size != SecureSessionLimits.TRANSCRIPT_HASH_BYTES) {
-            proof.clear()
+            proof.clearSensitive()
             finishFailed(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
             return null
         }
-        val handleBytes = ByteArray(SecureSessionLimits.APPROVAL_HANDLE_BYTES)
         val handle = try {
-            entropy.nextBytes(handleBytes)
-            SecureApprovalHandle(handleBytes)
+            SecureApprovalHandle.generate(entropy)
         } catch (_: RuntimeException) {
-            proof.clear()
+            proof.clearSensitive()
             finishFailed(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
             return null
-        } finally {
-            handleBytes.fill(0)
         }
         val expiresAt = minOf(
             saturatingAdd(now, SecureSessionLimits.APPROVAL_LIFETIME_MILLIS),
@@ -145,7 +141,7 @@ internal class SecureSessionStateMachine(
             phase = SecurePairingState.REJECTED
             completion = SecurePairingResult.Failed(SessionFailure(SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED))
             clearProofAndTranscript()
-            approvalHandle?.clear()
+            approvalHandle?.clearSensitive()
             return SecureApprovalResult.Applied
         }
         localDecision = decision
@@ -217,7 +213,7 @@ internal class SecureSessionStateMachine(
         phase = SecurePairingState.CANCELLED
         completion = SecurePairingResult.Failed(SessionFailure(SessionFailureCode.OPERATION_CANCELLED))
         clearProofAndTranscript()
-        approvalHandle?.clear()
+        approvalHandle?.clearSensitive()
         return completion
     }
 
@@ -244,7 +240,7 @@ internal class SecureSessionStateMachine(
         phase = SecurePairingState.AUTHENTICATED
         completion = SecurePairingResult.Authenticated
         clearProofAndTranscript()
-        approvalHandle?.clear()
+        approvalHandle?.clearSensitive()
         return completion
     }
 
@@ -281,7 +277,7 @@ internal class SecureSessionStateMachine(
         phase = SecurePairingState.EXPIRED
         completion = SecurePairingResult.Failed(SessionFailure(SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED))
         clearProofAndTranscript()
-        approvalHandle?.clear()
+        approvalHandle?.clearSensitive()
     }
 
     private fun finishFailed(code: SessionFailureCode) {
@@ -289,7 +285,7 @@ internal class SecureSessionStateMachine(
         phase = SecurePairingState.FAILED
         completion = SecurePairingResult.Failed(SessionFailure(code))
         clearProofAndTranscript()
-        approvalHandle?.clear()
+        approvalHandle?.clearSensitive()
     }
 
     private fun clearProofAndTranscript() {

@@ -142,22 +142,61 @@ private fun copyApprovalToken(token: ByteArray): ByteArray {
     return token.copyOf()
 }
 
-/** Opaque, non-serializable, exact-request capability. Its identity is bound to one transcript. */
+/**
+ * Opaque, non-serializable, exact-request capability. Its identity is bound to one transcript.
+ *
+ * A handle confers nothing by existing. The pairing reducer accepts a decision only when the
+ * candidate *is the same object* it registered for that request, so a handle obtained or created
+ * anywhere else can never approve anything. The members below are public because the reducer lives
+ * in `:transport-lan`; each of them either destroys secret material or merely compares it. The
+ * byte-array constructor stays internal so no caller can choose the secret bytes.
+ */
 public class SecureApprovalHandle internal constructor(token: ByteArray) {
     private val secret: ByteArray = copyApprovalToken(token)
 
-    internal fun matches(candidate: SecureApprovalHandle): Boolean =
+    /**
+     * True only for the identical handle object with equal secret bytes. Comparison, not a grant:
+     * the reducer additionally requires that this be the handle it registered.
+     */
+    public fun matches(candidate: SecureApprovalHandle): Boolean =
         this === candidate && java.security.MessageDigest.isEqual(secret, candidate.secret)
 
-    internal fun clear() {
+    /** Destroys the secret bytes. Idempotent. */
+    public fun clearSensitive() {
         secret.fill(0)
     }
 
+    internal fun clear() = clearSensitive()
+
     override fun toString(): String = "SecureApprovalHandle([redacted])"
+
+    public companion object {
+        /**
+         * Creates a fresh handle from the injected entropy source. The temporary buffer is wiped
+         * whether creation succeeds or fails. Minting a handle grants no authority; see the class
+         * documentation.
+         */
+        public fun generate(entropy: SecureEntropy): SecureApprovalHandle {
+            val token = ByteArray(SecureSessionLimits.APPROVAL_HANDLE_BYTES)
+            try {
+                entropy.nextBytes(token)
+                return SecureApprovalHandle(token)
+            } finally {
+                token.fill(0)
+            }
+        }
+    }
 }
 
-/** One approval prompt. It intentionally has no transcript bytes, digest, exporter, or key. */
-public class SecurePairingApprovalRequest internal constructor(
+/**
+ * One approval prompt. It intentionally has no transcript bytes, digest, exporter, or key.
+ *
+ * The constructor is public because the reducer that builds these lives in `:transport-lan`.
+ * Constructing one confers no authority: the only way to act on a request is to present its handle
+ * to the reducer that issued it, and the reducer accepts a handle only by object identity against
+ * the one it registered. A synthesized request therefore cannot approve a pairing.
+ */
+public class SecurePairingApprovalRequest public constructor(
     public val controlSessionId: SessionId,
     public val secureSessionId: SessionId,
     public val localPeerInstanceId: PeerInstanceId,
