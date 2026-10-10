@@ -1663,9 +1663,9 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `3f41ac457504ee397ae8befc07d6868ffbce98a7` |
+| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `64f72b9f2515ca3b402ebe9fdf866a6fb293ea17` |
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
-| **Green CI on that exact SHA** | Run 38043593680 — https://github.com/ahmadyb/Morsec/actions/runs/38043593680 — `success`, zero failing steps |
+| **Green CI on that exact SHA** | Run 38071025948 — https://github.com/ahmadyb/Morsec/actions/runs/38071025948 — `success`, zero failing steps |
 | Tests | `2760 tests, 0 failed, 0 skipped in 163 report(s)`. `core-transfer` went 475/22 reports to 496/23, so the +21 are exactly the new MPS2/MST2 suite |
 | Lint | `0 errors, 48 warnings in 7 report(s)` |
 | APKs | `app-debug.apk = 32.22 MiB`, `app-debug-androidTest.apk = 1.10 MiB` |
@@ -1677,8 +1677,11 @@ actually verified, and separates it from what was not.
 | Governance verifiers | step 10 success. Locally: refs 31/31, token-parity 195/195, transfer-limits 21/21, secure-dependency-governance 13/13, secure-authority-surface 32/32, room-schema --baseline-only 11/11 |
 | The new verifier can actually fail | Mutation-tested: re-adding the authority marker fails 2 checks; re-exporting the reducer from `:core-transfer` fails 3; putting `internal` on an interface member fails 1 and points at the exact line |
 | SAS arithmetic | Modelled independently and confirmed against CI output: exporter bytes `AB CD E0 00` produce `PH8Y2`, which is what the compiled Kotlin reported |
-| MPS2/MST2 transcript vector | Computed by a separate implementation written from the format description, not by running the codec: 578 canonical bytes, SHA-256 `685b681c96edf8f169c88012a29e25492d39c016cc8987e64107e3aff6a43c64`. The test also re-derives the digest from the canonical bytes, so a stored constant cannot drift silently |
-| CI as the compiler | Fifteen red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, `.pom` files that Gradle never materializes under `files-2.1`, a `const val` that already existed in the same package, `0x93` used as a `Byte` literal, and two attempts to read script state from inside a Gradle task action under the configuration cache |
+| MPS2/MST2 transcript vector | Computed by a separate implementation written from the format description, not by running the codec: 594 canonical bytes, SHA-256 `95ee0c3c5f58e6f56627758fd158b9f6ad4e76d021db78405bcc5057d97e1350`. The test also re-derives the digest from the canonical bytes, so a stored constant cannot drift silently |
+| MPS2/MST2 in production | The coordinator encodes with `SecurePairingHelloV2Codec.encodeFrame`, decodes with the V2 header and decoder, derives the selection with `SecurePairingSelectionV2.select(initiatorOffer, responderOffer)`, builds the transcript with `SecurePairingTranscriptV2.build`, and binds the exporter, human proof and directional keys to that digest. Zero MPS1 references remain in the coordinator |
+| Production V2 guard | Authority-surface group 12, 43/43. Mutation-tested: reverting the hello encoder to MPS1 fails 3 checks, reverting the transcript to MST1 fails 3, advertising a chunk size instead of explicit zero fails 1 |
+| API 23 on the V2 path | Step 22 runs two real coordinators over loopback sockets on an API 23 emulator — `realTlsExporterApprovalAndMutualConfirmationProduceControlOnlySecureSession`. It reached `Authenticated` on both sides, so both peers derived the same transcript digest and human proof, the directional keys were compatible, key confirmation succeeded, PING/PONG/CLOSE worked, and the payload gate still refused |
+| CI as the compiler | Eighteen red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, `.pom` files that Gradle never materializes under `files-2.1`, a `const val` that already existed in the same package, `0x93` used as a `Byte` literal, two attempts to read script state from inside a Gradle task action under the configuration cache, two `clearSensitive` calls left pointing at renamed variables, and a control-session id required to be 32-hex when the type only guarantees bounded text |
 | CI diagnosis without logs | `gh run view --log-failed`, the job-logs API and artifact downloads are all unusable from this sandbox — artifact downloads redirect to Azure blob storage, which is unreachable. The check-run **annotations** API is the one readable channel, which is why step 13 was changed to emit a `::error` annotation; that single annotation is what identified the `.pom` cause |
 
 ### What was NOT verified
@@ -1688,11 +1691,13 @@ actually verified, and separates it from what was not.
   record; the green run above is the only compilation evidence for this work.
 - **CI green is not acceptance.** It proves the code compiles, the tests pass and the gates hold.
   It does not prove the protocol is secure, and it is not the required independent reaudit.
-- **M3 is implemented but not wired.** `SecurePairingWireV2.kt` now carries MPS2 and MST2, and its
-  21 tests pass in CI, but `SecureLanPairingCoordinator` still speaks MPS1/MST1 on the wire. The
-  codec is evidence that the format is well-formed and that its refusals fire; it is not yet the
-  format the pairing path uses. Until the coordinator switches over, an MPS2 peer and this build
-  cannot talk to each other.
+- **M3 is wired, but the mutation and integration coverage the format deserves is not complete.**
+  The coordinator speaks MPS2/MST2 end to end and a static guard now fails if that regresses. What
+  is still missing is test breadth, not wiring: the 21 codec tests cover framing refusals, the
+  explicit-zero/absent distinction, a 22-field mutation sweep and the selection refusals, but there
+  is no two-coordinator JVM integration test, and the cross-session substitution, certificate
+  substitution, extension-ordering and downgrade cases are asserted at codec level rather than
+  through the production path. Only the API 23 test exercises two real coordinators.
 - **The attempt limiter's counters are not bound to the discovery lease.** They are one
   process-wide instance at file scope in `LanPeerDiscoveryProvider.kt`. That is stronger than
   nothing and matches the documented process-local semantics, but it is not the per-lease binding
