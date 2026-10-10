@@ -314,8 +314,8 @@ internal class SecureLanPairingCoordinator(
                 if (authenticated) limiter?.recordSuccess(peerIdentityKey, sourceKey) else limiter?.recordFailure(peerIdentityKey, sourceKey)
                 limiter?.releaseConcurrency()
             }
-            localHello?.clearSensitive()
-            remoteHello?.clearSensitive()
+            localOffer?.clearSensitive()
+            remoteOffer?.clearSensitive()
             transcriptBytes?.fill(0)
             transcriptDigest?.fill(0)
             proof?.clearSensitive()
