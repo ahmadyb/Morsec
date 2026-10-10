@@ -87,18 +87,6 @@ dependencies {
 }
 
 /**
- * The debug runtime classpath as a file collection, deferred so AGP has created the
- * configuration by the time it is first read.
- *
- * A plain local val holding the Configuration cannot be captured by a task action -- Gradle
- * serializes the action and the captured reference arrives null at execution time, which is what
- * the first version of this task did. A FileCollection built from a provider is retained.
- */
-val secureRuntimeArtifacts = objects.fileCollection().from(
-    provider { configurations.getByName("debugRuntimeClasspath") },
-)
-
-/**
  * Downloads the debug runtime classpath artifacts without compiling anything.
  *
  * This exists because of ordering. Dependency byte verification has to happen before the first
@@ -106,13 +94,24 @@ val secureRuntimeArtifacts = objects.fileCollection().from(
  * Bouncy Castle first and the bytes were only checked afterwards, so a substituted JAR was
  * already inside the test run by the time it was reported. The `dependencies` task resolves
  * metadata but does not fetch artifact bytes, so it cannot serve this purpose.
+ *
+ * The file collection is handed to the action through `inputs.files` rather than through a
+ * captured variable. Gradle serializes task actions, and neither a script-local val nor the
+ * enclosing script object survives that: both were observed arriving null at execution time in
+ * runs 38042110197 and 38042959500. `inputs.files` is task state, so it is retained, and reading
+ * it inside the action keeps this working if the configuration cache is ever enabled.
  */
 tasks.register("downloadDebugRuntimeArtifacts") {
     group = "verification"
     description = "Downloads debug runtime artifacts so their bytes can be verified before use."
+    inputs.files(
+        objects.fileCollection().from(
+            provider { configurations.getByName("debugRuntimeClasspath") },
+        ),
+    )
     doLast {
         var count = 0
-        secureRuntimeArtifacts.forEach { file -> if (file.isFile) count += 1 }
+        inputs.files.forEach { file -> if (file.isFile) count += 1 }
         println("resolved $count debug runtime artifacts for byte verification")
     }
 }
