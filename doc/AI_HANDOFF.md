@@ -1663,22 +1663,22 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `48caac20b6b18081abccec95be9c6866df3d5d51` |
+| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `3f41ac457504ee397ae8befc07d6868ffbce98a7` |
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
-| **Green CI on that exact SHA** | Run 38032455530 — https://github.com/ahmadyb/Morsec/actions/runs/38032455530 — `success` |
+| **Green CI on that exact SHA** | Run 38043593680 — https://github.com/ahmadyb/Morsec/actions/runs/38043593680 — `success`, zero failing steps |
 | Tests | `2760 tests, 0 failed, 0 skipped in 163 report(s)`. `core-transfer` went 475/22 reports to 496/23, so the +21 are exactly the new MPS2/MST2 suite |
 | Lint | `0 errors, 48 warnings in 7 report(s)` |
 | APKs | `app-debug.apk = 32.22 MiB`, `app-debug-androidTest.apk = 1.10 MiB` |
 | Room schemas | v1 `29767` bytes and v2 `50652` bytes, both byte-compared; no schema changed |
 | API 23 | step 21, "Run bundled Conscrypt TLS 1.3 compatibility test on API 23" — success |
-| L1 artifact bytes | step 13, "Verify secure artifact bytes against reviewed checksums" — success. The Conscrypt AAR and the three Bouncy Castle JARs were located in the runner's module cache and their SHA-256 matched the reviewed manifest |
+| L1 artifact bytes | Verified **before use**: step 11 resolves `:transport-lan:downloadDebugRuntimeArtifacts` and hashes the binaries ahead of the JVM unit tests, with step 14 re-checking afterwards. Both green. The Conscrypt AAR and the three Bouncy Castle JARs were located in the runner's module cache and their SHA-256 matched the reviewed manifest |
 | The byte verifier can actually fail | Exercised against a fixture built in the real group-as-path cache layout: matching digests 11/11 exit 0, a tampered `bcprov` JAR 10/11 exit 1, a removed artifact fails as unresolved, a reintroduced `pom` entry fails the well-formed check |
 | Expected digests are the published ones | Re-fetched from `repo1.maven.org/maven2/.../*.sha256` and compared to the manifest: `conscrypt-android-2.7.0.aar` `86072ce7…`, `.pom` `d512487a…`, `bcpkix-jdk18on-1.86.jar` `8d8b41a4…`, `bcprov-jdk18on-1.86.jar` `2af190b3…`, `bcutil-jdk18on-1.86.jar` `1c268e15…` — all identical |
 | Governance verifiers | step 10 success. Locally: refs 31/31, token-parity 195/195, transfer-limits 21/21, secure-dependency-governance 13/13, secure-authority-surface 32/32, room-schema --baseline-only 11/11 |
 | The new verifier can actually fail | Mutation-tested: re-adding the authority marker fails 2 checks; re-exporting the reducer from `:core-transfer` fails 3; putting `internal` on an interface member fails 1 and points at the exact line |
 | SAS arithmetic | Modelled independently and confirmed against CI output: exporter bytes `AB CD E0 00` produce `PH8Y2`, which is what the compiled Kotlin reported |
 | MPS2/MST2 transcript vector | Computed by a separate implementation written from the format description, not by running the codec: 578 canonical bytes, SHA-256 `685b681c96edf8f169c88012a29e25492d39c016cc8987e64107e3aff6a43c64`. The test also re-derives the digest from the canonical bytes, so a stored constant cannot drift silently |
-| CI as the compiler | Twelve red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, `.pom` files that Gradle never materializes under `files-2.1`, a `const val` that already existed in the same package, and `0x93` used as a `Byte` literal |
+| CI as the compiler | Fifteen red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, `.pom` files that Gradle never materializes under `files-2.1`, a `const val` that already existed in the same package, `0x93` used as a `Byte` literal, and two attempts to read script state from inside a Gradle task action under the configuration cache |
 | CI diagnosis without logs | `gh run view --log-failed`, the job-logs API and artifact downloads are all unusable from this sandbox — artifact downloads redirect to Azure blob storage, which is unreachable. The check-run **annotations** API is the one readable channel, which is why step 13 was changed to emit a `::error` annotation; that single annotation is what identified the `.pom` cause |
 
 ### What was NOT verified
