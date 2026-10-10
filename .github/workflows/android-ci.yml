@@ -169,6 +169,25 @@ jobs:
           grep -q "VERIFIER FAILED" ci-logs/15-verifiers.log && exit 1
           exit 0
 
+      # Byte verification has to run before the first task that *uses* the artifacts. It used to
+      # run after the JVM unit tests, which meant Conscrypt and Bouncy Castle were compiled and
+      # linked into the test run before anyone checked their bytes -- the check could only report
+      # a substitution that had already happened. Resolving with the `dependencies` task does not
+      # download artifact bytes, so this task materializes them first, then verifies.
+      #
+      # The later post-test step is kept as well: the test tasks can pull in artifacts this
+      # resolution did not need, and re-hashing is cheap.
+      - name: Resolve runtime artifacts and verify their bytes before use
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --stacktrace :transport-lan:downloadDebugRuntimeArtifacts 2>&1 | tee ci-logs/16-resolve-secure-artifacts.log
+          resolve_status=${PIPESTATUS[0]}
+          if [ "$resolve_status" -ne 0 ]; then exit "$resolve_status"; fi
+          node tools/verify/secure-artifact-bytes.mjs 2>&1 | tee ci-logs/17-secure-artifact-bytes-preuse.log
+          exit "${PIPESTATUS[0]}"
+
       - name: JVM unit tests
         if: ${{ !cancelled() }}
         run: |

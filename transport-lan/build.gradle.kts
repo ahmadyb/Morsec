@@ -11,6 +11,28 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
+/**
+ * Downloads the debug runtime classpath artifacts without compiling anything.
+ *
+ * This exists because of ordering, not because resolving is otherwise hard. Dependency byte
+ * verification has to happen before the first task that *uses* the artifacts. In the previous CI
+ * ordering the JVM unit tests compiled against Conscrypt and Bouncy Castle first and the bytes
+ * were only checked afterwards, so a substituted JAR was already inside the test run by the time
+ * it was noticed. The `dependencies` task resolves metadata but does not fetch artifact bytes, so
+ * it cannot be used for this; something has to materialize the files.
+ */
+tasks.register("downloadDebugRuntimeArtifacts") {
+    group = "verification"
+    description = "Downloads debug runtime artifacts so their bytes can be verified before use."
+    val runtimeClasspath = configurations.named("debugRuntimeClasspath")
+    doLast {
+        val resolved = runtimeClasspath.get().incoming.artifactView { lenient(false) }.files
+        var count = 0
+        resolved.forEach { file -> if (file.isFile) count += 1 }
+        println("resolved $count debug runtime artifacts for byte verification")
+    }
+}
+
 android {
     namespace = "app.morsecode.transport.lan"
     compileSdk = 36

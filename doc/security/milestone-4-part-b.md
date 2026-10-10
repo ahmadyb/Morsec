@@ -168,46 +168,80 @@ protocol review either way. **Acceptance of Part B requires independent review.*
 
 ## Dependency bytes
 
-Four different claims get collapsed into "the dependencies are locked". They are not the same
-thing, and only some of them are true here.
+**Status: partial, and not strict Gradle dependency verification.** A post-resolution cache scan
+of four binary artifacts is a useful check. It is not what `verification-metadata.xml` does, and
+calling it dependency verification would overstate it. Each audit question, answered from what the
+build actually does:
 
-**Coordinate pinning — yes.** `gradle/libs.versions.toml` pins `org.conscrypt:conscrypt-android`
-to `2.7.0` and `org.bouncycastle:bcpkix-jdk18on` to `1.86`. `tools/verify/secure-dependency-governance.mjs`
-reads the resolved runtime graph and fails if the selected coordinates, the transitive Bouncy
-Castle modules, or the API-23 gate drift. This proves *which* version was selected.
+**Is verification applied before artifacts are used by compilation?** It was not. The byte check
+ran after `JVM unit tests`, so Conscrypt and Bouncy Castle were compiled and linked into the test
+run before their bytes were inspected — a substitution would already have happened by the time it
+was reported. There is now an early step that runs
+`:transport-lan:downloadDebugRuntimeArtifacts` to materialize the artifacts without compiling,
+then verifies them, before the unit tests run. The post-test step is kept as a re-check.
 
-**Artifact-byte verification — yes, scoped.** `gradle/secure-artifact-checksums.txt` holds
-reviewed SHA-256 digests for the Conscrypt 2.7.0 AAR and the `bcpkix`/`bcprov`/`bcutil`
-1.86 JARs. `tools/verify/secure-artifact-bytes.mjs` locates each one in the Gradle
-module cache, recomputes its SHA-256 and compares. A substituted, truncated or corrupted
-artifact fails the build instead of being compiled into an APK, and any change to a digest is a
-one-line diff that has to survive review.
+**Is Gradle dependency verification in strict mode enabled?** No. There is no
+`gradle/verification-metadata.xml` and `dependencyLocking` is not configured. Enabling strict
+verification is not a partial measure: Gradle verifies per component and fails on any component
+that is not listed, so turning it on requires reviewed digests for the entire resolved graph —
+every AndroidX, Kotlin and Gradle transitive — not just the four crypto artifacts. Those digests
+would have to be produced by `--write-verification-metadata` and then reviewed, and generating
+them wholesale and committing the output is exactly the "do not blindly trust metadata
+generation" failure mode. This is a real remaining gap, not a stylistic preference.
 
-Two limits, stated because they are the difference between this and a real supply-chain control:
+**Are POM/module metadata checksums verified?** No, and a cache scan cannot verify them. Gradle
+keeps dependency metadata in its own binary store; it resolves AARs and JARs into
+`caches/modules-2/files-2.1/<group path>/<name>/<version>/<hash>/` but does not materialize the
+`.pom` files there. That was measured, not assumed — CI reported all four POM entries as
+unresolved while every binary matched (run 37989038083).
 
-- *Scope.* Only the four reviewed crypto *binaries* are covered — the Conscrypt AAR and the
-  `bcpkix`, `bcprov` and `bcutil` JARs. POM entries were listed at first and CI showed they cannot
-  be verified this way: Gradle does not materialize `.pom` files under
-  `caches/modules-2/files-2.1`, so every POM lookup reported the artifact unresolved while all
-  four binaries matched. Declared transitive coordinates are covered by the governance verifier
-  reading the resolved graph instead. The remaining AndroidX, Kotlin
-  and Gradle transitives are pinned by coordinate only. Expanding coverage means reviewing and
-  adding digests, not generating them wholesale and trusting the output.
-- *Provenance.* The expected digests were retrieved from Maven Central, which is also where
-  Gradle downloads from. A match therefore proves cache integrity — that the bytes in the build
-  are the bytes the repository serves — and pins them so substitution is visible. It does **not**
-  prove Conscrypt or Bouncy Castle signed them. That requires signature verification against the
-  vendors' keys, which this repository does not perform.
+**Are dependency versions locked?** No. Zero `*.lockfile` files. Versions are pinned by
+coordinate in `gradle/libs.versions.toml` and the selected graph is checked after resolution.
 
-**Dependency locking — no.** There are no `*.lockfile` files and no
-`gradle/verification-metadata.xml`. Transitive versions are resolved by Gradle at build time
-within the pinned constraints, then checked after the fact by the governance verifier. Calling
-this "locked" would be wrong.
+**Are all debug, release, JVM and instrumentation graphs covered?** No. Only
+`:transport-lan`'s `debugRuntimeClasspath`. Release, unit-test runtime and androidTest runtime
+are not covered by either the coordinate check or the byte check.
 
-**License attribution — yes.** The third-party license assets carry the Bouncy Castle MIT-style
-licence and Conscrypt's Apache attribution with the complete referenced Apache 2.0 terms, and the
-governance verifier checks the NOTICE attributions. Attribution is a licence obligation and says
-nothing about the integrity of the code.
+**Are the native Conscrypt contents covered by the AAR digest?** The digest covers the AAR as
+delivered, including its `jni/` entries, so a substituted native library inside the published AAR
+changes the digest. The `.so` files extracted into the build directory afterwards are not
+re-verified.
+
+**Can a changed metadata file alter dependency selection while all four binary checks still
+pass?** Yes. This is the sharpest remaining hole. The byte check sees only files that were
+resolved; a metadata change that selects a *different* artifact changes which files exist rather
+than corrupting the ones that were expected, and the manifest would simply report the expected
+artifact as unresolved — which it does fail on, but for the wrong reason and only for the four
+listed coordinates. Nothing verifies metadata integrity.
+
+**Can an additional unapproved transitive dependency enter the graph?** For the crypto
+coordinates, no: `secure-dependency-governance.mjs` asserts the resolved Conscrypt runtime is
+*exactly* `conscrypt-android:2.7.0` and the Bouncy Castle graph is *exactly* the three 1.86
+artifacts. For everything else in the graph, yes — there is no whole-graph constraint.
+
+### What the byte check does establish
+
+`gradle/secure-artifact-checksums.txt` holds reviewed SHA-256 digests for the Conscrypt 2.7.0 AAR
+and the `bcpkix`/`bcprov`/`bcutil` 1.86 JARs. `tools/verify/secure-artifact-bytes.mjs` locates
+each one in the module cache, recomputes SHA-256 and compares. A substituted, truncated or
+corrupted binary fails the build rather than being compiled into an APK, and any change to a
+digest is a one-line reviewable diff. The digests were re-fetched from
+`repo1.maven.org/maven2/.../*.sha256` and matched the manifest exactly.
+
+Two limits. *Scope:* four binaries, not the graph. *Provenance:* the expected digests come from
+Maven Central, which is also where Gradle downloads from, so a match proves cache integrity and
+pins the bytes for review. It does not prove Conscrypt or Bouncy Castle signed them; that needs
+signature verification against the vendors' keys, which this repository does not perform.
+
+### Coordinate pinning, byte verification, locking, licensing
+
+These are four different claims and only the first two are true here. **Coordinate pinning:** yes,
+`libs.versions.toml` pins both libraries and the governance verifier fails on drift.
+**Artifact-byte verification:** yes, scoped to four reviewed crypto binaries. **Dependency
+locking:** no. **License attribution:** yes — the third-party assets carry the Bouncy Castle
+MIT-style licence and Conscrypt's Apache attribution with the complete referenced Apache 2.0
+terms, and the governance verifier checks the NOTICE attributions. Attribution is a licence
+obligation and says nothing about integrity.
 
 ## Verification requirements
 
