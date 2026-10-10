@@ -167,7 +167,7 @@ public class SecurePairingWireV2Test {
         tagRecordMax to byteArrayOf(0, 0, 0x10, 0x00),
         tagRecords to byteArrayOf(0, 0, 0x10, 0x00),
         tagBytes to byteArrayOf(0x01, 0x00, 0x00, 0x00),
-        tagLifetime to byteArrayOf(0x00, 0x04, 0x93, 0xE0.toByte()),
+        tagLifetime to byteArrayOf(0x00, 0x04, 0x93.toByte(), 0xE0.toByte()),
         tagOfferedFeatures to byteArrayOf(0, 9),
         tagOfferedChunk to byteArrayOf(0, 1, 0, 0),
         tagOfferedResume to byteArrayOf(1),
