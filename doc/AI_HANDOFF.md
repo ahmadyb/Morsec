@@ -1663,10 +1663,10 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `8a65e17c4ce10af127f96654c319b2488fe3b779` |
+| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `48caac20b6b18081abccec95be9c6866df3d5d51` |
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
-| **Green CI on that exact SHA** | Run 37990349639 — https://github.com/ahmadyb/Morsec/actions/runs/37990349639 — `success`, all 23 steps |
-| Tests | `2739 tests, 0 failed, 0 skipped in 162 report(s)` |
+| **Green CI on that exact SHA** | Run 38032455530 — https://github.com/ahmadyb/Morsec/actions/runs/38032455530 — `success` |
+| Tests | `2760 tests, 0 failed, 0 skipped in 163 report(s)`. `core-transfer` went 475/22 reports to 496/23, so the +21 are exactly the new MPS2/MST2 suite |
 | Lint | `0 errors, 48 warnings in 7 report(s)` |
 | APKs | `app-debug.apk = 32.22 MiB`, `app-debug-androidTest.apk = 1.10 MiB` |
 | Room schemas | v1 `29767` bytes and v2 `50652` bytes, both byte-compared; no schema changed |
@@ -1677,7 +1677,8 @@ actually verified, and separates it from what was not.
 | Governance verifiers | step 10 success. Locally: refs 31/31, token-parity 195/195, transfer-limits 21/21, secure-dependency-governance 13/13, secure-authority-surface 32/32, room-schema --baseline-only 11/11 |
 | The new verifier can actually fail | Mutation-tested: re-adding the authority marker fails 2 checks; re-exporting the reducer from `:core-transfer` fails 3; putting `internal` on an interface member fails 1 and points at the exact line |
 | SAS arithmetic | Modelled independently and confirmed against CI output: exporter bytes `AB CD E0 00` produce `PH8Y2`, which is what the compiled Kotlin reported |
-| CI as the compiler | Ten red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, and `.pom` files that Gradle never materializes under `files-2.1` |
+| MPS2/MST2 transcript vector | Computed by a separate implementation written from the format description, not by running the codec: 578 canonical bytes, SHA-256 `685b681c96edf8f169c88012a29e25492d39c016cc8987e64107e3aff6a43c64`. The test also re-derives the digest from the canonical bytes, so a stored constant cannot drift silently |
+| CI as the compiler | Twelve red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, `.pom` files that Gradle never materializes under `files-2.1`, a `const val` that already existed in the same package, and `0x93` used as a `Byte` literal |
 | CI diagnosis without logs | `gh run view --log-failed`, the job-logs API and artifact downloads are all unusable from this sandbox — artifact downloads redirect to Azure blob storage, which is unreachable. The check-run **annotations** API is the one readable channel, which is why step 13 was changed to emit a `::error` annotation; that single annotation is what identified the `.pom` cause |
 
 ### What was NOT verified
@@ -1687,7 +1688,24 @@ actually verified, and separates it from what was not.
   record; the green run above is the only compilation evidence for this work.
 - **CI green is not acceptance.** It proves the code compiles, the tests pass and the gates hold.
   It does not prove the protocol is secure, and it is not the required independent reaudit.
-- **M3 (MPS2/MST2 canonical transcript) is not implemented.** Hello and transcript remain
+- **M3 is implemented but not wired.** `SecurePairingWireV2.kt` now carries MPS2 and MST2, and its
+  21 tests pass in CI, but `SecureLanPairingCoordinator` still speaks MPS1/MST1 on the wire. The
+  codec is evidence that the format is well-formed and that its refusals fire; it is not yet the
+  format the pairing path uses. Until the coordinator switches over, an MPS2 peer and this build
+  cannot talk to each other.
+- **The attempt limiter's counters are not bound to the discovery lease.** They are one
+  process-wide instance at file scope in `LanPeerDiscoveryProvider.kt`. That is stronger than
+  nothing and matches the documented process-local semantics, but it is not the per-lease binding
+  the requirement asks for, and failure classification is coarse: admission, concurrency,
+  cooldown and identity invalidation are distinguished, but the eight failure categories are not
+  each counted separately.
+- **Control-record I/O on an established session has no total deadline.** `MonotonicSocketDeadline`
+  covers the TLS handshake, pairing hello, key confirmation, approval wait and bounded close.
+  Post-authentication record reads and writes are still bounded only by the per-read inactivity
+  timeout, and there are no production-path slow-read, slow-drip or non-reading-peer tests.
+- **The pairing path still negotiates MPS1/MST1.** The hello and transcript the coordinator
+  sends and hashes are the MPS1/MST1 versions; MPS2/MST2 exist alongside them, not in place of
+  them. Hello and transcript remain
   `MPS1`/`MST1`. The existing transcript is thorough about what it does bind — wire versions,
   transport, suite, both roles, control and secure session IDs, both peer IDs, the selected
   protocol version and both advertised ranges, the feature mask, all four session limits, both
