@@ -85,6 +85,7 @@ public const val PAIRING_V2_PRESENCE_BITS: Int = 7
 private const val PRESENCE_MASK_DEFINED: Int = (1 shl PAIRING_V2_PRESENCE_BITS) - 1
 
 private const val MAX_PEER_ID_BYTES: Int = 64
+private const val MAX_CONTROL_SESSION_ID_BYTES: Int = 64
 private const val MAX_TRANSPORT_ID_BYTES: Int = 16
 private const val MAX_TLS_PROTOCOL_BYTES: Int = 16
 private const val MAX_TLS_CIPHER_BYTES: Int = 64
@@ -215,7 +216,10 @@ public class PairingOfferV2(
 
     init {
         requireHexSessionId(secureSessionId.value, "secure session id")
-        requireHexSessionId(controlSessionId.value, "control session id")
+        // The control-session id is an opaque identifier, not a 128-bit hex value. MPS1 encoded
+        // it as bounded ASCII text and the pairing tests use a short literal, so requiring hex
+        // here rejects identifiers the rest of the system accepts.
+        requireBoundedText(controlSessionId.value, MAX_CONTROL_SESSION_ID_BYTES, "control session id")
         require(localPeerInstanceId != remotePeerInstanceId) { "peer instance ids must differ" }
         requireBoundedText(localPeerInstanceId.value, MAX_PEER_ID_BYTES, "local peer id")
         requireBoundedText(remotePeerInstanceId.value, MAX_PEER_ID_BYTES, "remote peer id")
@@ -426,7 +430,7 @@ public object SecurePairingHelloV2Codec {
             PairingHelloV2Result.Success(
                 PairingOfferV2(
                     secureSessionId = SessionId(hexOf(values.getValue(TAG_SECURE_SESSION_ID))),
-                    controlSessionId = SessionId(hexOf(values.getValue(TAG_CONTROL_SESSION_ID))),
+                    controlSessionId = SessionId(utf8(values.getValue(TAG_CONTROL_SESSION_ID))),
                     role = role,
                     localPeerInstanceId = PeerInstanceId(utf8(values.getValue(TAG_LOCAL_PEER_ID))),
                     remotePeerInstanceId = PeerInstanceId(utf8(values.getValue(TAG_REMOTE_PEER_ID))),
@@ -501,7 +505,7 @@ public object SecurePairingHelloV2Codec {
     private fun encodeFields(offer: PairingOfferV2): List<Pair<Int, ByteArray>> {
         val fields = ArrayList<Pair<Int, ByteArray>>()
         fields.add(TAG_SECURE_SESSION_ID to bytesOf(offer.secureSessionId.value))
-        fields.add(TAG_CONTROL_SESSION_ID to bytesOf(offer.controlSessionId.value))
+        fields.add(TAG_CONTROL_SESSION_ID to offer.controlSessionId.value.toByteArray(Charsets.UTF_8))
         fields.add(TAG_ROLE to byteArrayOf(offer.role.wireId.toByte()))
         fields.add(TAG_LOCAL_PEER_ID to offer.localPeerInstanceId.value.toByteArray(Charsets.UTF_8))
         fields.add(TAG_REMOTE_PEER_ID to offer.remotePeerInstanceId.value.toByteArray(Charsets.UTF_8))
@@ -543,7 +547,8 @@ public object SecurePairingHelloV2Codec {
 
     /** Inclusive length bounds per tag, or null for a tag this implementation does not know. */
     private fun fieldLengthBound(tag: Int): Pair<Int, Int>? = when (tag) {
-        TAG_SECURE_SESSION_ID, TAG_CONTROL_SESSION_ID -> SESSION_ID_BYTES_V2 to SESSION_ID_BYTES_V2
+        TAG_SECURE_SESSION_ID -> SESSION_ID_BYTES_V2 to SESSION_ID_BYTES_V2
+        TAG_CONTROL_SESSION_ID -> 1 to MAX_CONTROL_SESSION_ID_BYTES
         TAG_ROLE -> 1 to 1
         TAG_LOCAL_PEER_ID, TAG_REMOTE_PEER_ID -> 1 to MAX_PEER_ID_BYTES
         TAG_PROTOCOL_MIN, TAG_PROTOCOL_MAX -> 2 to 2
@@ -759,7 +764,7 @@ public object SecurePairingTranscriptV2 {
 
         fields.add(F_SECURE_SESSION_ID to bytesOf(initiator.secureSessionId.value))
 
-        fields.add(F_CONTROL_SESSION_ID to bytesOf(initiator.controlSessionId.value))
+        fields.add(F_CONTROL_SESSION_ID to initiator.controlSessionId.value.toByteArray(Charsets.UTF_8))
 
         fields.add(F_INIT_LOCAL_PEER to initiator.localPeerInstanceId.value.toByteArray(Charsets.UTF_8))
 

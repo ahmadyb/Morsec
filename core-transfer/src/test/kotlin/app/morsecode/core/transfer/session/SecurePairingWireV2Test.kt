@@ -185,10 +185,10 @@ public class SecurePairingWireV2Test {
     public fun transcriptMatchesTheIndependentlyComputedVector() {
         val transcript = transcriptOf()
         assertNotNull("transcript should build for a valid offer pair", transcript)
-        assertEquals(578, transcript!!.first.size)
+        assertEquals(594, transcript!!.first.size)
         assertEquals(
             "digest must equal the value computed by the independent implementation",
-            "685b681c96edf8f169c88012a29e25492d39c016cc8987e64107e3aff6a43c64",
+            "95ee0c3c5f58e6f56627758fd158b9f6ad4e76d021db78405bcc5057d97e1350",
             transcript.second.joinToString("") { "%02x".format(it) },
         )
         // The digest really is SHA-256 over the canonical bytes, not a separately kept value.
