@@ -88,7 +88,6 @@ private const val MAX_PEER_ID_BYTES: Int = 64
 private const val MAX_TRANSPORT_ID_BYTES: Int = 16
 private const val MAX_TLS_PROTOCOL_BYTES: Int = 16
 private const val MAX_TLS_CIPHER_BYTES: Int = 64
-private const val MAX_APP_VERSION_BYTES: Int = 32
 private const val MAX_EXTENSION_COUNT: Int = 8
 private const val MAX_EXTENSION_PAYLOAD_BYTES: Int = 64
 private const val SESSION_ID_BYTES_V2: Int = 16
@@ -516,6 +515,8 @@ public object SecurePairingHelloV2Codec {
         TAG_OFFERED_FEATURES -> 2 to 2
         TAG_OFFERED_MAX_CHUNK -> 4 to 4
         TAG_OFFERED_RESUME, TAG_OFFERED_ENCRYPTION, TAG_OFFERED_AUTHENTICATION -> 1 to 1
+        // SessionContracts.MAX_APP_VERSION_BYTES -- one bound for app version, shared with the
+        // control handshake, so the two formats cannot drift.
         TAG_APP_VERSION -> 1 to MAX_APP_VERSION_BYTES
         TAG_EXTENSIONS -> 2 to (2 + MAX_EXTENSION_COUNT * (3 + MAX_EXTENSION_PAYLOAD_BYTES))
         else -> null
