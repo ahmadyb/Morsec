@@ -195,6 +195,27 @@ jobs:
           mkdir -p ci-logs
           ./gradlew --no-daemon --stacktrace --continue test 2>&1 | tee ci-logs/20-unit-tests.log
 
+          # Gradle names the failed *task*, not the failed test, and from some environments
+          # neither the job log nor the uploaded HTML report can be retrieved. Publish the failing
+          # test names and messages as check-run annotations so a red run says what actually
+          # failed instead of only "There were failing tests".
+          python3 - <<'PYEOF' || true
+          import glob
+          import xml.etree.ElementTree as ET
+          for path in glob.glob('**/build/test-results/**/*.xml', recursive=True):
+              try:
+                  root = ET.parse(path).getroot()
+              except Exception:
+                  continue
+              for case in root.iter('testcase'):
+                  for kind in ('failure', 'error'):
+                      for node in case.findall(kind):
+                          text = (node.get('message') or node.text or '')
+                          text = ' '.join(text.split())[:500]
+                          name = f"{case.get('classname')} > {case.get('name')}"
+                          print(f"::error title=failing test::{name} :: {text}")
+          PYEOF
+
       - name: Resolve and verify secure dependency graph
         if: ${{ !cancelled() }}
         run: |
