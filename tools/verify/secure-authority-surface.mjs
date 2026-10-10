@@ -321,6 +321,92 @@ check(
   );
 }
 
+
+/**
+ * Group 12 -- the production pairing path must use MPS2/MST2, not MPS1/MST1.
+ *
+ * A codec that production does not call does not remediate M3. These checks exist so the wiring
+ * cannot silently regress: replacing a V2 call with the V1 equivalent has to fail here, which is
+ * what makes "the coordinator speaks V2" a maintained property rather than a claim.
+ */
+function verifyProductionWireVersion() {
+  const coordinatorPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecureLanPairingCoordinator.kt',
+  );
+  const coordinator = existsSync(coordinatorPath) ? read(coordinatorPath) : '';
+
+  check(
+    'the production coordinator encodes its hello with the V2 codec',
+    /SecurePairingHelloV2Codec\.encodeFrame\(/.test(coordinator),
+  );
+  check(
+    'the production coordinator decodes the peer hello with the V2 codec',
+    /SecurePairingHelloV2Codec\.decode\(/.test(coordinator),
+  );
+  check(
+    'the production coordinator does not invoke the MPS1 hello encoder',
+    !/SecurePairingHelloCodec\.(encode|decode|decodeHeader)\(/.test(coordinator),
+  );
+  check(
+    'the production coordinator does not build an MST1 transcript',
+    !/SecurePairingTranscript\.create\(/.test(coordinator),
+  );
+  check(
+    'the selection is derived from both decoded offers, never caller-supplied',
+    /SecurePairingSelectionV2\.select\(initiatorOffer, responderOffer\)/.test(coordinator) &&
+      /when \(val result = SecurePairingSelectionV2\.select\(/.test(coordinator),
+  );
+  check(
+    'the transcript is built from the V2 offers and the derived selection',
+    /SecurePairingTranscriptV2\.build\(initiatorOffer, responderOffer, selection\)/.test(coordinator),
+  );
+  check(
+    'the exporter and human proof are bound to the V2 transcript digest',
+    /transcriptDigest = canonicalDigest/.test(coordinator) &&
+      /established\.export\(PROOF_LABEL, canonicalDigest/.test(coordinator) &&
+      /export\(C2S_KEY_LABEL, transcriptDigest/.test(coordinator),
+  );
+  check(
+    'a legacy MPS1 peer gets a typed incompatible-format result rather than a retry',
+    /LEGACY_MPS1_UNSUPPORTED/.test(coordinator) &&
+      /throw LegacySecurityFormatException\(\)/.test(coordinator) &&
+      /catch \(_: LegacySecurityFormatException\) \{\s*return failed\(SessionFailureCode\.PROTOCOL_VERSION_UNSUPPORTED\)/.test(coordinator),
+  );
+  check(
+    'the V2 offer encodes the disabled capabilities as explicit zero and false',
+    /offeredMaxChunkSizeBytes = 0L/.test(coordinator) && /offeredResumeSupported = false/.test(coordinator),
+  );
+  check(
+    'no payload feature bit is offered in the V2 hello',
+    /FEATURES_CONTROL_AND_SECURE: Int = \(1 shl 0\) or \(1 shl 3\)/.test(coordinator) &&
+      !/offeredFeaturesMask\s*=\s*[^,]*FILE/.test(coordinator),
+  );
+
+  // MPS1 may survive only where it is needed to prove rejection, not in any production path.
+  const allowlisted = new Set([
+    join(ROOT, 'core-transfer', 'src', 'main', 'kotlin', 'app', 'morsecode', 'core', 'transfer',
+      'session', 'SecurePairingCodec.kt'),
+  ]);
+  const offenders = [];
+  for (const module of ['transport-lan', 'core-transfer']) {
+    for (const file of kotlinSources(module, 'main')) {
+      if (allowlisted.has(file)) continue;
+      const text = read(file);
+      if (/SecurePairingHelloCodec\.(encode|decode|decodeHeader)\(|SecurePairingTranscript\.create\(/.test(text)) {
+        offenders.push(relative(ROOT, file));
+      }
+    }
+  }
+  check(
+    'MPS1 encoding and MST1 transcript building appear nowhere outside the allowlisted codec',
+    offenders.length === 0,
+    offenders.join(', '),
+  );
+}
+
+verifyProductionWireVersion();
+
 console.log('\nPart B capability trust boundary verification');
 console.log(checks.join('\n'));
 console.log(`\n${checks.length - failures}/${checks.length} checks passed, ${failures} failed`);

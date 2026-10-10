@@ -121,6 +121,7 @@ public enum class PairingWireV2Reject(public val wireReason: String) {
     FIELD_ORDER_NOT_CANONICAL("field_order_not_canonical"),
     FIELD_LENGTH_OUT_OF_BOUNDS("field_length_out_of_bounds"),
     FIELD_VALUE_OUT_OF_BOUNDS("field_value_out_of_bounds"),
+    HEADER_LENGTH_OUT_OF_BOUNDS("header_length_out_of_bounds"),
     TRAILING_BYTES("trailing_bytes"),
     MALFORMED_END_TAG("malformed_end_tag"),
     EXTENSION_COUNT_OUT_OF_BOUNDS("extension_count_out_of_bounds"),
@@ -144,6 +145,7 @@ public enum class PairingSelectionReject(public val wireReason: String) {
     SUITE_MISMATCH("suite_mismatch"),
     LIMIT_MISMATCH("limit_mismatch"),
     TLS_NOT_1_3("tls_not_1_3"),
+    TLS_MISMATCH("tls_mismatch"),
 }
 
 /**
@@ -279,7 +281,49 @@ public sealed interface PairingHelloV2Result {
  * can escape. Decoding validates every declared length against its per-field bound and the frame
  * bound before copying anything out.
  */
+/** Fixed 4-byte big-endian payload length prefix. The payload itself carries the MPS2 magic. */
+public const val PAIRING_V2_HEADER_BYTES: Int = 4
+
+public sealed interface PairingV2HeaderResult {
+    public data class Valid(public val payloadLength: Int) : PairingV2HeaderResult
+    public data class Rejected(public val reason: PairingWireV2Reject) : PairingV2HeaderResult
+}
+
 public object SecurePairingHelloV2Codec {
+    /**
+     * Length-prefixed framing for the wire.
+     *
+     * The pairing path reads a fixed header before it knows how much to read, so the frame needs
+     * one. The length is bounded here rather than trusted: a peer claiming more than the frame
+     * ceiling is refused before any buffer of that size is allocated, which is also what makes an
+     * MPS1 header uninteresting -- whatever length it encodes, it is either rejected outright or
+     * leads to a payload whose magic is not MPS2.
+     */
+    public fun encodeFrame(offer: PairingOfferV2): ByteArray {
+        val frame = encode(offer)
+        val out = ByteArray(PAIRING_V2_HEADER_BYTES + frame.size)
+        out[0] = ((frame.size ushr 24) and 0xFF).toByte()
+        out[1] = ((frame.size ushr 16) and 0xFF).toByte()
+        out[2] = ((frame.size ushr 8) and 0xFF).toByte()
+        out[3] = (frame.size and 0xFF).toByte()
+        frame.copyInto(out, PAIRING_V2_HEADER_BYTES)
+        return out
+    }
+
+    public fun decodeHeader(header: ByteArray): PairingV2HeaderResult {
+        if (header.size != PAIRING_V2_HEADER_BYTES) return PairingV2HeaderResult.Rejected(
+            PairingWireV2Reject.FRAME_TOO_SHORT,
+        )
+        val length = ((header[0].toInt() and 0xFF) shl 24) or
+            ((header[1].toInt() and 0xFF) shl 16) or
+            ((header[2].toInt() and 0xFF) shl 8) or
+            (header[3].toInt() and 0xFF)
+        if (length < HEADER_BYTES || length > MAX_PAIRING_V2_FRAME_BYTES) {
+            return PairingV2HeaderResult.Rejected(PairingWireV2Reject.HEADER_LENGTH_OUT_OF_BOUNDS)
+        }
+        return PairingV2HeaderResult.Valid(length)
+    }
+
     public fun encode(offer: PairingOfferV2): ByteArray {
         val fields = encodeFields(offer)
         var size = HEADER_BYTES
@@ -567,6 +611,14 @@ public object SecurePairingSelectionV2 {
             return reject(PairingSelectionReject.PEER_ID_NOT_REFLECTED)
         }
         if (initiator.transport != responder.transport) return reject(PairingSelectionReject.TRANSPORT_MISMATCH)
+        // The offers carry the TLS protocol and cipher that were actually negotiated on the
+        // established session, so both sides must report the same pair and it must be TLS 1.3.
+        if (initiator.tlsProtocol != responder.tlsProtocol ||
+            initiator.tlsCipherSuite != responder.tlsCipherSuite
+        ) {
+            return reject(PairingSelectionReject.TLS_MISMATCH)
+        }
+        if (initiator.tlsProtocol != "TLSv1.3") return reject(PairingSelectionReject.TLS_NOT_1_3)
         if (initiator.securitySuiteWireId != responder.securitySuiteWireId) {
             return reject(PairingSelectionReject.SUITE_MISMATCH)
         }

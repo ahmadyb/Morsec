@@ -7,13 +7,20 @@ import app.morsecode.core.transfer.session.NegotiatedSession
 import app.morsecode.core.transfer.session.SecureKeyConfirmation
 import app.morsecode.core.transfer.session.SecureKeyConfirmationCodec
 import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
-import app.morsecode.core.transfer.session.SecurePairingHello
-import app.morsecode.core.transfer.session.SecurePairingHelloCodec
-import app.morsecode.core.transfer.session.SecurePairingHelloDecodeResult
-import app.morsecode.core.transfer.session.SecurePairingHelloHeaderResult
 import app.morsecode.core.transfer.session.SecurePairingResult
 import app.morsecode.core.transfer.session.SecurePairingState
-import app.morsecode.core.transfer.session.SecurePairingTranscript
+import app.morsecode.core.model.TransportKind
+import app.morsecode.core.transfer.session.EncryptionCapability
+import app.morsecode.core.transfer.session.PAIRING_V2_HEADER_BYTES
+import app.morsecode.core.transfer.session.PairingAuthenticationCapability
+import app.morsecode.core.transfer.session.PairingHelloV2Result
+import app.morsecode.core.transfer.session.PairingOfferV2
+import app.morsecode.core.transfer.session.PairingSelectionResult
+import app.morsecode.core.transfer.session.PairingV2HeaderResult
+import app.morsecode.core.transfer.session.PairingWireV2Reject
+import app.morsecode.core.transfer.session.SecurePairingHelloV2Codec
+import app.morsecode.core.transfer.session.SecurePairingSelectionV2
+import app.morsecode.core.transfer.session.SecurePairingTranscriptV2
 import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordAead
 import app.morsecode.core.transfer.session.SecureRecordCodec
@@ -106,9 +113,11 @@ internal class SecureLanPairingCoordinator(
             }
         }
         var authenticated = false
-        var localHello: SecurePairingHello? = null
-        var remoteHello: SecurePairingHello? = null
-        var transcript: SecurePairingTranscript? = null
+        var localOffer: PairingOfferV2? = null
+        var remoteOffer: PairingOfferV2? = null
+        // The V2 transcript is returned as canonical bytes plus their digest rather than as an
+        // object, so there is nothing to clear beyond the two arrays.
+        var transcriptBytes: ByteArray? = null
         var transcriptDigest: ByteArray? = null
         var proof: HumanVerificationCode? = null
         try {
@@ -144,18 +153,19 @@ internal class SecureLanPairingCoordinator(
                 try {
                     if (role == SecurePeerRole.INITIATOR) {
                         val id = requireNotNull(secureId)
-                        localHello = createHello(id, localNonce, localFingerprint)
-                        writeHello(output, requireNotNull(localHello))
-                        remoteHello = readHello(input, socket)
+                        localOffer = createOffer(id, localNonce, localFingerprint, established)
+                        writeOffer(output, requireNotNull(localOffer))
+                        remoteOffer = readOffer(input, socket)
                     } else {
-                        remoteHello = readHello(input, socket)
-                        validateRemoteHello(requireNotNull(remoteHello), null, established.peerFingerprintBytes())
-                        localHello = createHello(
-                            secureSessionId = requireNotNull(remoteHello).secureSessionId,
+                        remoteOffer = readOffer(input, socket)
+                        validateRemoteOffer(requireNotNull(remoteOffer), null, established.peerFingerprintBytes())
+                        localOffer = createOffer(
+                            secureSessionId = requireNotNull(remoteOffer).secureSessionId,
                             nonce = localNonce,
                             certificateFingerprint = localFingerprint,
+                            established = established,
                         )
-                        writeHello(output, requireNotNull(localHello))
+                        writeOffer(output, requireNotNull(localOffer))
                     }
                 } finally {
                     localNonce.fill(0)
@@ -163,10 +173,10 @@ internal class SecureLanPairingCoordinator(
                 }
             }
 
-            val remote = requireNotNull(remoteHello)
-            val local = requireNotNull(localHello)
+            val remote = requireNotNull(remoteOffer)
+            val local = requireNotNull(localOffer)
             if (role == SecurePeerRole.INITIATOR) {
-                validateRemoteHello(remote, secureId, established.peerFingerprintBytes())
+                validateRemoteOffer(remote, secureId, established.peerFingerprintBytes())
             }
             val localPresentedFingerprint = local.certificateFingerprintBytes()
             val actualLocalFingerprint = established.localFingerprintBytes()
@@ -178,15 +188,19 @@ internal class SecureLanPairingCoordinator(
             }
             if (!localFingerprintMatches) return failed(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
 
-            val initiatorHello = if (role == SecurePeerRole.INITIATOR) local else remote
-            val responderHello = if (role == SecurePeerRole.RESPONDER) local else remote
-            transcript = SecurePairingTranscript.create(
-                initiatorHello,
-                responderHello,
-                established.protocol,
-                established.cipherSuite,
-            ) ?: return failed(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
-            val canonicalDigest = requireNotNull(transcript).digestBytes()
+            val initiatorOffer = if (role == SecurePeerRole.INITIATOR) local else remote
+            val responderOffer = if (role == SecurePeerRole.RESPONDER) local else remote
+            // The selection is derived from the two decoded offers. Nothing here is
+            // caller-supplied: a peer cannot assert a profile the other side never offered.
+            val selection = when (val result = SecurePairingSelectionV2.select(initiatorOffer, responderOffer)) {
+                is PairingSelectionResult.Selected -> result.selection
+                is PairingSelectionResult.Rejected ->
+                    return failed(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
+            }
+            val built = SecurePairingTranscriptV2.build(initiatorOffer, responderOffer, selection)
+                ?: return failed(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
+            transcriptBytes = built.first
+            val canonicalDigest = built.second.copyOf()
             transcriptDigest = canonicalDigest
 
             val proofMaterial = established.export(PROOF_LABEL, canonicalDigest, EXPORTER_BYTES)
@@ -287,6 +301,8 @@ internal class SecureLanPairingCoordinator(
                 recordLayer = requireNotNull(recordLayer),
                 expiresAtElapsedMillis = expiresAt,
             )
+        } catch (_: LegacySecurityFormatException) {
+            return failed(SessionFailureCode.PROTOCOL_VERSION_UNSUPPORTED)
         } catch (_: SocketTimeoutException) {
             return failedFromMachine(machine, SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         } catch (_: IOException) {
@@ -300,7 +316,7 @@ internal class SecureLanPairingCoordinator(
             }
             localHello?.clearSensitive()
             remoteHello?.clearSensitive()
-            transcript?.clearSensitive()
+            transcriptBytes?.fill(0)
             transcriptDigest?.fill(0)
             proof?.clearSensitive()
             val completedTls = tls
@@ -378,25 +394,43 @@ internal class SecureLanPairingCoordinator(
         }
     }
 
-    private fun createHello(
+    private fun createOffer(
         secureSessionId: SessionId,
         nonce: ByteArray,
         certificateFingerprint: ByteArray,
-    ): SecurePairingHello {
+        established: EstablishedTlsSession,
+    ): PairingOfferV2 {
         val localProfile = controlSession.localProfile
         return try {
-            SecurePairingHello(
+            PairingOfferV2(
                 secureSessionId = secureSessionId,
                 controlSessionId = controlSession.attemptId,
                 role = role,
                 localPeerInstanceId = localProfile.peerInstanceId,
                 remotePeerInstanceId = controlSession.remoteProfile.peerInstanceId,
-                appVersion = localProfile.appVersion,
-                selectedProtocolVersion = controlSession.protocolVersion,
                 protocolMinimumVersion = localProfile.protocolRange.minimum,
                 protocolMaximumVersion = localProfile.protocolRange.maximum,
                 nonce = nonce,
                 certificateFingerprint = certificateFingerprint,
+                transport = TransportKind.LAN,
+                securitySuiteWireId = SECURITY_SUITE_PART_B,
+                // The negotiated values, not a preference: the handshake has already happened.
+                tlsProtocol = established.protocol,
+                tlsCipherSuite = established.cipherSuite,
+                maxRecordPlaintextBytes = SecureSessionLimits.MAX_RECORD_PLAINTEXT_BYTES.toLong(),
+                maxRecordsPerDirection = SecureSessionLimits.MAX_RECORDS_PER_DIRECTION,
+                maxBytesPerDirection = SecureSessionLimits.MAX_BYTES_PER_DIRECTION,
+                sessionLifetimeMillis = SecureSessionLimits.MAX_SESSION_LIFETIME_MILLIS,
+                offeredFeaturesMask = FEATURES_CONTROL_AND_SECURE,
+                // Explicit zero and explicit false, not absent. Chunk transfer and resume are
+                // disabled in this milestone, and "we do not offer this" has to be a value the
+                // transcript binds rather than an omission the peer can fill in.
+                offeredMaxChunkSizeBytes = 0L,
+                offeredResumeSupported = false,
+                offeredEncryption = EncryptionCapability.TLS_1_3,
+                offeredAuthentication = PairingAuthenticationCapability.SAS_25BIT_COMPARISON,
+                appVersion = localProfile.appVersion,
+                extensions = emptyList(),
             )
         } finally {
             nonce.fill(0)
@@ -404,24 +438,23 @@ internal class SecureLanPairingCoordinator(
         }
     }
 
-    private fun validateRemoteHello(
-        hello: SecurePairingHello,
+    private fun validateRemoteOffer(
+        offer: PairingOfferV2,
         expectedSecureSessionId: SessionId?,
         peerCertificateFingerprint: ByteArray,
     ) {
         val expectedLocal = controlSession.localProfile.peerInstanceId
         val expectedRemote = controlSession.remoteProfile.peerInstanceId
-        val presentedFingerprint = hello.certificateFingerprintBytes()
+        val presentedFingerprint = offer.certificateFingerprintBytes()
         try {
-            if (hello.role != role.opposite ||
-                hello.controlSessionId != controlSession.attemptId ||
-                hello.localPeerInstanceId != expectedRemote ||
-                hello.remotePeerInstanceId != expectedLocal ||
-                hello.appVersion != controlSession.remoteProfile.appVersion ||
-                hello.selectedProtocolVersion != controlSession.protocolVersion ||
-                hello.protocolMinimumVersion != controlSession.remoteProfile.protocolRange.minimum ||
-                hello.protocolMaximumVersion != controlSession.remoteProfile.protocolRange.maximum ||
-                (expectedSecureSessionId != null && hello.secureSessionId != expectedSecureSessionId) ||
+            if (offer.role != role.opposite ||
+                offer.controlSessionId != controlSession.attemptId ||
+                offer.localPeerInstanceId != expectedRemote ||
+                offer.remotePeerInstanceId != expectedLocal ||
+                offer.appVersion != controlSession.remoteProfile.appVersion ||
+                offer.protocolMinimumVersion != controlSession.remoteProfile.protocolRange.minimum ||
+                offer.protocolMaximumVersion != controlSession.remoteProfile.protocolRange.maximum ||
+                (expectedSecureSessionId != null && offer.secureSessionId != expectedSecureSessionId) ||
                 !presentedFingerprint.contentEquals(peerCertificateFingerprint)
             ) throw SecureSessionCryptoException()
         } finally {
@@ -430,8 +463,8 @@ internal class SecureLanPairingCoordinator(
         }
     }
 
-    private fun writeHello(output: DataOutputStream, hello: SecurePairingHello) {
-        val frame = SecurePairingHelloCodec.encode(hello)
+    private fun writeOffer(output: DataOutputStream, offer: PairingOfferV2) {
+        val frame = SecurePairingHelloV2Codec.encodeFrame(offer)
         try {
             output.write(frame)
             output.flush()
@@ -466,29 +499,29 @@ internal class SecureLanPairingCoordinator(
         }
     }
 
-    private fun readHello(input: DataInputStream, socket: Socket): SecurePairingHello {
-        val headerBytes = ByteArray(SecurePairingHelloCodec.HEADER_SIZE_BYTES)
+    private fun readOffer(input: DataInputStream, socket: Socket): PairingOfferV2 {
+        val headerBytes = ByteArray(PAIRING_V2_HEADER_BYTES)
         val deadline = readDeadline()
         var frame: ByteArray? = null
         try {
             readExact(input, headerBytes, 0, headerBytes.size, socket, deadline)
-            val header = when (val result = SecurePairingHelloCodec.decodeHeader(headerBytes)) {
-                is SecurePairingHelloHeaderResult.Valid -> result.header
-                is SecurePairingHelloHeaderResult.Invalid -> throw SecureSessionCryptoException()
+            val length = when (val result = SecurePairingHelloV2Codec.decodeHeader(headerBytes)) {
+                is PairingV2HeaderResult.Valid -> result.payloadLength
+                is PairingV2HeaderResult.Rejected -> throw SecureSessionCryptoException()
             }
-            frame = ByteArray(SecurePairingHelloCodec.HEADER_SIZE_BYTES + header.payloadLength)
-            headerBytes.copyInto(requireNotNull(frame))
-            readExact(
-                input,
-                requireNotNull(frame),
-                SecurePairingHelloCodec.HEADER_SIZE_BYTES,
-                header.payloadLength,
-                socket,
-                deadline,
-            )
-            return when (val result = SecurePairingHelloCodec.decode(requireNotNull(frame))) {
-                is SecurePairingHelloDecodeResult.Success -> result.hello
-                is SecurePairingHelloDecodeResult.Invalid -> throw SecureSessionCryptoException()
+            frame = ByteArray(length)
+            readExact(input, requireNotNull(frame), 0, length, socket, deadline)
+            return when (val result = SecurePairingHelloV2Codec.decode(requireNotNull(frame))) {
+                is PairingHelloV2Result.Success -> result.offer
+                is PairingHelloV2Result.Rejected ->
+                    if (result.reason == PairingWireV2Reject.LEGACY_MPS1_UNSUPPORTED) {
+                        // A peer still on MPS1 gets a typed incompatible-format result. There is
+                        // no retry over MPS1, no fallback transcript that omits the offer fields,
+                        // and no plaintext path.
+                        throw LegacySecurityFormatException()
+                    } else {
+                        throw SecureSessionCryptoException()
+                    }
             }
         } finally {
             headerBytes.fill(0)
@@ -645,3 +678,18 @@ internal class SecureLanPairingCoordinator(
         const val UNKNOWN_SOURCE: String = "unknown-source"
     }
 }
+
+/**
+ * Security suite this milestone implements. Mirrors the MPS1 suite identifier; declared here
+ * because the V2 offer names the suite it offers rather than inheriting a private constant.
+ */
+private const val SECURITY_SUITE_PART_B: Int = 1
+
+/** Control plus secure-session features. No payload feature bit is offered. */
+private const val FEATURES_CONTROL_AND_SECURE: Int = (1 shl 0) or (1 shl 3)
+
+/**
+ * The peer spoke MPS1. Kept distinct from a generic cryptographic failure so the pairing path can
+ * report an incompatible security format instead of a vague handshake error.
+ */
+internal class LegacySecurityFormatException : Exception("Peer used an incompatible security format.")
