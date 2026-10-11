@@ -1663,9 +1663,15 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `c116091a631b10abd3c80d82c8eff3465de66c63` |
+| Latest verified code SHA | `c116091a631b10abd3c80d82c8eff3465de66c63` |
+| Latest verified code CI | Run 38159445264 — https://github.com/ahmadyb/Morsec/actions/runs/38159445264 — `success`, zero failing steps, 2820 tests / 0 failed / 0 skipped |
+| Documentation commit SHA | **Deliberately not recorded here.** A document cannot state its own commit SHA without being stale the instant it is committed. Read it from `git log -1 --format=%H -- doc/AI_HANDOFF.md`. |
+
+These three are recorded separately on purpose. A single "current tip" row goes stale the moment the
+documentation commit is pushed, and a reader who trusts it will look at a SHA that no longer
+describes the code. Only the first two are claims about something that already exists and was
+verified; the third is a pointer.
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
-| **Green CI on that exact SHA** | Run 38159445264 — https://github.com/ahmadyb/Morsec/actions/runs/38159445264 — `success`, zero failing steps |
 | Tests | `2820 tests, 0 failed, 0 skipped in 169 report(s)`. `transport-lan` went 122/12 to 132/14, the +10 being the five new pairing-ownership tests run in both debug and release |
 | Lint | `0 errors, 48 warnings in 7 report(s)` |
 | APKs | `app-debug.apk = 32.22 MiB`, `app-debug-androidTest.apk = 1.10 MiB` |
