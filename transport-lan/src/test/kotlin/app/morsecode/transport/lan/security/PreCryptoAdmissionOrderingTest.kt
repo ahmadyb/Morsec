@@ -267,13 +267,23 @@ public class PreCryptoAdmissionOrderingTest {
             }
 
             assertTrue("all attempts must start", started.await(10, TimeUnit.SECONDS))
-            // Wait until exactly the permit count is inside run(), holding permits.
+            // The gate must not open until every attempt has already been decided. Waiting only
+            // for the admitted ones is not enough: a thread that has not reached tryStart yet
+            // would be admitted later, once the first two release, and the count would exceed the
+            // permit budget -- which is exactly the failure this test exists to catch.
             var waited = 0
-            while (spies.sumOf { it.entered.get() } < permits && waited < 2_000) {
+            while (waited < 4_000 &&
+                (spies.sumOf { it.entered.get() } < permits || refused.get() < attempts - permits)
+            ) {
                 Thread.sleep(5L)
                 waited += 1
             }
             assertEquals("exactly the permit count may be admitted", permits, spies.sumOf { it.entered.get() })
+            assertEquals(
+                "every other attempt must already have been refused before the gate opens",
+                attempts - permits,
+                refused.get(),
+            )
             gate.countDown()
             assertTrue("all attempts must finish", finished.await(10, TimeUnit.SECONDS))
 
