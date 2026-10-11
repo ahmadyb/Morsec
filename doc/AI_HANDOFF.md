@@ -1705,13 +1705,20 @@ actually verified, and separates it from what was not.
   is no two-coordinator JVM integration test, and the cross-session substitution, certificate
   substitution, extension-ordering and downgrade cases are asserted at codec level rather than
   through the production path. Only the API 23 test exercises two real coordinators.
-- **Two `transport-lan` test failures in run 38069680911 remain unidentified.** They appeared in
-  both the debug and release variants as `72/2f/0s` with no test name, because the workflow did not
-  emit per-test annotations at the time. A later run on effectively the same code passed, and the
-  failing-test emitter added afterwards has not caught a recurrence.
-  **That proves only non-reproduction, not harmlessness.** No root cause was found, no fix was
-  made, and the timing path involved has not been stress-covered. Anyone closing Part B should
-  treat this as an open item rather than a resolved one.
+- **The previously unidentified `transport-lan` failures are now identified and root-caused.**
+  They were `MonotonicSocketDeadlineTest#expiry unblocks a real blocking socket read`, named by the
+  failing-test emitter when it recurred in run 38158293852 as
+  `AssertionError: the socket must be closed`.
+  The cause is an ordering race in the test, not in the deadline. `abortiveClose()` runs
+  `setSoLinger`, `shutdownOutput`, `shutdownInput`, then `close` -- and `shutdownInput()` alone is
+  enough to release a blocked `read()`, which returns EOF. The test asserted `client.isClosed`
+  immediately after the reader unblocked, so it failed whenever `shutdownInput` won the race against
+  `close`. The fix waits on `closeCount() == 1`, which only becomes 1 after `abortiveClose` returns,
+  instead of widening a timeout; and the read assertion now accepts a throw *or* EOF, since
+  `readExact` already treats EOF as a failure, so both are correct unblocks.
+  The earlier run 38069680911 reported `72/2f/0s` in both variants with no test name because the
+  emitter did not exist yet. Two failures there against one now is consistent with the same race
+  firing in both variants, but that attribution is inference, not proof.
 - **Admission scope and outcome classification are wired; pre-TLS ordering is not proven.**
   The lease owns one `PairingAdmissionScope`, the coordinator receives that exact scope, a closed
   scope refuses with `SCOPE_CLOSED`, and `PairingAttemptOutcome` maps all eleven categories onto an

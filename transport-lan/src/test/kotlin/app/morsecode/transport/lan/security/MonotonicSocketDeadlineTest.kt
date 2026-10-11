@@ -240,9 +240,10 @@ class MonotonicSocketDeadlineTest {
             val accepted = server.accept()
             client.soTimeout = 0 // no inactivity timeout: only the total deadline can end this read
 
+            val readResult = AtomicReference<Int?>(null)
             val reader = Thread {
                 try {
-                    client.getInputStream().read()
+                    readResult.set(client.getInputStream().read())
                 } catch (throwable: Throwable) {
                     readFailed.set(throwable)
                 } finally {
@@ -266,11 +267,33 @@ class MonotonicSocketDeadlineTest {
             )
             deadline.arm()
             assertTrue("real read must be unblocked by abortive close", unblocked.await(10, TimeUnit.SECONDS))
+
+            // The read unblocking does NOT imply the socket is closed yet, and asserting that
+            // immediately is the race that made this test flaky. abortiveClose() runs
+            // setSoLinger, shutdownOutput, shutdownInput, then close -- and shutdownInput alone is
+            // enough to release a blocked read, returning EOF. So the reader can be free while
+            // close() has not run yet. closeCount only becomes 1 after abortiveClose returns, which
+            // makes it the thing to wait on rather than a wider sleep.
+            var settled = false
+            var attempts = 0
+            while (!settled && attempts < 1_000) {
+                settled = deadline.closeCount() == 1
+                if (!settled) {
+                    attempts += 1
+                    Thread.sleep(5L)
+                }
+            }
+            assertTrue("the abortive close must complete, not merely unblock the read", settled)
             assertTrue("the socket must be closed", client.isClosed)
             assertEquals(1, deadline.closeCount())
+
+            // Either outcome is a correct unblock: shutdownInput makes read() return EOF, while a
+            // close that lands first makes it throw. The property under test is that the read
+            // terminates at all -- readExact treats EOF as a failure, so both are handled.
             assertTrue(
-                "the blocked read must fail rather than return normally: ${readFailed.get()}",
-                readFailed.get() != null,
+                "the blocked read must terminate by failing or by EOF, got " +
+                    "result=${readResult.get()} error=${readFailed.get()}",
+                readFailed.get() != null || readResult.get() == -1,
             )
             deadline.complete()
             runCatching { accepted.close() }
