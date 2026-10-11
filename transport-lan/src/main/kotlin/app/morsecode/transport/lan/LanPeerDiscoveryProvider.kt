@@ -31,6 +31,7 @@ import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordLayer
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionOperation
+import app.morsecode.transport.lan.security.PairingAdmissionScope
 import app.morsecode.transport.lan.security.SecurePairingAttemptLimiter
 import app.morsecode.transport.lan.security.SecureSessionStateMachine
 import app.morsecode.core.transfer.session.DiscoveredPeer
@@ -276,7 +277,7 @@ public class LanPeerDiscoveryProvider(
         // Named argument, not a trailing lambda: the constructor's second parameter has a default,
         // and Kotlin binds a trailing lambda to the last parameter, so the shorthand would pass the
         // clock as the Limits and leave monotonicMillis unset.
-        private val attemptLimiter = SecurePairingAttemptLimiter(
+        private val admissionScope = PairingAdmissionScope(
             monotonicMillis = { clock.nowMillis() },
         )
         private val activeOperations = Collections.newSetFromMap(ConcurrentHashMap<ControlAttempt, Boolean>())
@@ -1115,8 +1116,9 @@ public class LanPeerDiscoveryProvider(
             // released and every counter is dropped, so no stale state or task survives. The
             // limiter holds no timers -- cooldown is derived from the injected clock at admission
             // time -- so there is no pending task to cancel here.
-            attemptLimiter.releaseAllConcurrency()
-            attemptLimiter.reset()
+            // Exactly once, however many paths reach stop(): the scope's own compare-and-set is
+            // what makes the release idempotent, and a closed scope then refuses new attempts.
+            admissionScope.close()
 
             notifyDiscoveryChanged()
             signalWorkers()
@@ -1502,7 +1504,7 @@ public class LanPeerDiscoveryProvider(
                             clock = clock,
                             random = SecureRandom(),
                             interaction = this,
-                            attemptLimiter = attemptLimiter,
+                            attemptLimiter = admissionScope,
                             peerIdentityKey = negotiatedValue.remoteProfile.peerInstanceId.value,
                             sourceKey = pairingSourceKey(activeSocket),
                         )

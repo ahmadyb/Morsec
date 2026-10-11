@@ -71,10 +71,13 @@ internal class SecureLanPairingCoordinator(
     private val random: SecureRandom,
     private val interaction: PairingInteraction,
     /**
-     * Process-local denial-of-service throttle. Optional so a caller that has no lease-scoped
-     * limiter still gets the deadline protection; it is never a substitute for the SAS comparison.
+     * The discovery lease's admission scope. Optional so a caller with no lease still gets the
+     * deadline protection; it is never a substitute for the SAS comparison.
+     *
+     * The coordinator receives the lease's exact scope rather than a shared limiter, so closing the
+     * lease also closes admission for every pairing that lease started.
      */
-    private val attemptLimiter: SecurePairingAttemptLimiter? = null,
+    private val attemptLimiter: PairingAdmissionScope? = null,
     private val peerIdentityKey: String = controlSession.remoteProfile.peerInstanceId.value,
     private val sourceKey: String = UNKNOWN_SOURCE,
 ) {

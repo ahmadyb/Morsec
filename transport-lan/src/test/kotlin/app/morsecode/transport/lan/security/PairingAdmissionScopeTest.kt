@@ -1,0 +1,201 @@
+package app.morsecode.transport.lan.security
+
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.TimeUnit
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * The lease-owned admission scope.
+ *
+ * Everything here runs on an injected clock with latch/barrier synchronisation. No test sleeps to
+ * reach a state and no assertion depends on wall-clock elapsed time.
+ */
+public class PairingAdmissionScopeTest {
+
+    private class StepClock(var now: Long = 0L) {
+        fun read(): Long = now
+        fun advance(millis: Long) {
+            now += millis
+        }
+    }
+
+    private fun permissive() = SecurePairingAttemptLimiter.Limits(
+        maxStartsPerIdentity = 1_000,
+        maxStartsPerSource = 1_000,
+        maxStartsPerPair = 1_000,
+        maxFailuresPerIdentity = 3,
+        maxFailuresPerPair = 1_000,
+        maxConcurrentPairings = 1_000,
+    )
+
+    private fun granted(admission: PairingAdmission): Boolean = admission is PairingAdmission.Granted
+
+    private fun reason(admission: PairingAdmission): PairingAdmission.RefusalReason? =
+        (admission as? PairingAdmission.Refused)?.reason
+
+    @Test
+    public fun `a fresh scope admits and a closed scope refuses`() {
+        val clock = StepClock()
+        val scope = PairingAdmissionScope(clock::read)
+        assertFalse(scope.isClosed)
+        assertTrue(granted(scope.tryStart("peer-a", "src-a")))
+        scope.releaseConcurrency()
+
+        scope.close()
+
+        assertTrue(scope.isClosed)
+        assertEquals(
+            PairingAdmission.RefusalReason.SCOPE_CLOSED,
+            reason(scope.tryStart("peer-a", "src-a")),
+        )
+        assertEquals(
+            "a closed scope refuses every identity, not just ones it already knew",
+            PairingAdmission.RefusalReason.SCOPE_CLOSED,
+            reason(scope.tryStart("peer-never-seen", "src-never-seen")),
+        )
+    }
+
+    @Test
+    public fun `close releases outstanding permits and drops the counters`() {
+        val clock = StepClock()
+        val scope = PairingAdmissionScope(clock::read, permissive())
+        // One identity, three mismatches: that is what reaches the failure budget. Three distinct
+        // identities once each would leave every counter at one and invalidate nothing.
+        repeat(3) {
+            assertTrue(granted(scope.tryStart("peer-esc", "src-esc")))
+            scope.recordOutcome("peer-esc", "src-esc", PairingAttemptOutcome.TRANSCRIPT_MISMATCH)
+            scope.releaseConcurrency()
+            clock.advance(120_000)
+        }
+        assertTrue(scope.isIdentityInvalidated("peer-esc"))
+
+        // Two permits left deliberately outstanding, so close has something real to release.
+        assertTrue(granted(scope.tryStart("peer-open-1", "src-open-1")))
+        assertTrue(granted(scope.tryStart("peer-open-2", "src-open-2")))
+        assertEquals(2, scope.concurrentPairings())
+
+        scope.close()
+
+        assertEquals(0, scope.concurrentPairings())
+        assertFalse(
+            "teardown, not exhaustion, is what clears the invalidated identity",
+            scope.isIdentityInvalidated("peer-esc"),
+        )
+    }
+
+    @Test
+    public fun `concurrent and repeated close release exactly once`() {
+        val clock = StepClock()
+        val scope = PairingAdmissionScope(clock::read, permissive())
+        assertTrue(granted(scope.tryStart("peer-race", "src-race")))
+        assertTrue(granted(scope.tryStart("peer-race2", "src-race2")))
+        assertEquals(2, scope.concurrentPairings())
+
+        // Four threads race to close, started from a barrier so they cannot serialise by accident.
+        val start = CyclicBarrier(4)
+        val done = CountDownLatch(4)
+        val closers = (1..4).map {
+            Thread {
+                try {
+                    start.await(5, TimeUnit.SECONDS)
+                    scope.close()
+                } catch (_: Exception) {
+                    // A broken barrier fails the await assertions below, not this thread.
+                } finally {
+                    done.countDown()
+                }
+            }.apply { isDaemon = true }
+        }
+        closers.forEach { it.start() }
+        // The main thread must not await the barrier: it has four parties, all of them closers, and
+        // a fifth arrival would join the next cycle and time out. done is the synchronisation.
+        assertTrue("all closers must finish", done.await(5, TimeUnit.SECONDS))
+        closers.forEach { it.join(5_000) }
+
+        assertEquals(
+            "release must happen exactly once, not once per closer",
+            0,
+            scope.concurrentPairings(),
+        )
+        assertTrue(scope.isClosed)
+
+        // Repeated close after the race must also be a no-op, never a second release.
+        scope.close()
+        scope.close()
+        assertEquals(0, scope.concurrentPairings())
+    }
+
+    @Test
+    public fun `a closed scope ignores outcomes and invalidation`() {
+        val clock = StepClock()
+        val scope = PairingAdmissionScope(clock::read, permissive())
+        scope.close()
+        // Neither call may resurrect state on a scope whose counters are already gone.
+        scope.recordOutcome("peer-x", "src-x", PairingAttemptOutcome.TRANSCRIPT_MISMATCH)
+        scope.invalidateIdentity("peer-x")
+        assertFalse(scope.isIdentityInvalidated("peer-x"))
+        assertEquals(0, scope.concurrentPairings())
+    }
+
+    @Test
+    public fun `concurrency release stays reachable after close`() {
+        val clock = StepClock()
+        val scope = PairingAdmissionScope(clock::read, permissive())
+        assertTrue(granted(scope.tryStart("peer-inflight", "src-inflight")))
+        scope.close()
+        // An in-flight coordinator releases in a finally, after the lease stopped. That path must
+        // remain reachable and must not drive the count negative.
+        scope.releaseConcurrency()
+        scope.releaseConcurrency()
+        assertEquals(0, scope.concurrentPairings())
+    }
+
+    @Test
+    public fun `a new scope is freshly scoped after the previous one closed`() {
+        val clock = StepClock()
+        val first = PairingAdmissionScope(clock::read, permissive())
+        repeat(3) {
+            assertTrue(granted(first.tryStart("peer-fresh", "src-fresh")))
+            first.recordOutcome("peer-fresh", "src-fresh", PairingAttemptOutcome.TRANSCRIPT_MISMATCH)
+            first.releaseConcurrency()
+            clock.advance(120_000)
+        }
+        assertTrue(first.isIdentityInvalidated("peer-fresh"))
+        first.close()
+
+        val second = PairingAdmissionScope(clock::read)
+        assertTrue(
+            "a restarted lease gets a fresh scope -- a process-local policy reset, not proof of a " +
+                "fresh peer, because discovery advertisements are unauthenticated",
+            granted(second.tryStart("peer-fresh", "src-fresh")),
+        )
+        second.close()
+        assertEquals(0, second.concurrentPairings())
+    }
+
+    @Test
+    public fun `forged identities cannot grow scope memory without bound`() {
+        val clock = StepClock()
+        // Default maxTrackedIdentities is 64. Past that, new keys share one overflow counter rather
+        // than allocating a counter each, so the map cannot be grown by a forger.
+        val scope = PairingAdmissionScope(clock::read)
+        var refusals = 0
+        repeat(500) { index ->
+            when (scope.tryStart("forged-$index", "forged-src-$index")) {
+                is PairingAdmission.Granted -> scope.releaseConcurrency()
+                is PairingAdmission.Refused -> refusals += 1
+            }
+            clock.advance(1)
+        }
+        assertTrue(
+            "an unbounded forged-identity flood must eventually be refused, not grow the map",
+            refusals > 0,
+        )
+        scope.close()
+        assertEquals(0, scope.concurrentPairings())
+    }
+}

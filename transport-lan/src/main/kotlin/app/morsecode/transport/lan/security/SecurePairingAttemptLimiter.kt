@@ -1,6 +1,7 @@
 package app.morsecode.transport.lan.security
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -36,6 +37,15 @@ internal sealed interface PairingAdmission {
 
         /** The per-identity/source monotonic cooldown has not elapsed. */
         COOLDOWN_ACTIVE,
+
+        /**
+         * The discovery lease that owned this scope has stopped.
+         *
+         * An in-flight pairing can outlive the instant the lease is stopped. Without this it would
+         * be able to acquire a fresh permit from a scope that no longer exists, which is exactly the
+         * way a limit gets bypassed by a concurrent session.
+         */
+        SCOPE_CLOSED,
     }
 }
 
@@ -392,4 +402,83 @@ internal class SecurePairingAttemptLimiter(
 
     private fun refused(reason: PairingAdmission.RefusalReason, retryAfter: Long) =
         PairingAdmission.Refused(reason, if (retryAfter < 0L) 0L else retryAfter)
+}
+
+/**
+ * One discovery lease's pairing-admission scope.
+ *
+ * The lease creates exactly one of these when explicit discovery starts, hands that same instance
+ * to every pairing coordinator it spawns, and closes it when it stops. Closing releases every
+ * permit the scope handed out exactly once and drops every counter, which is what makes a restarted
+ * lease genuinely newly scoped rather than inheriting the previous lease's exhaustion.
+ *
+ * A closed scope refuses new attempts instead of silently admitting them. The limiter alone cannot
+ * express that: its counters are just numbers, and a lease that merely called `reset()` would hand
+ * an in-flight pairing a clean budget to spend after the lease it belonged to had ended.
+ *
+ * WHAT THIS IS NOT: a durable or cross-process limit. All state is in memory and dies with the
+ * process, and discovery advertisements are unauthenticated, so a fresh scope is a documented
+ * policy reset and not evidence of a fresh peer. Pairing security rests on the SAS comparison and
+ * the TLS transcript binding, never on these counters.
+ */
+internal class PairingAdmissionScope(
+    monotonicMillis: () -> Long,
+    limits: SecurePairingAttemptLimiter.Limits = SecurePairingAttemptLimiter.Limits(),
+) : AutoCloseable {
+    private val limiter = SecurePairingAttemptLimiter(monotonicMillis, limits)
+    private val closed = AtomicBoolean(false)
+
+    internal val isClosed: Boolean get() = closed.get()
+
+    internal fun tryStart(peerIdentityKey: String, sourceKey: String): PairingAdmission {
+        if (closed.get()) {
+            return PairingAdmission.Refused(PairingAdmission.RefusalReason.SCOPE_CLOSED, 0L)
+        }
+        return limiter.tryStart(peerIdentityKey, sourceKey)
+    }
+
+    /**
+     * Records one admitted attempt's outcome. Ignored after close: the counters are already gone,
+     * and charging a stopped scope would be recording against state that no longer exists.
+     */
+    internal fun recordOutcome(
+        peerIdentityKey: String,
+        sourceKey: String,
+        outcome: PairingAttemptOutcome,
+    ) {
+        if (closed.get()) return
+        limiter.recordOutcome(peerIdentityKey, sourceKey, outcome)
+    }
+
+    internal fun invalidateIdentity(peerIdentityKey: String) {
+        if (closed.get()) return
+        limiter.invalidateIdentity(peerIdentityKey)
+    }
+
+    /**
+     * Deliberately not gated on [closed]. An in-flight coordinator releases its permit in a
+     * `finally`, and that release must remain reachable after the scope closes; the limiter's own
+     * floor of zero makes the post-reset call a harmless no-op.
+     */
+    internal fun releaseConcurrency() {
+        limiter.releaseConcurrency()
+    }
+
+    internal fun concurrentPairings(): Int = limiter.concurrentPairings()
+
+    internal fun isIdentityInvalidated(peerIdentityKey: String): Boolean =
+        limiter.isIdentityInvalidated(peerIdentityKey)
+
+    /**
+     * Idempotent, and the release happens exactly once no matter how many callers race in.
+     *
+     * The limiter owns no threads and no timers -- cooldown is derived lazily from the injected
+     * clock at admission time -- so there is no pending task to cancel here. That is a property of
+     * the design, not an assumption this method makes.
+     */
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        limiter.releaseAllConcurrency()
+        limiter.reset()
+    }
 }

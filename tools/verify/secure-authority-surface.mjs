@@ -315,25 +315,27 @@ check(
   );
   const provider = existsSync(providerPath) ? read(providerPath) : '';
   check(
-    'the pairing path has a real attempt-limiter caller',
-    /private val attemptLimiter = SecurePairingAttemptLimiter/.test(provider) &&
-      /attemptLimiter = attemptLimiter,/.test(provider),
+    'the pairing path admits through a lease-owned scope',
+    /private val admissionScope = PairingAdmissionScope/.test(provider) &&
+      /attemptLimiter = admissionScope,/.test(provider),
   );
   check(
     'no process-global attempt limiter survives across discovery leases',
     !/^private val pairingAttemptLimiter/m.test(provider),
   );
   check(
-    'the lease owns the limiter and reads the injected monotonic clock, not the platform one',
-    /private class LanDiscoveryLease\([\s\S]{0,4000}?private val attemptLimiter = SecurePairingAttemptLimiter\(\s*monotonicMillis = \{ clock\.nowMillis\(\) \},/.test(provider),
+    'the lease owns the scope and reads the injected monotonic clock, not the platform one',
+    /private class LanDiscoveryLease\([\s\S]{0,4000}?private val admissionScope = PairingAdmissionScope\(\s*monotonicMillis = \{ clock\.nowMillis\(\) \},/.test(provider) &&
+      /import app\.morsecode\.transport\.lan\.security\.PairingAdmissionScope/.test(provider),
   );
   check(
-    'lease stop releases every permit it handed out and drops the counters',
-    /attemptLimiter\.releaseAllConcurrency\(\)\s*attemptLimiter\.reset\(\)/.test(provider),
+    'lease stop closes the admission scope exactly once',
+    /admissionScope\.close\(\)/.test(provider) &&
+      !/admissionScope\.(releaseAllConcurrency|reset)\(\)/.test(provider),
   );
   check(
     'teardown happens before workers are signalled, not after',
-    /attemptLimiter\.reset\(\)[\s\S]{0,200}?signalWorkers\(\)/.test(provider),
+    /admissionScope\.close\(\)[\s\S]{0,200}?signalWorkers\(\)/.test(provider),
   );
 
   const limiterPath = join(
@@ -385,6 +387,23 @@ check(
     'security', 'SecureLanPairingCoordinator.kt',
   );
   const pairingCoordinator = existsSync(pairingCoordinatorPath) ? read(pairingCoordinatorPath) : '';
+  check(
+    'a closed scope refuses new attempts rather than admitting from dead state',
+    /internal fun tryStart\(peerIdentityKey: String, sourceKey: String\): PairingAdmission \{\s*if \(closed\.get\(\)\) \{\s*return PairingAdmission\.Refused\(PairingAdmission\.RefusalReason\.SCOPE_CLOSED, 0L\)/.test(limiter),
+  );
+  check(
+    'scope close is idempotent and releases exactly once',
+    /override fun close\(\) \{\s*if \(!closed\.compareAndSet\(false, true\)\) return\s*limiter\.releaseAllConcurrency\(\)\s*limiter\.reset\(\)/.test(limiter),
+  );
+  check(
+    'concurrency release stays reachable after close so an in-flight finally can settle',
+    /internal fun releaseConcurrency\(\) \{\s*limiter\.releaseConcurrency\(\)/.test(limiter),
+  );
+  check(
+    'the coordinator receives the scope, not a bare limiter',
+    /private val attemptLimiter: PairingAdmissionScope\? = null,/.test(pairingCoordinator),
+  );
+
   check(
     'the coordinator reports a classified outcome rather than an undifferentiated failure',
     /limiter\?\.recordOutcome\(/.test(pairingCoordinator) &&
