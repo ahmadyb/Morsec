@@ -1663,10 +1663,10 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `64f72b9f2515ca3b402ebe9fdf866a6fb293ea17` |
+| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `2459db140c18ab43c2aa5940167ffea9d2b321b5` |
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
-| **Green CI on that exact SHA** | Run 38071025948 — https://github.com/ahmadyb/Morsec/actions/runs/38071025948 — `success`, zero failing steps |
-| Tests | `2760 tests, 0 failed, 0 skipped in 163 report(s)`. `core-transfer` went 475/22 reports to 496/23, so the +21 are exactly the new MPS2/MST2 suite |
+| **Green CI on that exact SHA** | Run 38113744128 — https://github.com/ahmadyb/Morsec/actions/runs/38113744128 — `success`, zero failing steps |
+| Tests | `2764 tests, 0 failed, 0 skipped in 165 report(s)`. `transport-lan` went 72/8 to 76/10, the +4 being the two blocking-write tests run in both debug and release |
 | Lint | `0 errors, 48 warnings in 7 report(s)` |
 | APKs | `app-debug.apk = 32.22 MiB`, `app-debug-androidTest.apk = 1.10 MiB` |
 | Room schemas | v1 `29767` bytes and v2 `50652` bytes, both byte-compared; no schema changed |
@@ -1679,9 +1679,11 @@ actually verified, and separates it from what was not.
 | SAS arithmetic | Modelled independently and confirmed against CI output: exporter bytes `AB CD E0 00` produce `PH8Y2`, which is what the compiled Kotlin reported |
 | MPS2/MST2 transcript vector | Computed by a separate implementation written from the format description, not by running the codec: 594 canonical bytes, SHA-256 `95ee0c3c5f58e6f56627758fd158b9f6ad4e76d021db78405bcc5057d97e1350`. The test also re-derives the digest from the canonical bytes, so a stored constant cannot drift silently |
 | MPS2/MST2 in production | The coordinator encodes with `SecurePairingHelloV2Codec.encodeFrame`, decodes with the V2 header and decoder, derives the selection with `SecurePairingSelectionV2.select(initiatorOffer, responderOffer)`, builds the transcript with `SecurePairingTranscriptV2.build`, and binds the exporter, human proof and directional keys to that digest. Zero MPS1 references remain in the coordinator |
+| Established-session write deadline | `SecureLanControlChannel.send()` arms a `MonotonicSocketDeadline` before the first byte, under `CONTROL_RECORD_WRITE_DEADLINE_MILLIS`. `soTimeout` bounds reads only, so before this a peer that stopped reading parked the worker indefinitely. Authority-surface group 13 pins it; mutation-tested by removing the `arm()` call and by mapping expiry to a connect failure |
+| Real blocking-write evidence | `BlockingWriteReleaseTest` uses a genuine loopback pair with a peer that never reads: 32 MiB through a reused 4 KiB buffer reaches backpressure, closing the socket releases the blocked write within a bounded wait, and the outcome is a failure rather than success. A fake clock cannot show a kernel buffer refusing bytes, which is why this is a real socket |
 | Production V2 guard | Authority-surface group 12, 43/43. Mutation-tested: reverting the hello encoder to MPS1 fails 3 checks, reverting the transcript to MST1 fails 3, advertising a chunk size instead of explicit zero fails 1 |
 | API 23 on the V2 path | Step 22 runs two real coordinators over loopback sockets on an API 23 emulator — `realTlsExporterApprovalAndMutualConfirmationProduceControlOnlySecureSession`. It reached `Authenticated` on both sides, so both peers derived the same transcript digest and human proof, the directional keys were compatible, key confirmation succeeded, PING/PONG/CLOSE worked, and the payload gate still refused |
-| CI as the compiler | Eighteen red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, `.pom` files that Gradle never materializes under `files-2.1`, a `const val` that already existed in the same package, `0x93` used as a `Byte` literal, two attempts to read script state from inside a Gradle task action under the configuration cache, two `clearSensitive` calls left pointing at renamed variables, and a control-session id required to be 32-hex when the type only guarantees bounded text |
+| CI as the compiler | Nineteen red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, `.pom` files that Gradle never materializes under `files-2.1`, a `const val` that already existed in the same package, `0x93` used as a `Byte` literal, two attempts to read script state from inside a Gradle task action under the configuration cache, two `clearSensitive` calls left pointing at renamed variables, and a control-session id required to be 32-hex when the type only guarantees bounded text |
 | CI diagnosis without logs | `gh run view --log-failed`, the job-logs API and artifact downloads are all unusable from this sandbox — artifact downloads redirect to Azure blob storage, which is unreachable. The check-run **annotations** API is the one readable channel, which is why step 13 was changed to emit a `::error` annotation; that single annotation is what identified the `.pom` cause |
 
 ### What was NOT verified
@@ -1704,10 +1706,14 @@ actually verified, and separates it from what was not.
   the requirement asks for, and failure classification is coarse: admission, concurrency,
   cooldown and identity invalidation are distinguished, but the eight failure categories are not
   each counted separately.
-- **Control-record I/O on an established session has no total deadline.** `MonotonicSocketDeadline`
-  covers the TLS handshake, pairing hello, key confirmation, approval wait and bounded close.
-  Post-authentication record reads and writes are still bounded only by the per-read inactivity
-  timeout, and there are no production-path slow-read, slow-drip or non-reading-peer tests.
+- **Control-record writes are now bounded; the surrounding evidence is not complete.**
+  `SecureLanControlChannel.send()` arms a total monotonic deadline and expiry closes the owning
+  socket, and `receive()` already shared one absolute deadline across the header and body reads.
+  What is still missing: no slow-drip incomplete-record test, no timeout/completion/cancellation
+  race tests for the channel, no API 23 coverage of the deadline path specifically, and no
+  end-to-end proof that a worker slot freed by a timed-out write is then acquired by a later
+  legitimate session. The raw-socket test proves closure releases a blocked write; it does not
+  exercise the channel's own deadline wiring.
 - **The pairing path still negotiates MPS1/MST1.** The hello and transcript the coordinator
   sends and hashes are the MPS1/MST1 versions; MPS2/MST2 exist alongside them, not in place of
   them. Hello and transcript remain
