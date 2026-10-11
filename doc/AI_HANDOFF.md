@@ -1663,7 +1663,7 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `70103ab4c0b6ec14f5f7e73e19c0a5f97d0d0e0e` |
+| Remote branch tip | `git ls-remote origin refs/heads/arena/268e777f-morsec` returned `70103ab45d791141bf25e8937a9a8112793e92e6` |
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
 | **Green CI on that exact SHA** | Run 38116053447 — https://github.com/ahmadyb/Morsec/actions/runs/38116053447 — `success`, zero failing steps |
 | Tests | `2786 tests, 0 failed, 0 skipped in 165 report(s)`. `transport-lan` went 76/10 to 98/10, the +22 being the eleven new limiter-policy tests run in both debug and release |
