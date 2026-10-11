@@ -40,6 +40,84 @@ internal sealed interface PairingAdmission {
 }
 
 /**
+ * Why one admitted pairing attempt ended, and which budget it therefore consumes.
+ *
+ * Before this existed the coordinator called `recordFailure` for every non-authenticated result, so
+ * a local cancellation, a local provider failure and a genuine transcript mismatch were all
+ * indistinguishable. That is wrong in both directions: it lets a peer burn the *user's own* budget
+ * by making the local side fail, and it hides a real authentication attack inside noise.
+ *
+ * Budget policy, in force as documented:
+ *
+ * - [AUTHENTICATED] -- one explicit reset: failure escalation and cooldown clear, start counters do
+ *   not. A peer cannot launder a start budget by succeeding once.
+ * - [AUTHENTICATION_MISMATCH], [TRANSCRIPT_MISMATCH], [KEY_CONFIRMATION_FAILURE] -- the full
+ *   security budget. These are the only outcomes that can invalidate an identity.
+ * - [USER_REJECTION], [APPROVAL_EXPIRED] -- a bounded pairing-attempt budget: cooldown applies, but
+ *   these never invalidate, because a user declining is not evidence of an attack.
+ * - [HANDSHAKE_TIMEOUT], [PEER_DISCONNECT] -- a bounded pair/source budget, so a half-open peer
+ *   cannot hold a slot indefinitely, but the identity is not condemned for a network drop.
+ * - [LOCAL_CANCELLATION], [LOCAL_FAILURE] -- no budget at all. The peer is not penalised for
+ *   something this device did or suffered. Concurrency is still released.
+ * - [RESOURCE_REFUSED] -- no budget; concurrency is released and retry guidance is returned.
+ */
+internal enum class PairingAttemptOutcome {
+    AUTHENTICATED,
+    AUTHENTICATION_MISMATCH,
+    TRANSCRIPT_MISMATCH,
+    KEY_CONFIRMATION_FAILURE,
+    USER_REJECTION,
+    APPROVAL_EXPIRED,
+    HANDSHAKE_TIMEOUT,
+    PEER_DISCONNECT,
+    LOCAL_CANCELLATION,
+    LOCAL_FAILURE,
+    RESOURCE_REFUSED,
+}
+
+/** True when the outcome represents the peer defeating or failing the security exchange itself. */
+internal val PairingAttemptOutcome.isSecurityFailure: Boolean
+    get() = when (this) {
+        PairingAttemptOutcome.AUTHENTICATION_MISMATCH,
+        PairingAttemptOutcome.TRANSCRIPT_MISMATCH,
+        PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE -> true
+        else -> false
+    }
+
+/** Maps a produced failure code onto the outcome taxonomy. Total: no code falls through unmapped. */
+internal fun pairingOutcomeFor(code: app.morsecode.core.transfer.session.SessionFailureCode) = when (code) {
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID ->
+        PairingAttemptOutcome.TRANSCRIPT_MISMATCH
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED ->
+        PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED ->
+        PairingAttemptOutcome.USER_REJECTION
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED ->
+        PairingAttemptOutcome.APPROVAL_EXPIRED
+    app.morsecode.core.transfer.session.SessionFailureCode.PROTOCOL_VERSION_UNSUPPORTED,
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED,
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_RECORD_INVALID,
+    app.morsecode.core.transfer.session.SessionFailureCode.PEER_IDENTITY_MISMATCH,
+    app.morsecode.core.transfer.session.SessionFailureCode.HANDSHAKE_INVALID,
+    app.morsecode.core.transfer.session.SessionFailureCode.HANDSHAKE_VERSION_UNSUPPORTED ->
+        PairingAttemptOutcome.AUTHENTICATION_MISMATCH
+    app.morsecode.core.transfer.session.SessionFailureCode.CONTROL_TIMEOUT ->
+        PairingAttemptOutcome.HANDSHAKE_TIMEOUT
+    app.morsecode.core.transfer.session.SessionFailureCode.CONTROL_CONNECT_FAILED,
+    app.morsecode.core.transfer.session.SessionFailureCode.NETWORK_UNAVAILABLE ->
+        PairingAttemptOutcome.PEER_DISCONNECT
+    app.morsecode.core.transfer.session.SessionFailureCode.OPERATION_CANCELLED ->
+        PairingAttemptOutcome.LOCAL_CANCELLATION
+    app.morsecode.core.transfer.session.SessionFailureCode.CONTROL_CAPACITY_REACHED,
+    app.morsecode.core.transfer.session.SessionFailureCode.OPERATION_QUEUE_FULL,
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_LIMIT_REACHED,
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_ALREADY_STARTED,
+    app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_REQUIRED ->
+        PairingAttemptOutcome.RESOURCE_REFUSED
+    else -> PairingAttemptOutcome.LOCAL_FAILURE
+}
+
+/**
  * Process-local throttle for authenticated LAN pairing attempts.
  *
  * WHAT THIS IS: a denial-of-service bound. It caps how many pairing handshakes one peer identity,
@@ -70,6 +148,7 @@ internal class SecurePairingAttemptLimiter(
         val maxTrackedSources: Int = 128,
         val maxTrackedPairs: Int = 128,
         val maxConcurrentPairings: Int = 2,
+        val maxTrackedSoftAttempts: Int = 64,
     )
 
     private class Counter {
@@ -83,6 +162,7 @@ internal class SecurePairingAttemptLimiter(
     private val sources = ConcurrentHashMap<String, Counter>()
     private val pairs = ConcurrentHashMap<String, Counter>()
     private val inFlight = AtomicInteger(0)
+    private val softAttempts = AtomicInteger(0)
     private val invalidatedIdentities = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     /**
@@ -183,6 +263,75 @@ internal class SecurePairingAttemptLimiter(
         pair.nextAllowedAtMillis.set(cooldown)
     }
 
+    /**
+     * Applies the documented budget policy for one admitted attempt's outcome.
+     *
+     * The limiter owns no threads and no timers. Cooldown is derived lazily from the injected
+     * monotonic clock at admission time, so lease teardown has no pending task to cancel -- that is
+     * a property of the design, not an unchecked assumption.
+     */
+    @Synchronized
+    internal fun recordOutcome(
+        peerIdentityKey: String,
+        sourceKey: String,
+        outcome: PairingAttemptOutcome,
+    ) {
+        when (outcome) {
+            PairingAttemptOutcome.AUTHENTICATED -> recordSuccess(peerIdentityKey, sourceKey)
+            PairingAttemptOutcome.AUTHENTICATION_MISMATCH,
+            PairingAttemptOutcome.TRANSCRIPT_MISMATCH,
+            PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE -> recordFailure(peerIdentityKey, sourceKey)
+            PairingAttemptOutcome.USER_REJECTION,
+            PairingAttemptOutcome.APPROVAL_EXPIRED -> recordSoftAttempt(peerIdentityKey, sourceKey)
+            PairingAttemptOutcome.HANDSHAKE_TIMEOUT,
+            PairingAttemptOutcome.PEER_DISCONNECT -> recordPairBudgetFailure(peerIdentityKey, sourceKey)
+            PairingAttemptOutcome.LOCAL_CANCELLATION,
+            PairingAttemptOutcome.LOCAL_FAILURE,
+            PairingAttemptOutcome.RESOURCE_REFUSED -> Unit
+        }
+    }
+
+    /**
+     * Cooldown without failure escalation. A declined approval is a real pairing attempt and must
+     * not be free, but it must also never be the thing that invalidates an identity.
+     */
+    @Synchronized
+    internal fun recordSoftAttempt(peerIdentityKey: String, sourceKey: String) {
+        val now = monotonicMillis()
+        val attempts = softAttempts.incrementAndGet()
+        if (attempts > limits.maxTrackedSoftAttempts) return
+        val cooldown = cooldownFor(attempts, now)
+        identities[peerIdentityKey]?.nextAllowedAtMillis?.set(cooldown)
+        pairs[pairKey(peerIdentityKey, sourceKey)]?.nextAllowedAtMillis?.set(cooldown)
+    }
+
+    /**
+     * Failure against the identity/source pair only. A peer that goes half-open after security work
+     * has begun should cost that route something, but a network drop is not evidence against the
+     * identity, so the identity's failure budget is left alone.
+     */
+    @Synchronized
+    internal fun recordPairBudgetFailure(peerIdentityKey: String, sourceKey: String) {
+        val pair = counterFor(pairs, pairKey(peerIdentityKey, sourceKey), limits.maxTrackedPairs)
+        val now = monotonicMillis()
+        val failures = pair.failures.incrementAndGet()
+        if (pair.invalidated.get() == 0L && failures >= limits.maxFailuresPerPair) {
+            pair.invalidated.set(now)
+            return
+        }
+        pair.nextAllowedAtMillis.set(cooldownFor(failures, now))
+    }
+
+    /**
+     * Lease teardown. Releases every permit this lease handed out and drops all counters, which is
+     * what makes the next lease genuinely newly scoped. This is a process-local policy reset, not a
+     * security proof: a peer that simply waits for the lease to end starts from a clean slate.
+     */
+    @Synchronized
+    internal fun releaseAllConcurrency() {
+        inFlight.set(0)
+    }
+
     /** Records a success, which clears the failure escalation for this identity and pair. */
     @Synchronized
     internal fun recordSuccess(peerIdentityKey: String, sourceKey: String) {
@@ -219,6 +368,7 @@ internal class SecurePairingAttemptLimiter(
         pairs.clear()
         invalidatedIdentities.clear()
         inFlight.set(0)
+        softAttempts.set(0)
     }
 
     private fun pairKey(peerIdentityKey: String, sourceKey: String): String =

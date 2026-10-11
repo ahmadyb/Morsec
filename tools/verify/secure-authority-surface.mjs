@@ -316,8 +316,89 @@ check(
   const provider = existsSync(providerPath) ? read(providerPath) : '';
   check(
     'the pairing path has a real attempt-limiter caller',
-    /private val pairingAttemptLimiter = SecurePairingAttemptLimiter/.test(provider) &&
-      /attemptLimiter = pairingAttemptLimiter/.test(provider),
+    /private val attemptLimiter = SecurePairingAttemptLimiter/.test(provider) &&
+      /attemptLimiter = attemptLimiter,/.test(provider),
+  );
+  check(
+    'no process-global attempt limiter survives across discovery leases',
+    !/^private val pairingAttemptLimiter/m.test(provider),
+  );
+  check(
+    'the lease owns the limiter and reads the injected monotonic clock, not the platform one',
+    /private class LanDiscoveryLease\([\s\S]{0,4000}?private val attemptLimiter = SecurePairingAttemptLimiter\(\s*monotonicMillis = \{ clock\.nowMillis\(\) \},/.test(provider),
+  );
+  check(
+    'lease stop releases every permit it handed out and drops the counters',
+    /attemptLimiter\.releaseAllConcurrency\(\)\s*attemptLimiter\.reset\(\)/.test(provider),
+  );
+  check(
+    'teardown happens before workers are signalled, not after',
+    /attemptLimiter\.reset\(\)[\s\S]{0,200}?signalWorkers\(\)/.test(provider),
+  );
+
+  const limiterPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecurePairingAttemptLimiter.kt',
+  );
+  const limiter = existsSync(limiterPath) ? read(limiterPath) : '';
+  const outcomes = [
+    'AUTHENTICATED', 'AUTHENTICATION_MISMATCH', 'TRANSCRIPT_MISMATCH', 'KEY_CONFIRMATION_FAILURE',
+    'USER_REJECTION', 'APPROVAL_EXPIRED', 'HANDSHAKE_TIMEOUT', 'PEER_DISCONNECT',
+    'LOCAL_CANCELLATION', 'LOCAL_FAILURE', 'RESOURCE_REFUSED',
+  ];
+  check(
+    'the attempt taxonomy names all eleven documented outcomes',
+    /internal enum class PairingAttemptOutcome \{([\s\S]*?)\}/.test(limiter) &&
+      outcomes.every((o) => new RegExp(`^\\s+${o},?$`, 'm').test(limiter)),
+  );
+  check(
+    'a failure code is mapped onto the taxonomy by a total when expression',
+    /internal fun pairingOutcomeFor\([\s\S]*?else -> PairingAttemptOutcome\.LOCAL_FAILURE/.test(limiter),
+  );
+  check(
+    'only genuine security failures can escalate to identity invalidation',
+    /AUTHENTICATION_MISMATCH,\s*PairingAttemptOutcome\.TRANSCRIPT_MISMATCH,\s*PairingAttemptOutcome\.KEY_CONFIRMATION_FAILURE -> recordFailure\(/.test(limiter),
+  );
+  check(
+    'a declined approval applies cooldown but never failure escalation',
+    /USER_REJECTION,\s*PairingAttemptOutcome\.APPROVAL_EXPIRED -> recordSoftAttempt\(/.test(limiter) &&
+      /internal fun recordSoftAttempt[\s\S]{0,500}?nextAllowedAtMillis/.test(limiter) &&
+      !/recordSoftAttempt[\s\S]{0,500}?failures\??\.incrementAndGet/.test(limiter),
+  );
+  check(
+    'a local cancellation or local failure costs the peer nothing',
+    /LOCAL_CANCELLATION,\s*PairingAttemptOutcome\.LOCAL_FAILURE,\s*PairingAttemptOutcome\.RESOURCE_REFUSED -> Unit/.test(limiter),
+  );
+  check(
+    'a success resets escalation but not the start budget',
+    /PairingAttemptOutcome\.AUTHENTICATED -> recordSuccess\(/.test(limiter) &&
+      /internal fun recordSuccess[\s\S]{0,400}?failures\?\.set\(0\)/.test(limiter) &&
+      !/internal fun recordSuccess[\s\S]{0,400}?starts\?\.set\(0\)/.test(limiter),
+  );
+  check(
+    'lease teardown drops the soft-attempt counter as well',
+    /internal fun reset\(\) \{[\s\S]{0,300}?softAttempts\.set\(0\)/.test(limiter),
+  );
+
+  const pairingCoordinatorPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecureLanPairingCoordinator.kt',
+  );
+  const pairingCoordinator = existsSync(pairingCoordinatorPath) ? read(pairingCoordinatorPath) : '';
+  check(
+    'the coordinator reports a classified outcome rather than an undifferentiated failure',
+    /limiter\?\.recordOutcome\(/.test(pairingCoordinator) &&
+      !/limiter\?\.recordFailure\(/.test(pairingCoordinator) &&
+      !/limiter\?\.recordSuccess\(/.test(pairingCoordinator),
+  );
+  check(
+    'every failure path funnels through the classifier',
+    /private fun failed\(code: SessionFailureCode\)[\s\S]{0,200}?attemptOutcome = pairingOutcomeFor\(code\)/.test(pairingCoordinator) &&
+      /attemptOutcome = pairingOutcomeFor\(result\.failure\.code\)/.test(pairingCoordinator),
+  );
+  check(
+    'an authenticated result is the only outcome recorded as a success',
+    /outcome = if \(authenticated\) PairingAttemptOutcome\.AUTHENTICATED else attemptOutcome/.test(pairingCoordinator),
   );
 }
 

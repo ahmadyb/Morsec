@@ -311,7 +311,14 @@ internal class SecureLanPairingCoordinator(
             return failedFromMachine(machine, SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         } finally {
             if (admitted) {
-                if (authenticated) limiter?.recordSuccess(peerIdentityKey, sourceKey) else limiter?.recordFailure(peerIdentityKey, sourceKey)
+                // One outcome, one policy. A local cancellation or local provider failure must not
+                // be charged to the peer, and a genuine transcript mismatch must not be hidden
+                // among them -- which is exactly what the undifferentiated recordFailure did.
+                limiter?.recordOutcome(
+                    peerIdentityKey = peerIdentityKey,
+                    sourceKey = sourceKey,
+                    outcome = if (authenticated) PairingAttemptOutcome.AUTHENTICATED else attemptOutcome,
+                )
                 limiter?.releaseConcurrency()
             }
             localOffer?.clearSensitive()
@@ -651,8 +658,20 @@ internal class SecureLanPairingCoordinator(
         return result
     }
 
-    private fun failed(code: SessionFailureCode): SecurePairingRunResult.Failed =
-        SecurePairingRunResult.Failed(SecurePairingResult.Failed(SessionFailure(code)))
+    /**
+     * Why the admitted attempt ended, for the limiter's budget policy.
+     *
+     * Written only from the thread running [run] -- every failure path funnels through [failed] or
+     * [failedFromMachine] on that thread -- and read in the same thread's `finally`. A cancellation
+     * from another thread does not write it here; it makes this thread produce OPERATION_CANCELLED,
+     * which then classifies as a local cancellation and costs the peer nothing.
+     */
+    private var attemptOutcome: PairingAttemptOutcome = PairingAttemptOutcome.AUTHENTICATION_MISMATCH
+
+    private fun failed(code: SessionFailureCode): SecurePairingRunResult.Failed {
+        attemptOutcome = pairingOutcomeFor(code)
+        return SecurePairingRunResult.Failed(SecurePairingResult.Failed(SessionFailure(code)))
+    }
 
     private fun failedFromMachine(
         stateMachine: SecureSessionStateMachine?,
@@ -660,6 +679,7 @@ internal class SecureLanPairingCoordinator(
     ): SecurePairingRunResult.Failed {
         val result = stateMachine?.completion() as? SecurePairingResult.Failed
             ?: SecurePairingResult.Failed(SessionFailure(fallback))
+        attemptOutcome = pairingOutcomeFor(result.failure.code)
         return SecurePairingRunResult.Failed(result)
     }
 

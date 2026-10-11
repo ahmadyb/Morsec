@@ -162,13 +162,6 @@ private const val UNKNOWN_PAIRING_SOURCE: String = "unknown-source"
  * state dies with the process, and a peer that changes source address resets the per-source
  * counters. Pairing security rests on the SAS comparison and the TLS transcript binding.
  */
-// Named argument, not a trailing lambda: the constructor's second parameter has a default, and
-// Kotlin binds a trailing lambda to the last parameter, so the shorthand would pass the clock as
-// the Limits and leave monotonicMillis unset.
-private val pairingAttemptLimiter = SecurePairingAttemptLimiter(
-    monotonicMillis = { SystemClock.elapsedRealtime() },
-)
-
 /** Derives the throttle key for a peer address. */
 private fun pairingSourceKey(socket: Socket): String {
     val address = runCatching { socket.inetAddress?.hostAddress }.getOrNull()
@@ -268,6 +261,24 @@ public class LanPeerDiscoveryProvider(
         private val rejectedBeacons = AtomicLong(0L)
         private val networkChanges = AtomicLong(0L)
         private val controlPermits = Semaphore(MAX_CONTROL_SESSIONS, true)
+
+        /**
+         * Lease-owned pairing throttle.
+         *
+         * This used to be a file-scope process global, so counters accumulated across leases: a
+         * peer exhausted under one lease stayed exhausted under the next, and the lease's own
+         * `reset()` was never reached because nothing owned the instance. Scoping it here is what
+         * makes lease stop release its permits and lease start genuinely newly scoped.
+         *
+         * It remains process-local. Nothing survives process death, and discovery advertisements are
+         * unauthenticated, so a fresh lease is a policy reset rather than proof of a fresh peer.
+         */
+        // Named argument, not a trailing lambda: the constructor's second parameter has a default,
+        // and Kotlin binds a trailing lambda to the last parameter, so the shorthand would pass the
+        // clock as the Limits and leave monotonicMillis unset.
+        private val attemptLimiter = SecurePairingAttemptLimiter(
+            monotonicMillis = { clock.nowMillis() },
+        )
         private val activeOperations = Collections.newSetFromMap(ConcurrentHashMap<ControlAttempt, Boolean>())
         private val activeSessions = Collections.newSetFromMap(ConcurrentHashMap<LanControlSession, Boolean>())
         private val inFlightSockets = Collections.newSetFromMap(ConcurrentHashMap<Socket, Boolean>())
@@ -1099,6 +1110,14 @@ public class LanPeerDiscoveryProvider(
                 peerNetworks.clear()
             }
             boundNetwork = null
+
+            // Lease teardown owns the throttle's lifecycle: every permit this lease handed out is
+            // released and every counter is dropped, so no stale state or task survives. The
+            // limiter holds no timers -- cooldown is derived from the injected clock at admission
+            // time -- so there is no pending task to cancel here.
+            attemptLimiter.releaseAllConcurrency()
+            attemptLimiter.reset()
+
             notifyDiscoveryChanged()
             signalWorkers()
 
@@ -1483,7 +1502,7 @@ public class LanPeerDiscoveryProvider(
                             clock = clock,
                             random = SecureRandom(),
                             interaction = this,
-                            attemptLimiter = pairingAttemptLimiter,
+                            attemptLimiter = attemptLimiter,
                             peerIdentityKey = negotiatedValue.remoteProfile.peerInstanceId.value,
                             sourceKey = pairingSourceKey(activeSocket),
                         )
