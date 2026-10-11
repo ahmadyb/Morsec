@@ -48,6 +48,12 @@ import org.junit.Test
  */
 public class PreCryptoAdmissionOrderingTest {
 
+    /** The identity and source the coordinator derives by default from the control session. */
+    private companion object {
+        const val IDENTITY: String = "00000000000000000000000000000002"
+        const val SOURCE: String = "unknown-source"
+    }
+
     /** Counts the only operations through which any cryptographic work could begin. */
     private class CountingSocket : Socket() {
         val inputStreamCalls = AtomicInteger(0)
@@ -199,10 +205,17 @@ public class PreCryptoAdmissionOrderingTest {
     @Test
     public fun `a cooldown refusal also happens before any cryptographic work`() {
         val clock = AtomicInteger(0)
-        val scope = PairingAdmissionScope(monotonicMillis = { clock.get().toLong() })
+        val scope = PairingAdmissionScope(monotonicMillis = { clock.get().toLong() }, limits = permissive())
         try {
+            // A cooldown can only be recorded against an identity the limiter already tracks:
+            // recordSoftAttempt writes through identities[key]?.set(...), so an untracked key is a
+            // silent no-op. That is safe in production, where recordOutcome is only ever reached
+            // from an admitted attempt's finally, but it means the counter has to exist first.
+            val admission = scope.tryStart(IDENTITY, SOURCE)
+            assertTrue("the seeding attempt must be admitted", admission is PairingAdmission.Granted)
             // A user rejection applies a cooldown without failure escalation.
-            scope.recordOutcome("00000000000000000000000000000002", "unknown-source", PairingAttemptOutcome.USER_REJECTION)
+            scope.recordOutcome(IDENTITY, SOURCE, PairingAttemptOutcome.USER_REJECTION)
+            scope.releaseConcurrency()
             clock.set(1)
             refuseWithoutCrypto("cooldown active", scope, SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
         } finally {
