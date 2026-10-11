@@ -1663,16 +1663,12 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Latest verified code SHA | `c116091a631b10abd3c80d82c8eff3465de66c63` |
-| Latest verified code CI | Run 38159445264 — https://github.com/ahmadyb/Morsec/actions/runs/38159445264 — `success`, zero failing steps, 2820 tests / 0 failed / 0 skipped |
+| Latest verified code SHA | `cd5540d` |
+| Latest verified code CI | Run 38170175958 — https://github.com/ahmadyb/Morsec/actions/runs/38170175958 — `success`, zero failing steps, 2822 tests / 0 failed / 0 skipped in 171 reports |
 | Documentation commit SHA | **Deliberately not recorded here.** A document cannot state its own commit SHA without being stale the instant it is committed. Read it from `git log -1 --format=%H -- doc/AI_HANDOFF.md`. |
 
-These three are recorded separately on purpose. A single "current tip" row goes stale the moment the
-documentation commit is pushed, and a reader who trusts it will look at a SHA that no longer
-describes the code. Only the first two are claims about something that already exists and was
-verified; the third is a pointer.
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
-| Tests | `2820 tests, 0 failed, 0 skipped in 169 report(s)`. `transport-lan` went 122/12 to 132/14, the +10 being the five new pairing-ownership tests run in both debug and release |
+| Tests | `2822 tests, 0 failed, 0 skipped in 171 report(s)`. `transport-lan` went 132/14 to 134/16, the +2 being the slow-drip receive test in debug and release |
 | Lint | `0 errors, 48 warnings in 7 report(s)` |
 | APKs | `app-debug.apk = 32.22 MiB`, `app-debug-androidTest.apk = 1.10 MiB` |
 | Room schemas | v1 `29767` bytes and v2 `50652` bytes, both byte-compared; no schema changed |
@@ -1697,6 +1693,11 @@ verified; the third is a pointer.
 | API 23 on the V2 path | Step 22 runs two real coordinators over loopback sockets on an API 23 emulator — `realTlsExporterApprovalAndMutualConfirmationProduceControlOnlySecureSession`. It reached `Authenticated` on both sides, so both peers derived the same transcript digest and human proof, the directional keys were compatible, key confirmation succeeded, PING/PONG/CLOSE worked, and the payload gate still refused |
 | CI as the compiler | Twenty-five red runs were fixed forward, one per push: 13 internal-access errors, two stale six-digit SAS vectors, three test-compile errors, three behavioural defects, the public-member/internal-type rule, `internal` on interface members, three scope errors in the limiter plumbing, a trailing lambda bound to the wrong constructor parameter, the module-cache group path, `.pom` files that Gradle never materializes under `files-2.1`, a `const val` that already existed in the same package, `0x93` used as a `Byte` literal, two attempts to read script state from inside a Gradle task action under the configuration cache, two `clearSensitive` calls left pointing at renamed variables, and a control-session id required to be 32-hex when the type only guarantees bounded text |
 | CI diagnosis without logs | `gh run view --log-failed`, the job-logs API and artifact downloads are all unusable from this sandbox — artifact downloads redirect to Azure blob storage, which is unreachable. The check-run **annotations** API is the one readable channel, which is why step 13 was changed to emit a `::error` annotation; that single annotation is what identified the `.pom` cause |
+
+These three are recorded separately on purpose. A single "current tip" row goes stale the moment the
+documentation commit is pushed, and a reader who trusts it will look at a SHA that no longer
+describes the code. Only the first two are claims about something that already exists and was
+verified; the third is a pointer.
 
 ### What was NOT verified
 
