@@ -35,6 +35,15 @@ public object SecureSessionLimits {
     public const val TLS_HANDSHAKE_TIMEOUT_MILLIS: Int = 5_000
     public const val CONTROL_RECORD_IO_TIMEOUT_MILLIS: Int = 5_000
 
+    /**
+     * Total monotonic deadline for one authenticated control-record write.
+     *
+     * `soTimeout` bounds reads only. A write blocked because the peer stopped reading and the TCP
+     * send buffer filled has no socket-level timeout at all, so without this the worker stays
+     * parked indefinitely. Expiry closes the owning socket, which is what releases the write.
+     */
+    public const val CONTROL_RECORD_WRITE_DEADLINE_MILLIS: Long = 5_000L
+
     /*
      * Total monotonic deadlines.
      *

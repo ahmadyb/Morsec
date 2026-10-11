@@ -405,6 +405,54 @@ function verifyProductionWireVersion() {
   );
 }
 
+
+/**
+ * Group 13 -- established-session control I/O must be bounded by a total deadline.
+ *
+ * `soTimeout` bounds reads only. The write side had no bound at all, so a peer that stopped
+ * reading could park a worker for the life of the process. These checks exist because that is
+ * invisible in a passing test suite: nothing fails until a hostile or merely stalled peer appears.
+ */
+function verifyEstablishedSessionDeadlines() {
+  const channelPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecureLanControlChannel.kt',
+  );
+  const channel = existsSync(channelPath) ? read(channelPath) : '';
+
+  check(
+    'an authenticated control-record write runs under a total monotonic deadline',
+    /label = "control-record-write"[\s\S]{0,220}?budgetMillis = SecureSessionLimits\.CONTROL_RECORD_WRITE_DEADLINE_MILLIS/.test(channel),
+  );
+  check(
+    'the write deadline is armed before the first byte is written',
+    /writeDeadline\.arm\(\)[\s\S]{0,200}?socket\.getOutputStream\(\)/.test(channel),
+  );
+  check(
+    'the write deadline is settled exactly once, in a finally block',
+    /finally \{\s*writeDeadline\.complete\(\)/.test(channel),
+  );
+  check(
+    'a write released by deadline expiry is reported as a timeout, not a connect failure',
+    /if \(writeDeadline\.isExpired\(\)\) \{\s*SessionFailureCode\.CONTROL_TIMEOUT/.test(channel),
+  );
+  check(
+    'a write that finished at the instant of expiry is not reported as sent',
+    /if \(writeDeadline\.isExpired\(\)\) \{\s*return@synchronized SecureControlSendResult\.Refused\(terminate\(SessionFailureCode\.CONTROL_TIMEOUT\)\)/.test(channel),
+  );
+  check(
+    'channel teardown closes the socket under a bounded deadline',
+    /label = "control-bounded-close"[\s\S]{0,220}?BOUNDED_CLOSE_DEADLINE_MILLIS[\s\S]{0,400}?deadline\.complete\(\)/.test(channel),
+  );
+  check(
+    'control-record reads share one absolute deadline across header and body',
+    /val deadline = saturatingAdd\(initialNow, SecureSessionLimits\.CONTROL_RECORD_IO_TIMEOUT_MILLIS\.toLong\(\)\)/.test(channel) &&
+      (channel.match(/readExact\(input,[^)]*deadline\)/g) || []).length >= 2,
+  );
+}
+
+verifyEstablishedSessionDeadlines();
+
 verifyProductionWireVersion();
 
 console.log('\nPart B capability trust boundary verification');

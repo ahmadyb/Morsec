@@ -64,6 +64,16 @@ internal class SecureLanControlChannel(
                 return@synchronized SecureControlSendResult.Refused(terminate(encoded.failure.code))
             }
         }
+        // One absolute deadline for the whole write, armed before the first byte goes out. The
+        // per-read inactivity timeout cannot help here: it does not apply to writes, so a peer
+        // that simply stops reading would otherwise park this worker for the life of the process.
+        val writeDeadline = MonotonicSocketDeadline(
+            label = "control-record-write",
+            socket = socket,
+            budgetMillis = SecureSessionLimits.CONTROL_RECORD_WRITE_DEADLINE_MILLIS,
+            monotonicMillis = clock::nowMillis,
+        )
+        writeDeadline.arm()
         try {
             socket.getOutputStream().apply {
                 write(encodedFrame)
@@ -72,11 +82,24 @@ internal class SecureLanControlChannel(
         } catch (_: SocketTimeoutException) {
             return@synchronized SecureControlSendResult.Refused(terminate(SessionFailureCode.CONTROL_TIMEOUT))
         } catch (_: IOException) {
-            return@synchronized SecureControlSendResult.Refused(terminate(SessionFailureCode.CONTROL_CONNECT_FAILED))
+            // The deadline unblocks the write by closing the socket, which surfaces as an
+            // IOException. Reporting that as a connect failure would misname a timeout.
+            val code = if (writeDeadline.isExpired()) {
+                SessionFailureCode.CONTROL_TIMEOUT
+            } else {
+                SessionFailureCode.CONTROL_CONNECT_FAILED
+            }
+            return@synchronized SecureControlSendResult.Refused(terminate(code))
         } catch (_: RuntimeException) {
             return@synchronized SecureControlSendResult.Refused(terminate(SessionFailureCode.CONTROL_CONNECT_FAILED))
         } finally {
+            writeDeadline.complete()
             encodedFrame.fill(0)
+        }
+        // A write that appeared to finish at the instant the deadline fired is not a success: the
+        // deadline already closed the socket, so the channel is dead either way.
+        if (writeDeadline.isExpired()) {
+            return@synchronized SecureControlSendResult.Refused(terminate(SessionFailureCode.CONTROL_TIMEOUT))
         }
 
         if (type == SecureRecordType.SESSION_CLOSE) terminate(SessionFailureCode.OPERATION_CANCELLED)
@@ -210,12 +233,23 @@ internal class SecureLanControlChannel(
     }
 
     private fun closeSocket() {
+        // Bounded for the same reason as the pairing path: close can itself block on a socket
+        // whose peer has vanished, and teardown must not become the new unbounded operation.
+        val deadline = MonotonicSocketDeadline(
+            label = "control-bounded-close",
+            socket = socket,
+            budgetMillis = SecureSessionLimits.BOUNDED_CLOSE_DEADLINE_MILLIS,
+            monotonicMillis = clock::nowMillis,
+        )
+        deadline.arm()
         try {
             socket.close()
         } catch (_: IOException) {
             // Teardown never exposes peer-controlled or platform exception details.
         } catch (_: RuntimeException) {
             // Teardown is idempotent across lease cancellation and expiry.
+        } finally {
+            deadline.complete()
         }
     }
 
