@@ -597,6 +597,65 @@ function verifyControlRecordTypesShareOnePath() {
   );
 }
 
+
+/**
+ * Group 15 -- the pairing ownership model after the discovery lease stops.
+ *
+ * Production uses model A: the lease stays the owner for the whole life of a pairing it admitted.
+ * That model is load-bearing in exactly three places, and none of them is obvious from the code
+ * around it. If any one regresses, an admitted pairing can outlive the lease that authorised it and
+ * still issue authenticated authority -- which no functional test would notice, because the happy
+ * path never closes the lease mid-pairing.
+ */
+function verifyPairingOwnershipAfterLeaseStop() {
+  const providerPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'LanPeerDiscoveryProvider.kt',
+  );
+  const provider = existsSync(providerPath) ? read(providerPath) : '';
+  const coordinatorPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecureLanPairingCoordinator.kt',
+  );
+  const pairingCoordinator = existsSync(coordinatorPath) ? read(coordinatorPath) : '';
+
+  check(
+    'lease stop sets its closed flag before it touches admission or operations',
+    /private fun stop\(failureCode: SessionFailureCode\?\) \{\s*if \(!closed\.compareAndSet\(false, true\)\) return/.test(provider),
+  );
+  check(
+    'a control session reports cancelled from the lease flag, not only its own',
+    /override fun isCancelled\(\): Boolean = cancelled\.get\(\) \|\| closedSession\.get\(\) \|\| closed\.get\(\)/.test(provider),
+  );
+  check(
+    'an authenticated result is re-checked against cancellation before the session is installed',
+    /is SecurePairingRunResult\.Authenticated -> \{\s*if \(isCancelled\(\) \|\| !installSecureSession\(/.test(provider),
+  );
+  check(
+    'a refused installation closes the record layer and the socket rather than leaking them',
+    /pairingResult\.recordLayer\.close\(\)\s*closeSocket\(pairingResult\.secureSocket\)\s*completeFailure\(SessionFailureCode\.OPERATION_CANCELLED\)/.test(provider),
+  );
+  check(
+    'lease stop closes in-flight sockets so blocking pairing work cannot survive it',
+    /admissionScope\.close\(\)[\s\S]{0,900}?inFlightSockets\.toList\(\)\.forEach \{ closeSocket\(it\) \}/.test(provider),
+  );
+
+  check(
+    'the coordinator itself refuses authenticated authority once its owning lease has closed',
+    /if \(interaction\.isCancelled\(\)\) \{\s*return failed\(SessionFailureCode\.OPERATION_CANCELLED\)\s*\}\s*keptSocket = true\s*authenticated = true/.test(pairingCoordinator),
+  );
+  check(
+    'the coordinator checks cancellation before TLS, before the hello, and during confirmation',
+    (pairingCoordinator.match(/if \(interaction\.isCancelled\(\)\)/g) || []).length >= 4,
+  );
+  check(
+    'exactly one terminal outcome is delivered per control session',
+    /private fun finish\([\s\S]{0,200}?if \(!completed\.compareAndSet\(false, true\)\) return/.test(provider),
+  );
+}
+
+verifyPairingOwnershipAfterLeaseStop();
+
 verifyControlRecordTypesShareOnePath();
 
 verifyEstablishedSessionDeadlines();

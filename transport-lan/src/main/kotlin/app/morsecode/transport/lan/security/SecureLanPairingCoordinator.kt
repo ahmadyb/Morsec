@@ -296,6 +296,15 @@ internal class SecureLanPairingCoordinator(
             val now = safeNow() ?: return failed(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
             val expiresAt = saturatingAdd(pairStartedAt, SecureSessionLimits.MAX_SESSION_LIFETIME_MILLIS)
             if (now >= expiresAt) return failed(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
+            // Ownership model A: the discovery lease owns this pairing for its entire life, and
+            // its `closed` flag is what `isCancelled()` reports. The last check above sits before
+            // confirmation, so a lease that stopped during confirmation would otherwise reach here
+            // and hand back a live session. The caller re-checks before installing, but a
+            // coordinator that issues authenticated authority for a closed lease is a hazard for
+            // any second caller that forgets to -- so the refusal belongs here too.
+            if (interaction.isCancelled()) {
+                return failed(SessionFailureCode.OPERATION_CANCELLED)
+            }
             keptSocket = true
             authenticated = true
             return SecurePairingRunResult.Authenticated(
