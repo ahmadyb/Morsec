@@ -254,6 +254,24 @@ class SecurePairingAttemptLimiterTest {
         assertTrue(threw)
     }
 
+
+    /**
+     * Limits with every start and failure budget pushed far above the number of iterations under
+     * test, so the behaviour asserted is the outcome policy rather than an unrelated budget.
+     *
+     * This matters: the defaults are maxStartsPerIdentity 3 and maxFailuresPerPair 2, so a loop of
+     * twelve "costs nothing" iterations, or a third transcript mismatch, would be refused for a
+     * reason the test did not set out to examine.
+     */
+    private fun permissive() = SecurePairingAttemptLimiter.Limits(
+        maxStartsPerIdentity = 1_000,
+        maxStartsPerSource = 1_000,
+        maxStartsPerPair = 1_000,
+        maxFailuresPerIdentity = 3,
+        maxFailuresPerPair = 1_000,
+        maxConcurrentPairings = 1_000,
+    )
+
     // ---- Outcome budget policy -----------------------------------------------------------
     //
     // These use the injected StepClock only. Nothing here sleeps and nothing asserts on wall-clock
@@ -263,7 +281,7 @@ class SecurePairingAttemptLimiterTest {
     @Test
     fun `a local cancellation costs the peer nothing`() {
         val clock = StepClock()
-        val limiter = SecurePairingAttemptLimiter(clock::read)
+        val limiter = SecurePairingAttemptLimiter(clock::read, permissive())
         repeat(12) {
             assertTrue(granted(limiter.tryStart("peer-cancel", "src-cancel")))
             limiter.recordOutcome("peer-cancel", "src-cancel", PairingAttemptOutcome.LOCAL_CANCELLATION)
@@ -281,7 +299,7 @@ class SecurePairingAttemptLimiterTest {
     @Test
     fun `a local implementation failure is not charged to the peer`() {
         val clock = StepClock()
-        val limiter = SecurePairingAttemptLimiter(clock::read)
+        val limiter = SecurePairingAttemptLimiter(clock::read, permissive())
         repeat(12) {
             assertTrue(granted(limiter.tryStart("peer-local", "src-local")))
             limiter.recordOutcome("peer-local", "src-local", PairingAttemptOutcome.LOCAL_FAILURE)
@@ -296,7 +314,7 @@ class SecurePairingAttemptLimiterTest {
     @Test
     fun `a resource refusal releases concurrency without consuming a failure budget`() {
         val clock = StepClock()
-        val limiter = SecurePairingAttemptLimiter(clock::read)
+        val limiter = SecurePairingAttemptLimiter(clock::read, permissive())
         repeat(12) {
             assertTrue(granted(limiter.tryStart("peer-res", "src-res")))
             limiter.recordOutcome("peer-res", "src-res", PairingAttemptOutcome.RESOURCE_REFUSED)
@@ -310,7 +328,7 @@ class SecurePairingAttemptLimiterTest {
     @Test
     fun `transcript mismatch is a security failure that escalates to invalidation`() {
         val clock = StepClock()
-        val limiter = SecurePairingAttemptLimiter(clock::read)
+        val limiter = SecurePairingAttemptLimiter(clock::read, permissive())
         repeat(3) {
             assertTrue(granted(limiter.tryStart("peer-tx", "src-tx")))
             limiter.recordOutcome("peer-tx", "src-tx", PairingAttemptOutcome.TRANSCRIPT_MISMATCH)
@@ -406,7 +424,7 @@ class SecurePairingAttemptLimiterTest {
     @Test
     fun `an exhausted identity stays exhausted for a replayed identical advertisement`() {
         val clock = StepClock()
-        val limiter = SecurePairingAttemptLimiter(clock::read)
+        val limiter = SecurePairingAttemptLimiter(clock::read, permissive())
         repeat(3) {
             assertTrue(granted(limiter.tryStart("peer-replay", "src-replay")))
             limiter.recordOutcome("peer-replay", "src-replay", PairingAttemptOutcome.AUTHENTICATION_MISMATCH)
@@ -432,23 +450,35 @@ class SecurePairingAttemptLimiterTest {
     @Test
     fun `lease teardown releases permits and scopes state freshly`() {
         val clock = StepClock()
-        val leaseOne = SecurePairingAttemptLimiter(clock::read)
+        val leaseOne = SecurePairingAttemptLimiter(clock::read, permissive())
+        // Three transcript mismatches escalate the identity, with the cooldown cleared between
+        // acquisitions so each one is genuinely admitted rather than refused.
         repeat(3) {
             assertTrue(granted(leaseOne.tryStart("peer-lease", "src-lease")))
             leaseOne.recordOutcome("peer-lease", "src-lease", PairingAttemptOutcome.TRANSCRIPT_MISMATCH)
+            leaseOne.releaseConcurrency()
+            clock.advance(120_000)
         }
-        assertEquals(3, leaseOne.concurrentPairings())
         assertTrue(leaseOne.isIdentityInvalidated("peer-lease"))
+        assertEquals(0, leaseOne.concurrentPairings())
 
-        // What lease stop does: release every permit handed out, then drop every counter.
+        // Two permits deliberately left outstanding, so teardown has something real to release.
+        assertTrue(granted(leaseOne.tryStart("peer-other", "src-other")))
+        assertTrue(granted(leaseOne.tryStart("peer-third", "src-third")))
+        assertEquals(2, leaseOne.concurrentPairings())
+
+        // This is exactly what lease stop does: release every permit handed out, then drop counters.
         leaseOne.releaseAllConcurrency()
         leaseOne.reset()
         assertEquals(0, leaseOne.concurrentPairings())
-        assertFalse(leaseOne.isIdentityInvalidated("peer-lease"))
+        assertFalse(
+            "teardown, not exhaustion, is what clears the invalidated identity",
+            leaseOne.isIdentityInvalidated("peer-lease"),
+        )
 
         val leaseTwo = SecurePairingAttemptLimiter(clock::read)
         assertTrue(
-            "a new lease is newly scoped -- this is a process-local policy reset, not a security proof",
+            "a new lease is newly scoped -- a process-local policy reset, not a security proof",
             granted(leaseTwo.tryStart("peer-lease", "src-lease")),
         )
         leaseTwo.releaseAllConcurrency()
