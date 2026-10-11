@@ -551,6 +551,54 @@ function verifyEstablishedSessionDeadlines() {
   );
 }
 
+
+/**
+ * Group 14 -- every control record type must share the one deadline-covered I/O path.
+ *
+ * PING, PONG and SESSION_CLOSE are not separate operations. If a per-type writer or reader were
+ * ever added, it would bypass the write deadline and reintroduce the unbounded write this pass
+ * removed, while every test covering the generic path kept passing. Counting the stream accessors
+ * is what makes that impossible to do quietly.
+ */
+function verifyControlRecordTypesShareOnePath() {
+  const channelPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecureLanControlChannel.kt',
+  );
+  const channel = existsSync(channelPath) ? read(channelPath) : '';
+
+  check(
+    'PING, PONG and SESSION_CLOSE are the complete control record set',
+    /val CONTROL_RECORD_TYPES: Set<SecureRecordType> = setOf\(\s*SecureRecordType\.PING,\s*SecureRecordType\.PONG,\s*SecureRecordType\.SESSION_CLOSE,/.test(channel),
+  );
+  check(
+    'no per-record-type send or receive implementation exists to bypass the deadline',
+    !/fun send(Ping|Pong|Close|CloseRecord)|fun (ping|pong)\(/.test(channel) &&
+      /fun send\(type: SecureRecordType, payload: ByteArray\)/.test(channel) &&
+      (channel.match(/fun receive\(\)/g) || []).length === 1,
+  );
+  check(
+    'exactly one write site and one read site exist, so one deadline covers every record type',
+    (channel.match(/socket\.getOutputStream\(\)/g) || []).length === 1 &&
+      (channel.match(/socket\.getInputStream\(\)/g) || []).length === 1,
+  );
+  // Index ordering rather than a fixed window: the encode step legitimately sits between the two,
+  // and a character budget would silently start passing or failing as that step grows.
+  const gateAt = channel.indexOf('if (type !in CONTROL_RECORD_TYPES || payload.isNotEmpty())');
+  const armAt = channel.indexOf('writeDeadline.arm()');
+  const writeAt = channel.indexOf('socket.getOutputStream()');
+  check(
+    'the record-type gate runs before the deadline is armed and before any bytes move',
+    gateAt > 0 && armAt > gateAt && writeAt > armAt,
+  );
+  check(
+    'SESSION_CLOSE terminates the channel only after its own write has been settled',
+    /if \(writeDeadline\.isExpired\(\)\) \{\s*return@synchronized SecureControlSendResult\.Refused\(terminate\(SessionFailureCode\.CONTROL_TIMEOUT\)\)\s*\}\s*if \(type == SecureRecordType\.SESSION_CLOSE\)/.test(channel),
+  );
+}
+
+verifyControlRecordTypesShareOnePath();
+
 verifyEstablishedSessionDeadlines();
 
 verifyProductionWireVersion();

@@ -1703,6 +1703,13 @@ actually verified, and separates it from what was not.
   is no two-coordinator JVM integration test, and the cross-session substitution, certificate
   substitution, extension-ordering and downgrade cases are asserted at codec level rather than
   through the production path. Only the API 23 test exercises two real coordinators.
+- **Two `transport-lan` test failures in run 38069680911 remain unidentified.** They appeared in
+  both the debug and release variants as `72/2f/0s` with no test name, because the workflow did not
+  emit per-test annotations at the time. A later run on effectively the same code passed, and the
+  failing-test emitter added afterwards has not caught a recurrence.
+  **That proves only non-reproduction, not harmlessness.** No root cause was found, no fix was
+  made, and the timing path involved has not been stress-covered. Anyone closing Part B should
+  treat this as an open item rather than a resolved one.
 - **Admission scope and outcome classification are wired; pre-TLS ordering is not proven.**
   The lease owns one `PairingAdmissionScope`, the coordinator receives that exact scope, a closed
   scope refuses with `SCOPE_CLOSED`, and `PairingAttemptOutcome` maps all eleven categories onto an

@@ -3,6 +3,7 @@ package app.morsecode.transport.lan.security
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -197,5 +198,132 @@ public class PairingAdmissionScopeTest {
         )
         scope.close()
         assertEquals(0, scope.concurrentPairings())
+    }
+
+    @Test
+    public fun `lease stop racing an in-flight pairing releases the permit exactly once`() {
+        val clock = StepClock()
+        // The specific hazard: the lease closes while a pairing is still running, and that pairing
+        // later reaches the release in its finally. Either the close or the pairing may win, but
+        // the permit must be accounted for exactly once -- never twice, never negatively.
+        repeat(100) { iteration ->
+            val scope = PairingAdmissionScope(clock::read, permissive())
+            assertTrue(granted(scope.tryStart("peer-$iteration", "src-$iteration")))
+            assertEquals(1, scope.concurrentPairings())
+
+            val start = CyclicBarrier(2)
+            val done = CountDownLatch(2)
+            val closer = Thread {
+                try {
+                    start.await(5, TimeUnit.SECONDS)
+                    scope.close()
+                } catch (_: Exception) {
+                    // A broken barrier fails the awaits below, not this thread.
+                } finally {
+                    done.countDown()
+                }
+            }
+            val releaser = Thread {
+                try {
+                    start.await(5, TimeUnit.SECONDS)
+                    scope.releaseConcurrency()
+                } catch (_: Exception) {
+                    // Same: the assertions below are the real check.
+                } finally {
+                    done.countDown()
+                }
+            }
+            closer.isDaemon = true
+            releaser.isDaemon = true
+            closer.start()
+            releaser.start()
+            assertTrue("iteration $iteration: racers must finish", done.await(5, TimeUnit.SECONDS))
+            closer.join(5_000)
+            releaser.join(5_000)
+
+            assertEquals(
+                "iteration $iteration: the permit count must settle at exactly zero",
+                0,
+                scope.concurrentPairings(),
+            )
+            assertTrue("iteration $iteration: the scope must be closed", scope.isClosed)
+        }
+    }
+
+    @Test
+    public fun `a late pairing completion cannot drive the permit count negative`() {
+        val clock = StepClock()
+        val scope = PairingAdmissionScope(clock::read, permissive())
+        assertTrue(granted(scope.tryStart("peer-late", "src-late")))
+        scope.close()
+        // The pairing's finally runs after lease stop, and again if some path is re-entered.
+        repeat(5) { scope.releaseConcurrency() }
+        assertEquals(0, scope.concurrentPairings())
+        assertTrue(scope.isClosed)
+    }
+
+    @Test
+    public fun `permit count never exceeds capacity under concurrent grant release and close`() {
+        val clock = StepClock()
+        val capacity = 4
+        val scope = PairingAdmissionScope(
+            monotonicMillis = clock::read,
+            limits = SecurePairingAttemptLimiter.Limits(
+                maxStartsPerIdentity = 100_000,
+                maxStartsPerSource = 100_000,
+                maxStartsPerPair = 100_000,
+                maxConcurrentPairings = capacity,
+            ),
+        )
+        val violation = AtomicReference<String?>(null)
+        val start = CyclicBarrier(5)
+        // One worker signals that the grant/release churn is over; only then does the closer run.
+        // That is deliberate synchronisation, not a sleep chosen to win a race.
+        val churnDone = CountDownLatch(1)
+        val done = CountDownLatch(5)
+
+        val workers = (0 until 4).map { worker ->
+            Thread {
+                try {
+                    start.await(5, TimeUnit.SECONDS)
+                    repeat(60) { round ->
+                        if (granted(scope.tryStart("peer-$worker-$round", "src-$worker-$round"))) {
+                            val observed = scope.concurrentPairings()
+                            if (observed < 0 || observed > capacity) {
+                                violation.compareAndSet(null, "observed $observed outside 0..$capacity")
+                            }
+                            scope.releaseConcurrency()
+                        }
+                    }
+                    if (worker == 0) churnDone.countDown()
+                } catch (_: Exception) {
+                    // The assertions below are the real check.
+                } finally {
+                    done.countDown()
+                }
+            }.apply { isDaemon = true }
+        }
+        val closer = Thread {
+            try {
+                start.await(5, TimeUnit.SECONDS)
+                churnDone.await(5, TimeUnit.SECONDS)
+                scope.close()
+            } catch (_: Exception) {
+                // Same.
+            } finally {
+                done.countDown()
+            }
+        }.apply { isDaemon = true }
+
+        workers.forEach { it.start() }
+        closer.start()
+        assertTrue("all racers must finish", done.await(10, TimeUnit.SECONDS))
+        workers.forEach { it.join(5_000) }
+        closer.join(5_000)
+
+        val seen = violation.get()
+        assertTrue("permit capacity was violated: $seen", seen == null)
+        assertEquals("the permit count must settle at exactly zero", 0, scope.concurrentPairings())
+        assertTrue(scope.isClosed)
     }
 }

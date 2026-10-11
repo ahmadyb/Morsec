@@ -297,4 +297,58 @@ class MonotonicSocketDeadlineTest {
         }
         assertFalse("shutdown must release the timer thread", SharedDeadlineScheduler.isRunning())
     }
+
+    @Test
+    fun `a task firing after successful completion is always a no-op`() {
+        // The scheduler cannot know that the guarded operation already finished. Firing the task
+        // afterwards must neither close the socket nor flip the outcome to expired.
+        repeat(200) {
+            val clock = FakeMonotonic()
+            val scheduler = ManualDeadlineScheduler()
+            val socket = unusedSocket()
+            try {
+                val deadline = MonotonicSocketDeadline("late-task", socket, 5_000L, clock::read, scheduler)
+                deadline.arm()
+                assertEquals(DeadlineOutcome.Resolved, deadline.complete())
+                scheduler.fireAll()
+                assertFalse("a late task must not expire a completed deadline", deadline.isExpired())
+                assertEquals("a late task must not close the socket", 0, deadline.closeCount())
+                assertEquals(
+                    "completion after a late task still reports resolved",
+                    DeadlineOutcome.Resolved,
+                    deadline.complete(),
+                )
+                assertEquals(0, scheduler.pendingCount())
+            } finally {
+                runCatching { socket.close() }
+            }
+        }
+    }
+
+    @Test
+    fun `completion and expiry racing always resolve exactly once in both orders`() {
+        repeat(200) { iteration ->
+            val clock = FakeMonotonic()
+            val scheduler = ManualDeadlineScheduler()
+            val socket = unusedSocket()
+            try {
+                val deadline = MonotonicSocketDeadline("race-$iteration", socket, 5_000L, clock::read, scheduler)
+                deadline.arm()
+                if (iteration % 2 == 0) {
+                    scheduler.fireAll()
+                    assertEquals(DeadlineOutcome.Expired, deadline.complete())
+                } else {
+                    assertEquals(DeadlineOutcome.Resolved, deadline.complete())
+                    scheduler.fireAll()
+                    assertFalse(deadline.isExpired())
+                }
+                // Exactly one terminal state, and at most one abortive close.
+                assertTrue(deadline.closeCount() <= 1)
+                assertEquals(deadline.isExpired(), deadline.complete() == DeadlineOutcome.Expired)
+                assertEquals(0, scheduler.pendingCount())
+            } finally {
+                runCatching { socket.close() }
+            }
+        }
+    }
 }
