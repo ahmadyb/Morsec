@@ -311,12 +311,17 @@ public class ControlTimeoutClassificationTest {
             val result = fixture.channel.receive()
             assertTrue(result is SecureControlReceiveResult.Refused)
             val failure = (result as SecureControlReceiveResult.Refused).failure
+            // The first record on a fresh secure channel is the key-confirmation exchange, so a
+            // tag that authenticates nothing is reported as a confirmation failure rather than a
+            // generic invalid record. Either way the invariant under test is the same and is the
+            // one that matters here: an authentication failure is never laundered into a deadline.
             assertEquals(
-                "a broken tag is an authentication failure, not a deadline",
-                SessionFailureCode.SECURE_SESSION_RECORD_INVALID,
+                "a broken tag is an authentication failure",
+                SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED,
                 failure.code,
             )
             assertNotEqualsCode(SessionFailureCode.CONTROL_TIMEOUT, failure.code)
+            assertNull("no timeout context is attached to an authentication failure", failure.controlIoContext)
         } finally {
             fixture.close()
         }
