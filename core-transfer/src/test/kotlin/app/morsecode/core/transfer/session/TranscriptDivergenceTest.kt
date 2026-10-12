@@ -1,7 +1,6 @@
 package app.morsecode.core.transfer.session
 
 import app.morsecode.core.model.TransportKind
-import app.morsecode.core.transfer.identity.PeerInstanceId
 import app.morsecode.core.transfer.identity.SessionId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -49,12 +48,12 @@ public class TranscriptDivergenceTest {
         securitySuiteWireId: Int = 1,
         tlsProtocol: String = "TLSv1.3",
         tlsCipherSuite: String = "TLS_AES_128_GCM_SHA256",
-        offeredFeaturesMask: Long = 9L,
+        offeredFeaturesMask: Int? = 9,
         offeredMaxChunkSizeBytes: Long = 65_536L,
         offeredResumeSupported: Boolean = true,
         offeredEncryption: EncryptionCapability = EncryptionCapability.TLS_1_3,
         offeredAuthentication: PairingAuthenticationCapability = PairingAuthenticationCapability.SAS_25BIT_COMPARISON,
-        extensions: List<PairingExtensionV2> = emptyList(),
+        extensions: List<Pair<Byte, ByteArray>> = emptyList(),
     ): PairingOfferV2 = PairingOfferV2(
         secureSessionId = secureSessionId,
         controlSessionId = controlSessionId,
@@ -131,7 +130,7 @@ public class TranscriptDivergenceTest {
                     digestOf(initiator(), responder())
             },
             "capability downgrade" to {
-                digestOf(offer(SecurePeerRole.INITIATOR, initiatorPeer, responderPeer, offeredFeaturesMask = 1L), responder()) to
+                digestOf(offer(SecurePeerRole.INITIATOR, initiatorPeer, responderPeer, offeredFeaturesMask = 1), responder()) to
                     digestOf(initiator(), responder())
             },
             "chunk size mutation" to {
