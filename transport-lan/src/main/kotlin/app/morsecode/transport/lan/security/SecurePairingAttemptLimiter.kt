@@ -493,7 +493,11 @@ internal class AdmissionHandle internal constructor(
         if (!terminal.compareAndSet(false, true)) return AdmissionReceipt.AlreadyCompleted
         val receipt = when {
             owner.isClosed -> AdmissionReceipt.ScopeClosed
-            !owner.isLiveGrant(this) -> AdmissionReceipt.NotAdmitted
+            // Re-check closed after a liveness failure: close() clears the grant table after
+            // setting the flag, so a concurrent teardown can lose the race here. Reporting that as
+            // "the scope went away" is accurate; reporting it as an unrecognised handle is not.
+            !owner.isLiveGrant(this) ->
+                if (owner.isClosed) AdmissionReceipt.ScopeClosed else AdmissionReceipt.NotAdmitted
             else -> owner.applyOutcome(this, outcome)
         }
         terminalOutcome = outcome
@@ -578,9 +582,18 @@ internal class PairingAdmissionScope(
     internal fun isLiveGrant(handle: AdmissionHandle): Boolean =
         !closed.get() && liveGrants[handle.token()] === handle
 
-    /** Called only by a handle that has already passed [isLiveGrant]. */
+    /**
+     * Applies one outcome to the identity this handle was granted for.
+     *
+     * The reference-identity check is repeated here rather than trusted from the caller. Token
+     * numbers restart at zero in every scope, so two leases hand out colliding tokens; a caller
+     * that reached this method directly with a handle from another lease would otherwise charge
+     * *this* scope's identity for an attempt it never admitted. Checking the token alone was a real
+     * hole, not a theoretical one.
+     */
     internal fun applyOutcome(handle: AdmissionHandle, outcome: PairingAttemptOutcome): AdmissionReceipt {
         if (closed.get()) return AdmissionReceipt.ScopeClosed
+        if (!isLiveGrant(handle)) return AdmissionReceipt.NotAdmitted
         val key = liveKeys[handle.token()] ?: return AdmissionReceipt.NotAdmitted
         limiter.recordOutcome(key.first, key.second, outcome)
         return AdmissionReceipt.Completed

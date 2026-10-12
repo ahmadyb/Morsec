@@ -297,7 +297,9 @@ public class PairingAdmissionScopeTest {
         scope.close()
         // The pairing's finally runs after lease stop, and again if some path is re-entered. The
         // first release is a harmless no-op against the reset limiter; the rest are typed refusals.
-        assertEquals(AdmissionReceipt.Completed, late.complete(PairingAttemptOutcome.PEER_DISCONNECT))
+        // The scope is already closed, so the outcome cannot be written; what must hold is that
+        // the permit still comes back and the repeated calls stay typed rather than throwing.
+        assertEquals(AdmissionReceipt.ScopeClosed, late.complete(PairingAttemptOutcome.PEER_DISCONNECT))
         repeat(4) {
             assertEquals(AdmissionReceipt.AlreadyCompleted, late.complete(PairingAttemptOutcome.PEER_DISCONNECT))
         }

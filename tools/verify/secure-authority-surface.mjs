@@ -838,6 +838,14 @@ function verifyAdmissionHandleIsTheOnlyOutcomeRoute() {
     /val key = liveKeys\[handle\.token\(\)\] \?: return AdmissionReceipt\.NotAdmitted/.test(limiter),
   );
   check(
+    'the outcome path re-verifies reference identity, because tokens collide across scopes',
+    /internal fun applyOutcome[\s\S]{0,600}?if \(!isLiveGrant\(handle\)\) return AdmissionReceipt\.NotAdmitted/.test(limiter),
+  );
+  check(
+    'a teardown that loses the liveness race is reported as scope closure, not as a forged handle',
+    /!owner\.isLiveGrant\(this\) ->\s*if \(owner\.isClosed\) AdmissionReceipt\.ScopeClosed else AdmissionReceipt\.NotAdmitted/.test(limiter),
+  );
+  check(
     'one terminal operation claims the transition before anything else can',
     /internal fun complete\(outcome: PairingAttemptOutcome\): AdmissionReceipt \{\s*if \(!terminal\.compareAndSet\(false, true\)\) return AdmissionReceipt\.AlreadyCompleted/.test(limiter),
   );
