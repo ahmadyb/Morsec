@@ -1663,8 +1663,8 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Latest verified code SHA | `02d2a0862a4f2fd6b099e3987d0fd49bbef9cb43` |
-| Latest verified code CI | Run 38177386511 — https://github.com/ahmadyb/Morsec/actions/runs/38177386511 — `success`, zero failing steps, 2832 tests / 0 failed / 0 skipped in 173 reports |
+| Latest verified code SHA | `9e0eb902a8e0b4159ad45cdc3ea1f3e124a32908` |
+| Latest verified code CI | Run 38224261555 — https://github.com/ahmadyb/Morsec/actions/runs/38224261555 — `success`, zero failing steps, 2873 tests / 0 failed / 0 skipped in 176 reports; lint 0 errors; API 23 step green; `app-debug.apk` 32.25 MiB and androidTest 1.10 MiB |
 | Documentation commit SHA | **Deliberately not recorded here.** A document cannot state its own commit SHA without being stale the instant it is committed. Read it from `git log -1 --format=%H -- doc/AI_HANDOFF.md`. |
 
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
@@ -1810,3 +1810,56 @@ store, not as dangling objects, and no bundle or patch of them survives. The wor
 section is a re-implementation, not a recovery. The lesson is recorded deliberately: commits
 that exist only in a sandbox are not saved work, and pushing early costs less than losing the
 only copy.
+
+## A3 finding: production has no bounded worker pool for authenticated control-record I/O
+
+Recorded so the next pass does not re-derive it, and because it constrains what an honest A3 test
+can assert.
+
+The bounded executor that exists is `controlExecutor`, built by `boundedExecutor` at
+`LanPeerDiscoveryProvider.kt:114` and created at `:356`:
+
+- type: `ThreadPoolExecutor`, core == max, keepAlive 0
+- maximum workers: `MAX_CONTROL_SESSIONS = 4` (`:1589`)
+- queue bound: `ArrayBlockingQueue(MAX_PENDING_CONTROL_TASKS = 4)` (`:1590`) -- bounded, not hidden
+- rejection policy: `ThreadPoolExecutor.AbortPolicy()`, mapped by callers to
+  `OPERATION_QUEUE_FULL` (`:483`, `:771`, `:1408`)
+- slot acquisition: `controlPermits = Semaphore(4, fair = true)` (`:264`) via
+  `reserveControlCapacity() = controlPermits.tryAcquire()` (`:1063`)
+- release: `releaseControlCapacity()` (`:1070`), each call site guarded by
+  `permitReleased.compareAndSet(false, true)` (`:924`, `:1067`, `:1210`)
+- shutdown: `controlExecutor?.shutdownNow()` and `callbackExecutor?.shutdownNow()` (`:1161`)
+
+What runs on it is **session establishment**: outbound connect (`:481`), inbound accept (`:770`)
+and the pairing work itself (`:1406`). The semaphore gates *control sessions*, not control
+operations.
+
+`SecureLanControlChannel.send` and `receive` are synchronous and blocking, guarded by
+`synchronized(writeLock)` and `synchronized(readLock)`. They are constructed at `:1318` and handed
+to the holder of the delivered session; nothing submits them to an executor. So an A3 test that
+"fills every production worker with authenticated `receive()` operations" has no production worker
+pool to fill -- writing one would mean inventing a test-only capacity owner, which is exactly what
+the A3 instruction forbids.
+
+The honest A3 target is therefore session-level capacity recovery: fill all four `controlPermits`
+with establishment that blocks, expire it, and prove each permit releases exactly once and an
+honest session then obtains capacity. That requires driving the provider over real sockets, and it
+is not yet implemented.
+
+## A3/A4 finding: control timeout reports do not yet distinguish record type or phase
+
+`SecureLanControlChannel.terminate(code)` (`:222`) returns `SessionFailure(code)` and nothing else,
+and every timeout path funnels through it (`:83`, `:88`, `:102`, `:125`, `:141`, `:145`). PING send
+timeout, PING receive timeout, PONG send timeout, PONG receive timeout, SESSION_CLOSE send timeout
+and SESSION_CLOSE receive timeout therefore all collapse to
+`SessionFailure(CONTROL_TIMEOUT)` and are indistinguishable to a caller.
+
+Closing that means widening `SessionFailure` or the `SecureControlSendResult` /
+`SecureControlReceiveResult` types in `core-transfer`, which is a production change with call-site
+and verifier reach. It is recorded as open rather than approximated by a test that asserts the
+current indistinguishable behaviour.
+
+The single generic send/receive path is intact and is the right shape: there is exactly one
+`getOutputStream()`, one `getInputStream()`, one `send` and one `receive`, and
+`CONTROL_RECORD_TYPES = {PING, PONG, SESSION_CLOSE}` is checked before the deadline is armed. No
+per-type stream implementation exists to duplicate.
