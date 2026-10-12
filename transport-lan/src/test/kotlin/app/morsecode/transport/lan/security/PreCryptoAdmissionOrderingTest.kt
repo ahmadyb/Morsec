@@ -181,6 +181,24 @@ public class PreCryptoAdmissionOrderingTest {
         }
     }
 
+    /**
+     * Never cancelled, so a run actually reaches the cryptographic work instead of returning at the
+     * coordinator's first cancellation check. Approval is still refused, so nothing can be issued.
+     */
+    private class PermittingInteraction : PairingInteraction {
+        val approvalsPublished = AtomicInteger(0)
+        override fun publishApproval(
+            machine: SecureSessionStateMachine,
+            request: SecurePairingApprovalRequest,
+        ): Boolean {
+            approvalsPublished.incrementAndGet()
+            return true
+        }
+
+        override fun awaitApproval(machine: SecureSessionStateMachine): Boolean = false
+        override fun isCancelled(): Boolean = false
+    }
+
     private fun profile(id: String, name: String): SessionPeerProfile = SessionPeerProfile(
         peerInstanceId = PeerInstanceId(id),
         displayName = name,
@@ -254,7 +272,9 @@ public class PreCryptoAdmissionOrderingTest {
         // gate. The first cryptographic operation must observe a permit already held.
         val scope = PairingAdmissionScope(monotonicMillis = { 0L }, limits = permissive())
         val socket = CountingSocket()
-        val interaction = SpyInteraction()
+        // Not SpyInteraction: that one reports cancelled, and the coordinator checks cancellation
+        // before TLS, so the run would return without ever reaching the crypto factory.
+        val interaction = PermittingInteraction()
         val crypto = CountingCryptoFactory().also { it.scope = scope }
         try {
             SecureLanPairingCoordinator(

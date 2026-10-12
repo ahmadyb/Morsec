@@ -118,7 +118,40 @@ private fun buildEphemeralCertificate(
     provider: Provider,
     random: SecureRandom,
 ): X509Certificate {
-%s
+        val now = System.currentTimeMillis()
+        val notBefore = Date((now - CERTIFICATE_CLOCK_SKEW_MILLIS).coerceAtLeast(0L))
+        val notAfter = Date(if (now > Long.MAX_VALUE - CERTIFICATE_VALIDITY_MILLIS) {
+            Long.MAX_VALUE
+        } else {
+            now + CERTIFICATE_VALIDITY_MILLIS
+        })
+        val serialBytes = ByteArray(20)
+        val serial = try {
+            random.nextBytes(serialBytes)
+            serialBytes[0] = (serialBytes[0].toInt() and 0x7F).toByte()
+            BigInteger(1, serialBytes).let { if (it.signum() == 0) BigInteger.ONE else it }
+        } finally {
+            serialBytes.fill(0)
+        }
+
+        val name = X500Name("CN=Morsec Ephemeral LAN Session")
+        val builder = JcaX509v3CertificateBuilder(
+            name,
+            serial,
+            notBefore,
+            notAfter,
+            name,
+            pair.public,
+        )
+            .addExtension(Extension.basicConstraints, true, BasicConstraints(false))
+            .addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature))
+        val signer = JcaContentSignerBuilder("SHA256withECDSA")
+            .setProvider(provider)
+            .build(pair.private)
+        val certificate = JcaX509CertificateConverter()
+            .getCertificate(builder.build(signer))
+        certificate.checkValidity()
+        verifyCertificateSignature(certificate, pair.public, provider)
     return certificate
 }
 
