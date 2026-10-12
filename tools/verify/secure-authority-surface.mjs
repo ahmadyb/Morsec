@@ -719,6 +719,125 @@ function verifyTypedControlIoContext() {
 
 verifyTypedControlIoContext();
 
+/**
+ * Group 19 -- control-establishment capacity bounds, and the seam that observes them.
+ *
+ * The capacity bound is security-relevant in a way that is easy to lose sight of: a leaked permit
+ * permanently reduces how many pairings this process can run, and a double release lets a fifth
+ * session start on a four-session bound. The observer exists so those counts are visible, and these
+ * checks exist so neither the bound nor the seam's safety can regress quietly.
+ */
+function verifyEstablishmentCapacityAndObserver() {
+  const provider = read(join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'LanPeerDiscoveryProvider.kt',
+  ));
+  const observer = read(join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'ControlEstablishmentObserver.kt',
+  ));
+
+  check(
+    'establishment capacity stays four active workers and a four-deep bounded queue',
+    /const val MAX_CONTROL_SESSIONS: Int = 4/.test(provider) &&
+      /const val MAX_PENDING_CONTROL_TASKS: Int = 4/.test(provider),
+  );
+  check(
+    'the queue is a bounded ArrayBlockingQueue, not an unbounded one',
+    /ArrayBlockingQueue\(queueCapacity\)/.test(provider) &&
+      !/LinkedBlockingQueue\(\)/.test(provider),
+  );
+  mutation(
+    'swapping in an unbounded queue fails this check',
+    provider,
+    (src) => src.replace('ArrayBlockingQueue(queueCapacity)', 'LinkedBlockingQueue()'),
+    (src) => /ArrayBlockingQueue\(queueCapacity\)/.test(src) && !/LinkedBlockingQueue\(\)/.test(src),
+  );
+  check(
+    'rejection is AbortPolicy, so a full queue surfaces rather than running on the caller',
+    /ThreadPoolExecutor\.AbortPolicy\(\)/.test(provider) &&
+      !/CallerRunsPolicy/.test(provider) &&
+      !/DiscardPolicy/.test(provider),
+  );
+  mutation(
+    'switching to CallerRunsPolicy fails this check',
+    provider,
+    (src) => src.replace('ThreadPoolExecutor.AbortPolicy()', 'ThreadPoolExecutor.CallerRunsPolicy()'),
+    (src) => /ThreadPoolExecutor\.AbortPolicy\(\)/.test(src),
+  );
+  check(
+    'the permit semaphore is fair and sized to the same four-session bound',
+    /private val controlPermits = Semaphore\(MAX_CONTROL_SESSIONS, true\)/.test(provider),
+  );
+  check(
+    'every permit release stays behind an exactly-once guard',
+    (provider.match(/compareAndSet\(false, true\)\) releaseControlCapacity\(\)/g) || []).length >= 3,
+  );
+  mutation(
+    'dropping one exactly-once release guard fails this check',
+    provider,
+    (src) => src.replace(
+      'if (permitReleased.compareAndSet(false, true)) releaseControlCapacity()',
+      'releaseControlCapacity()',
+    ),
+    (src) => (src.match(/compareAndSet\(false, true\)\) releaseControlCapacity\(\)/g) || []).length >= 3,
+  );
+  check(
+    'no internal control-record executor exists beside the establishment executor',
+    !/controlRecordExecutor|controlIoExecutor|recordExecutor|operationExecutor/.test(provider) &&
+      !/Executors\s*\.\s*new/.test(provider),
+  );
+  mutation(
+    'adding a hidden second executor fails this check',
+    provider,
+    (src) => src.replace(
+      'private fun reserveControlCapacity(): Boolean {',
+      'private val hiddenExecutor = Executors.newCachedThreadPool()\n\n        private fun reserveControlCapacity(): Boolean {',
+    ),
+    (src) => !/Executors\s*\.\s*new/.test(src),
+  );
+
+  // The seam itself.
+  check(
+    'production selects the shared inert observer by default',
+    /private val establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver\.Inert,/.test(provider) &&
+      /val Inert: ControlEstablishmentObserver = object : ControlEstablishmentObserver \{ \}/.test(observer),
+  );
+  mutation(
+    'selecting a counting observer in production fails this check',
+    provider,
+    (src) => src.replace(
+      'ControlEstablishmentObserver = ControlEstablishmentObserver.Inert,',
+      'ControlEstablishmentObserver = CountingEstablishmentObserver(),',
+    ),
+    (src) => /establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver\.Inert,/.test(src),
+  );
+  check(
+    'every observer call is wrapped so a defect cannot leak a permit or skip teardown',
+    /private inline fun observe\(action: \(ControlEstablishmentObserver\) -> Unit\) \{\s*try \{\s*action\(establishmentObserver\)\s*\} catch \(_: RuntimeException\)/.test(provider) &&
+      (provider.match(/observe \{ it\./g) || []).length >= 8 &&
+      !/establishmentObserver\.on[A-Za-z]+\(\)/.test(provider),
+  );
+  check(
+    'the observer owns no executor, queue, semaphore, socket or timer',
+    !/Executor|Semaphore|BlockingQueue|Socket|Timer|Thread/.test(
+      observer.replace(/executor|queue|socket|permit and no\s*\n?\s*\* timer/gi, ''),
+    ) || !/(Executor|Semaphore|BlockingQueue|Timer)\s*[<(]/.test(observer),
+  );
+  check(
+    'the observer is internal, so it cannot become a public application API',
+    /internal interface ControlEstablishmentObserver/.test(observer) &&
+      !/public interface ControlEstablishmentObserver/.test(observer),
+  );
+  check(
+    'every observer method returns Unit, so it cannot steer control flow',
+    (observer.match(/fun on[A-Za-z]+\(\)( \{ \})?/g) || []).length >= 4 &&
+      !/fun on[A-Za-z]+\(\): (?!Unit)/.test(observer),
+  );
+}
+
+verifyEstablishmentCapacityAndObserver();
+
 
 /**
  * Group 15 -- the pairing ownership model after the discovery lease stops.

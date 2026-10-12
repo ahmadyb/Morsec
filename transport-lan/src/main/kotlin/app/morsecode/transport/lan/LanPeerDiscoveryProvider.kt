@@ -31,6 +31,7 @@ import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordLayer
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionOperation
+import app.morsecode.transport.lan.security.ControlEstablishmentObserver
 import app.morsecode.transport.lan.security.PairingAdmissionScope
 import app.morsecode.transport.lan.security.SecurePairingAttemptLimiter
 import app.morsecode.transport.lan.security.SecureSessionStateMachine
@@ -173,6 +174,11 @@ public class LanPeerDiscoveryProvider(
     context: Context,
     private val clock: MonotonicClock = MonotonicClock { SystemClock.elapsedRealtime() },
     private val peerInstanceIdFactory: () -> PeerInstanceId = ::generatePeerInstanceId,
+    /**
+     * Read-only observation of control-establishment capacity. Production passes nothing and gets
+     * the shared inert instance, so the default path allocates nothing and observes nothing.
+     */
+    private val establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver.Inert,
 ) : PeerDiscoveryProvider {
     private val appContext: Context = context.applicationContext
     private var activeLease: LanDiscoveryLease? = null
@@ -206,6 +212,7 @@ public class LanPeerDiscoveryProvider(
                 clock = clock,
                 peerInstanceId = localPeerId,
                 onClosed = { closedLease -> clearLease(closedLease) },
+                establishmentObserver = establishmentObserver,
             )
         } catch (_: RuntimeException) {
             return DiscoveryStartResult.Failed(SessionFailure(SessionFailureCode.INVALID_REQUEST))
@@ -253,6 +260,7 @@ public class LanPeerDiscoveryProvider(
         private val clock: MonotonicClock,
         peerInstanceId: PeerInstanceId,
         private val onClosed: (LanDiscoveryLease) -> Unit,
+        private val establishmentObserver: ControlEstablishmentObserver,
     ) : DiscoveryLease {
         private val closed = AtomicBoolean(false)
         private val networkDirty = AtomicBoolean(true)
@@ -478,8 +486,10 @@ public class LanPeerDiscoveryProvider(
             })
             attempt.setFuture(task)
             try {
+                observe { it.onControlTaskSubmitted() }
                 requireNotNull(controlExecutor).execute(task)
             } catch (_: RejectedExecutionException) {
+                observe { it.onControlTaskRejected() }
                 attempt.fail(SessionFailureCode.OPERATION_QUEUE_FULL)
             } catch (_: RuntimeException) {
                 attempt.fail(SessionFailureCode.INTERNAL_TRANSPORT_FAILURE)
@@ -767,8 +777,10 @@ public class LanPeerDiscoveryProvider(
                 Unit
             })
             try {
+                observe { it.onControlTaskSubmitted() }
                 requireNotNull(controlExecutor).execute(task)
             } catch (_: RejectedExecutionException) {
+                observe { it.onControlTaskRejected() }
                 inFlightSockets.remove(socket)
                 closeSocket(socket)
                 releaseIncomingPermit(socket)
@@ -1060,7 +1072,27 @@ public class LanPeerDiscoveryProvider(
             }
         }
 
-        private fun reserveControlCapacity(): Boolean = controlPermits.tryAcquire()
+        /**
+         * Invokes the observer without letting an observer defect cost production capacity.
+         *
+         * A throwing observer must not leak a permit, skip a cleanup step or change a result, so the
+         * call is wrapped and `RuntimeException` is swallowed. Inline because a non-inline wrapper
+         * around a lambda would allocate on every event, which is the cost this seam is not allowed
+         * to add to the production path.
+         */
+        private inline fun observe(action: (ControlEstablishmentObserver) -> Unit) {
+            try {
+                action(establishmentObserver)
+            } catch (_: RuntimeException) {
+                // An observer defect is never a reason to leak a permit or skip teardown.
+            }
+        }
+
+        private fun reserveControlCapacity(): Boolean {
+            val acquired = controlPermits.tryAcquire()
+            if (acquired) observe { it.onControlPermitAcquired() }
+            return acquired
+        }
 
         private fun releaseIncomingPermit(socket: Socket) {
             val released = incomingPermits.remove(socket) ?: return
@@ -1069,6 +1101,7 @@ public class LanPeerDiscoveryProvider(
 
         private fun releaseControlCapacity() {
             controlPermits.release()
+            observe { it.onControlPermitReleased() }
         }
 
         private fun safeNowOrStop(): Long? = try {
@@ -1403,8 +1436,10 @@ public class LanPeerDiscoveryProvider(
                         return
                     }
                     try {
+                        observe { it.onControlTaskSubmitted() }
                         requireNotNull(controlExecutor).execute(work)
                     } catch (_: RejectedExecutionException) {
+                        observe { it.onControlTaskRejected() }
                         completeFailure(SessionFailureCode.OPERATION_QUEUE_FULL)
                     } catch (_: RuntimeException) {
                         completeFailure(SessionFailureCode.INTERNAL_TRANSPORT_FAILURE)
