@@ -1664,7 +1664,7 @@ actually verified, and separates it from what was not.
 | Claim | Evidence |
 | --- | --- |
 | Latest verified code SHA | `6e9c72374a5ed96e2dfa97381a78a075be2a17a0` |
-| Latest verified code CI | Run 38291262887 — https://github.com/ahmadyb/Morsec/actions/runs/38291262887 — `success`, zero failing steps, 2908 tests / 0 failed / 0 skipped in 179 reports; lint 0 errors; API 23 step green including the new deadline instrumentation; `app-debug.apk` 32.25 MiB and androidTest 1.10 MiB |
+| Latest verified code CI | Run 38291262887 — https://github.com/ahmadyb/Morsec/actions/runs/38291262887 — `success`, zero failing steps, 2906 tests / 0 failed / 0 skipped in 179 reports; lint 0 errors; API 23 step green including the new deadline instrumentation; `app-debug.apk` 32.25 MiB and androidTest 1.10 MiB |
 | Documentation commit SHA | **Deliberately not recorded here.** A document cannot state its own commit SHA without being stale the instant it is committed. Read it from `git log -1 --format=%H -- doc/AI_HANDOFF.md`. |
 
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
