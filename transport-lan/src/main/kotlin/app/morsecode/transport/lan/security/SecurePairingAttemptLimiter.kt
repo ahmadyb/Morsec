@@ -405,6 +405,125 @@ internal class SecurePairingAttemptLimiter(
 }
 
 /**
+ * The result of an [AdmissionHandle] operation, as a value rather than as a silent no-op.
+ *
+ * The limiter previously expressed "this mutation was refused" by returning `Unit`: `recordOutcome`
+ * wrote through `identities[key]?.set(...)`, so an outcome recorded for an identity the limiter had
+ * never tracked did nothing at all. That was safe only because production reached it exclusively
+ * from an admitted attempt's `finally` block -- an invariant carried entirely by the call site. This
+ * type moves the refusal into the return value, where a caller cannot fail to notice it.
+ */
+internal sealed interface AdmissionReceipt {
+    /** The one terminal outcome was applied to the limiter's budget policy. */
+    data object Recorded : AdmissionReceipt
+
+    /** The concurrency permit was returned. */
+    data object Released : AdmissionReceipt
+
+    /**
+     * The scope does not recognise this handle. It was never granted by this scope, it belongs to a
+     * different lease, or it has already been retired. Nothing was mutated.
+     */
+    data object NotAdmitted : AdmissionReceipt
+
+    /** This handle already recorded its single terminal outcome. Nothing was mutated. */
+    data object OutcomeAlreadyRecorded : AdmissionReceipt
+
+    /** This handle already returned its permit. Nothing was mutated. */
+    data object AlreadyReleased : AdmissionReceipt
+
+    /**
+     * The owning lease closed, so its counters are already gone. Nothing was mutated, because
+     * writing to a reset scope would be charging a lease that no longer exists.
+     */
+    data object ScopeClosed : AdmissionReceipt
+}
+
+/**
+ * Opaque proof that one specific attempt was admitted by one specific lease.
+ *
+ * WHY THIS EXISTS. Recording an outcome used to take two arbitrary strings -- an identity key and a
+ * source key -- so any caller in the module could charge a budget it had never been admitted
+ * against, and a typo'd or stale key produced a silent no-op rather than an error. A handle cannot
+ * be asked to charge a budget for an identity it was not granted for, because it carries no
+ * settable identity at all.
+ *
+ * WHAT MAKES IT UNFORGEABLE, STATED PRECISELY. The constructor is `internal`, not `private`: Kotlin
+ * has no file-private constructor, and a `private` one would be unreachable from the scope that has
+ * to issue handles. So the invariant does **not** rest on constructor visibility. It rests on
+ * reference identity: a scope honours a handle only when its own live-grant table maps that
+ * handle's token to *that exact object*. A second object built with the same identity, source and
+ * token strings fails the identity comparison and is refused with [AdmissionReceipt.NotAdmitted],
+ * and a handle issued by another lease fails the owner comparison. Forging a working handle
+ * therefore requires holding the object the scope returned, which is the same thing as having been
+ * admitted.
+ *
+ * One handle records at most one terminal outcome and returns its permit at most once; both are
+ * single-shot compare-and-set transitions, so a duplicated or concurrent call is a typed refusal
+ * rather than a double charge.
+ */
+internal class AdmissionHandle internal constructor(
+    private val owner: PairingAdmissionScope,
+    private val token: Long,
+) {
+    /** Visible to the issuing scope only, so it can key its live-grant table. */
+    internal fun token(): Long = token
+
+    private val outcomeRecorded = AtomicBoolean(false)
+    private val permitReturned = AtomicBoolean(false)
+
+    /** True once this handle has applied its one terminal outcome. */
+    internal val hasRecordedOutcome: Boolean get() = outcomeRecorded.get()
+
+    /** True once this handle has returned its concurrency permit. */
+    internal val isReleased: Boolean get() = permitReturned.get()
+
+    /**
+     * Applies this attempt's single terminal outcome to the budget policy.
+     *
+     * Refused, without mutating anything, when the handle is not live in its own scope, when an
+     * outcome has already been recorded, or when the lease has closed.
+     */
+    internal fun recordOutcome(outcome: PairingAttemptOutcome): AdmissionReceipt {
+        if (owner.isClosed) return AdmissionReceipt.ScopeClosed
+        if (!owner.isLiveGrant(this)) return AdmissionReceipt.NotAdmitted
+        if (!outcomeRecorded.compareAndSet(false, true)) return AdmissionReceipt.OutcomeAlreadyRecorded
+        return owner.applyOutcome(this, outcome)
+    }
+
+    /**
+     * Returns the concurrency permit exactly once.
+     *
+     * Deliberately still callable after the lease closes: an in-flight coordinator releases in a
+     * `finally`, and that release must stay reachable. The scope makes the post-close call a no-op,
+     * and the limiter's own floor at zero makes a late release harmless rather than a negative
+     * counter.
+     */
+    internal fun release(): AdmissionReceipt {
+        if (!permitReturned.compareAndSet(false, true)) return AdmissionReceipt.AlreadyReleased
+        return owner.retireGrant(this)
+    }
+}
+
+/**
+ * The scope's answer to [PairingAdmissionScope.tryStart].
+ *
+ * Deliberately not the limiter's own [PairingAdmission]: the limiter is the counting primitive and
+ * keeps its string-keyed API, while the scope is the authority that issues handles. Keeping the two
+ * apart is what removes the string-keyed outcome path from the lease-facing surface entirely.
+ */
+internal sealed interface AdmissionDecision {
+    /** Admitted. The caller must record one outcome and release the handle exactly once each. */
+    data class Granted(val handle: AdmissionHandle) : AdmissionDecision
+
+    /** Refused. No handle exists, so there is nothing that could record an outcome. */
+    data class Refused(
+        val reason: PairingAdmission.RefusalReason,
+        val retryAfterMillis: Long,
+    ) : AdmissionDecision
+}
+
+/**
  * One discovery lease's pairing-admission scope.
  *
  * The lease creates exactly one of these when explicit discovery starts, hands that same instance
@@ -430,38 +549,61 @@ internal class PairingAdmissionScope(
 
     internal val isClosed: Boolean get() = closed.get()
 
-    internal fun tryStart(peerIdentityKey: String, sourceKey: String): PairingAdmission {
+    private val liveGrants = ConcurrentHashMap<Long, AdmissionHandle>()
+    private val nextToken = AtomicLong(0L)
+    private val liveKeys = ConcurrentHashMap<Long, Pair<String, String>>()
+
+    /**
+     * Decides admission and, on a grant, issues the only object that can later record that
+     * attempt's outcome and return its permit.
+     */
+    internal fun tryStart(peerIdentityKey: String, sourceKey: String): AdmissionDecision {
         if (closed.get()) {
-            return PairingAdmission.Refused(PairingAdmission.RefusalReason.SCOPE_CLOSED, 0L)
+            return AdmissionDecision.Refused(PairingAdmission.RefusalReason.SCOPE_CLOSED, 0L)
         }
-        return limiter.tryStart(peerIdentityKey, sourceKey)
+        return when (val decision = limiter.tryStart(peerIdentityKey, sourceKey)) {
+            is PairingAdmission.Granted -> {
+                val token = nextToken.incrementAndGet()
+                val handle = AdmissionHandle(this, token)
+                liveGrants[token] = handle
+                liveKeys[token] = peerIdentityKey to sourceKey
+                AdmissionDecision.Granted(handle)
+            }
+            is PairingAdmission.Refused ->
+                AdmissionDecision.Refused(decision.reason, decision.retryAfterMillis)
+        }
     }
 
     /**
-     * Records one admitted attempt's outcome. Ignored after close: the counters are already gone,
-     * and charging a stopped scope would be recording against state that no longer exists.
+     * Reference-identity check, not a token lookup. Only the exact object this scope issued passes;
+     * a copy carrying the same token does not.
      */
-    internal fun recordOutcome(
-        peerIdentityKey: String,
-        sourceKey: String,
-        outcome: PairingAttemptOutcome,
-    ) {
-        if (closed.get()) return
-        limiter.recordOutcome(peerIdentityKey, sourceKey, outcome)
+    internal fun isLiveGrant(handle: AdmissionHandle): Boolean =
+        !closed.get() && liveGrants[handle.token()] === handle
+
+    /** Called only by a handle that has already passed [isLiveGrant]. */
+    internal fun applyOutcome(handle: AdmissionHandle, outcome: PairingAttemptOutcome): AdmissionReceipt {
+        if (closed.get()) return AdmissionReceipt.ScopeClosed
+        val key = liveKeys[handle.token()] ?: return AdmissionReceipt.NotAdmitted
+        limiter.recordOutcome(key.first, key.second, outcome)
+        return AdmissionReceipt.Recorded
+    }
+
+    /**
+     * Retires the grant and returns the permit. Not gated on [closed]: an in-flight coordinator
+     * releases in a `finally`, and that release must remain reachable after the scope closes.
+     */
+    internal fun retireGrant(handle: AdmissionHandle): AdmissionReceipt {
+        liveGrants.remove(handle.token())
+        liveKeys.remove(handle.token())
+        if (closed.get()) return AdmissionReceipt.Released
+        limiter.releaseConcurrency()
+        return AdmissionReceipt.Released
     }
 
     internal fun invalidateIdentity(peerIdentityKey: String) {
         if (closed.get()) return
         limiter.invalidateIdentity(peerIdentityKey)
-    }
-
-    /**
-     * Deliberately not gated on [closed]. An in-flight coordinator releases its permit in a
-     * `finally`, and that release must remain reachable after the scope closes; the limiter's own
-     * floor of zero makes the post-reset call a harmless no-op.
-     */
-    internal fun releaseConcurrency() {
-        limiter.releaseConcurrency()
     }
 
     internal fun concurrentPairings(): Int = limiter.concurrentPairings()
@@ -478,6 +620,10 @@ internal class PairingAdmissionScope(
      */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        // Retiring the grants first means a handle that races in during teardown is refused
+        // rather than mutating counters that are about to be dropped.
+        liveGrants.clear()
+        liveKeys.clear()
         limiter.releaseAllConcurrency()
         limiter.reset()
     }

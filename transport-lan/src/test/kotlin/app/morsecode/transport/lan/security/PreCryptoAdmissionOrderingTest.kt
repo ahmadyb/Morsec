@@ -71,6 +71,90 @@ public class PreCryptoAdmissionOrderingTest {
         fun cryptoTouches(): Int = inputStreamCalls.get() + outputStreamCalls.get()
     }
 
+    /**
+     * Thrown by [CountingCryptoFactory] once it has recorded the operations it was asked for. It
+     * stops the run before any real cryptographic work, which is the point: this suite measures
+     * *whether the coordinator asked*, not whether Conscrypt can run here.
+     */
+    private class CryptoProbeStop : RuntimeException("crypto probe reached")
+
+    /**
+     * Counts the five cryptographic operations directly.
+     *
+     * This exists because socket-stream counters cannot carry the claim on their own. Ephemeral key
+     * generation, certificate construction and TLS context creation are CPU, entropy and allocation
+     * work that never reads a socket, so a zero stream count does not by itself prove they did not
+     * run. These counters do. The socket counters are kept alongside as additional evidence, not as
+     * a substitute.
+     *
+     * Only operations 1 and 2 are reachable on the JVM: 1 returns a real key pair from the platform
+     * provider, and 2 counts and then stops the probe, because building a real ephemeral certificate
+     * and a real Conscrypt TLS context is exactly what cannot happen here. The remaining ordering is
+     * carried by the static, mutation-tested verifier in `secure-authority-surface.mjs`.
+     */
+    private class CountingCryptoFactory : PairingCryptoFactory {
+        val ephemeralKeyGenerations = AtomicInteger(0)
+        val certificateConstructions = AtomicInteger(0)
+        val tlsContextCreations = AtomicInteger(0)
+        val handshakeStarts = AtomicInteger(0)
+        val helloEncodings = AtomicInteger(0)
+
+        /** Concurrent pairings the scope reported at the instant of the first crypto call. */
+        @Volatile
+        var concurrencyAtFirstCryptoCall: Int = -1
+        var scope: PairingAdmissionScope? = null
+
+        override val securityProvider: java.security.Provider =
+            java.security.KeyPairGenerator.getInstance("EC").provider
+
+        private fun note(counter: AtomicInteger) {
+            counter.incrementAndGet()
+            if (concurrencyAtFirstCryptoCall == -1) {
+                concurrencyAtFirstCryptoCall = scope?.concurrentPairings() ?: -1
+            }
+        }
+
+        override fun generateEphemeralKeyPair(): java.security.KeyPair {
+            note(ephemeralKeyGenerations)
+            val generator = java.security.KeyPairGenerator.getInstance("EC")
+            generator.initialize(java.security.spec.ECGenParameterSpec("secp256r1"))
+            return generator.generateKeyPair()
+        }
+
+        override fun constructEphemeralCertificate(
+            keyPair: java.security.KeyPair,
+        ): java.security.cert.X509Certificate {
+            note(certificateConstructions)
+            throw CryptoProbeStop()
+        }
+
+        override fun createTlsContext(
+            keyPair: java.security.KeyPair,
+            certificate: java.security.cert.X509Certificate,
+        ): javax.net.ssl.SSLContext {
+            note(tlsContextCreations)
+            throw CryptoProbeStop()
+        }
+
+        override fun startHandshake(sslSocket: javax.net.ssl.SSLSocket) {
+            note(handshakeStarts)
+            throw CryptoProbeStop()
+        }
+
+        override fun encodePairingHello(
+            offer: app.morsecode.core.transfer.session.PairingOfferV2,
+        ): ByteArray {
+            note(helloEncodings)
+            throw CryptoProbeStop()
+        }
+
+        fun totalCryptoCalls(): Int = ephemeralKeyGenerations.get() +
+            certificateConstructions.get() +
+            tlsContextCreations.get() +
+            handshakeStarts.get() +
+            helloEncodings.get()
+    }
+
     private class FixedClock : MonotonicClock {
         override fun nowMillis(): Long = 100L
     }
@@ -136,6 +220,7 @@ public class PreCryptoAdmissionOrderingTest {
     ) {
         val socket = CountingSocket()
         val interaction = SpyInteraction()
+        val crypto = CountingCryptoFactory().also { it.scope = scope }
         try {
             val result = SecureLanPairingCoordinator(
                 rawSocket = socket,
@@ -145,12 +230,59 @@ public class PreCryptoAdmissionOrderingTest {
                 random = SecureRandom(),
                 interaction = interaction,
                 attemptLimiter = scope,
+                cryptoFactory = crypto,
             ).run()
             assertEquals("$label: expected $expected", expected, codeOf(result))
-            assertEquals("$label: no stream was ever acquired, so no crypto ran", 0, socket.cryptoTouches())
+            // Direct evidence: none of the five cryptographic operations was invoked at all.
+            assertEquals("$label: zero ephemeral key generations", 0, crypto.ephemeralKeyGenerations.get())
+            assertEquals("$label: zero certificate constructions", 0, crypto.certificateConstructions.get())
+            assertEquals("$label: zero TLS context creations", 0, crypto.tlsContextCreations.get())
+            assertEquals("$label: zero handshake starts", 0, crypto.handshakeStarts.get())
+            assertEquals("$label: zero MPS2 hello encodings", 0, crypto.helloEncodings.get())
+            assertEquals("$label: zero cryptographic operations in total", 0, crypto.totalCryptoCalls())
+            // Additional, not substitute: no socket stream was acquired either.
+            assertEquals("$label: no stream was ever acquired", 0, socket.cryptoTouches())
             assertEquals("$label: no approval was published", 0, interaction.approvalsPublished.get())
         } finally {
             runCatching { socket.close() }
+        }
+    }
+
+    @Test
+    public fun `a granted attempt performs cryptographic work only after admission is granted`() {
+        // The converse of every refusal case above: admission is not merely "before", it is the
+        // gate. The first cryptographic operation must observe a permit already held.
+        val scope = PairingAdmissionScope(monotonicMillis = { 0L }, limits = permissive())
+        val socket = CountingSocket()
+        val interaction = SpyInteraction()
+        val crypto = CountingCryptoFactory().also { it.scope = scope }
+        try {
+            SecureLanPairingCoordinator(
+                rawSocket = socket,
+                controlSession = session(),
+                role = SecurePeerRole.INITIATOR,
+                clock = FixedClock(),
+                random = SecureRandom(),
+                interaction = interaction,
+                attemptLimiter = scope,
+                cryptoFactory = crypto,
+            ).run()
+            assertEquals("exactly one ephemeral key generation", 1, crypto.ephemeralKeyGenerations.get())
+            assertEquals("exactly one certificate construction", 1, crypto.certificateConstructions.get())
+            assertTrue("cryptographic work must have been requested", crypto.totalCryptoCalls() > 0)
+            assertEquals(
+                "the first cryptographic operation must run while a permit is already held",
+                1,
+                crypto.concurrencyAtFirstCryptoCall,
+            )
+            assertEquals(
+                "the attempt must have released its permit exactly once",
+                0,
+                scope.concurrentPairings(),
+            )
+        } finally {
+            runCatching { socket.close() }
+            scope.close()
         }
     }
 
@@ -212,10 +344,11 @@ public class PreCryptoAdmissionOrderingTest {
             // silent no-op. That is safe in production, where recordOutcome is only ever reached
             // from an admitted attempt's finally, but it means the counter has to exist first.
             val admission = scope.tryStart(IDENTITY, SOURCE)
-            assertTrue("the seeding attempt must be admitted", admission is PairingAdmission.Granted)
+            assertTrue("the seeding attempt must be admitted", admission is AdmissionDecision.Granted)
+            val seeded = (admission as AdmissionDecision.Granted).handle
             // A user rejection applies a cooldown without failure escalation.
-            scope.recordOutcome(IDENTITY, SOURCE, PairingAttemptOutcome.USER_REJECTION)
-            scope.releaseConcurrency()
+            assertEquals(AdmissionReceipt.Recorded, seeded.recordOutcome(PairingAttemptOutcome.USER_REJECTION))
+            assertEquals(AdmissionReceipt.Released, seeded.release())
             clock.set(1)
             refuseWithoutCrypto("cooldown active", scope, SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
         } finally {

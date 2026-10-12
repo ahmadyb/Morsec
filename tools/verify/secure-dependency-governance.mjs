@@ -103,7 +103,7 @@ if (resolvedArgumentIndex >= 0) {
 
 check('production TLS 1.3/exporter/AES-GCM operations select Conscrypt explicitly',
   engine.includes('Conscrypt.newProvider()') &&
-  engine.includes('SSLContext.getInstance(SecurePairingTranscript.TLS_1_3, provider)') &&
+  engine.includes('SSLContext.getInstance(SecurePairingTranscript.TLS_1_3, securityProvider)') &&
   engine.includes('Conscrypt.exportKeyingMaterial') &&
   engine.includes('Cipher.getInstance("AES/GCM/NoPadding", provider)'));
 

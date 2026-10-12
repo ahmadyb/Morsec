@@ -33,30 +33,48 @@ public class PairingAdmissionScopeTest {
         maxConcurrentPairings = 1_000,
     )
 
-    private fun granted(admission: PairingAdmission): Boolean = admission is PairingAdmission.Granted
+    /**
+     * Handles issued by [start], in issue order. The scope no longer exposes a string-keyed
+     * outcome or release path, so a test has to hold the handle the scope actually gave it --
+     * which is precisely the property under test.
+     */
+    private val issued = ArrayDeque<AdmissionHandle>()
 
-    private fun reason(admission: PairingAdmission): PairingAdmission.RefusalReason? =
-        (admission as? PairingAdmission.Refused)?.reason
+    private fun PairingAdmissionScope.start(identity: String, source: String): AdmissionDecision =
+        tryStart(identity, source).also {
+            if (it is AdmissionDecision.Granted) issued.addLast(it.handle)
+        }
+
+    /** The most recently issued handle, without retiring it. */
+    private fun peekLast(): AdmissionHandle? = issued.lastOrNull()
+
+    /** Stands in for the removed scope-level release: returns the most recently issued permit. */
+    private fun releaseLast(): AdmissionReceipt? = issued.removeLastOrNull()?.release()
+
+    private fun granted(admission: AdmissionDecision): Boolean = admission is AdmissionDecision.Granted
+
+    private fun reason(admission: AdmissionDecision): PairingAdmission.RefusalReason? =
+        (admission as? AdmissionDecision.Refused)?.reason
 
     @Test
     public fun `a fresh scope admits and a closed scope refuses`() {
         val clock = StepClock()
         val scope = PairingAdmissionScope(clock::read)
         assertFalse(scope.isClosed)
-        assertTrue(granted(scope.tryStart("peer-a", "src-a")))
-        scope.releaseConcurrency()
+        assertTrue(granted(scope.start("peer-a", "src-a")))
+        releaseLast()
 
         scope.close()
 
         assertTrue(scope.isClosed)
         assertEquals(
             PairingAdmission.RefusalReason.SCOPE_CLOSED,
-            reason(scope.tryStart("peer-a", "src-a")),
+            reason(scope.start("peer-a", "src-a")),
         )
         assertEquals(
             "a closed scope refuses every identity, not just ones it already knew",
             PairingAdmission.RefusalReason.SCOPE_CLOSED,
-            reason(scope.tryStart("peer-never-seen", "src-never-seen")),
+            reason(scope.start("peer-never-seen", "src-never-seen")),
         )
     }
 
@@ -67,16 +85,19 @@ public class PairingAdmissionScopeTest {
         // One identity, three mismatches: that is what reaches the failure budget. Three distinct
         // identities once each would leave every counter at one and invalidate nothing.
         repeat(3) {
-            assertTrue(granted(scope.tryStart("peer-esc", "src-esc")))
-            scope.recordOutcome("peer-esc", "src-esc", PairingAttemptOutcome.TRANSCRIPT_MISMATCH)
-            scope.releaseConcurrency()
+            assertTrue(granted(scope.start("peer-esc", "src-esc")))
+            assertEquals(
+                AdmissionReceipt.Recorded,
+                peekLast()?.recordOutcome(PairingAttemptOutcome.TRANSCRIPT_MISMATCH),
+            )
+            releaseLast()
             clock.advance(120_000)
         }
         assertTrue(scope.isIdentityInvalidated("peer-esc"))
 
         // Two permits left deliberately outstanding, so close has something real to release.
-        assertTrue(granted(scope.tryStart("peer-open-1", "src-open-1")))
-        assertTrue(granted(scope.tryStart("peer-open-2", "src-open-2")))
+        assertTrue(granted(scope.start("peer-open-1", "src-open-1")))
+        assertTrue(granted(scope.start("peer-open-2", "src-open-2")))
         assertEquals(2, scope.concurrentPairings())
 
         scope.close()
@@ -92,8 +113,8 @@ public class PairingAdmissionScopeTest {
     public fun `concurrent and repeated close release exactly once`() {
         val clock = StepClock()
         val scope = PairingAdmissionScope(clock::read, permissive())
-        assertTrue(granted(scope.tryStart("peer-race", "src-race")))
-        assertTrue(granted(scope.tryStart("peer-race2", "src-race2")))
+        assertTrue(granted(scope.start("peer-race", "src-race")))
+        assertTrue(granted(scope.start("peer-race2", "src-race2")))
         assertEquals(2, scope.concurrentPairings())
 
         // Four threads race to close, started from a barrier so they cannot serialise by accident.
@@ -135,8 +156,10 @@ public class PairingAdmissionScopeTest {
         val clock = StepClock()
         val scope = PairingAdmissionScope(clock::read, permissive())
         scope.close()
-        // Neither call may resurrect state on a scope whose counters are already gone.
-        scope.recordOutcome("peer-x", "src-x", PairingAttemptOutcome.TRANSCRIPT_MISMATCH)
+        // Admission is refused outright, so no handle is issued and an outcome cannot even be
+        // expressed -- the string-keyed path that used to allow it is gone from the scope.
+        assertEquals(PairingAdmission.RefusalReason.SCOPE_CLOSED, reason(scope.start("peer-x", "src-x")))
+        assertTrue("a closed scope must issue no handle", issued.isEmpty())
         scope.invalidateIdentity("peer-x")
         assertFalse(scope.isIdentityInvalidated("peer-x"))
         assertEquals(0, scope.concurrentPairings())
@@ -146,12 +169,12 @@ public class PairingAdmissionScopeTest {
     public fun `concurrency release stays reachable after close`() {
         val clock = StepClock()
         val scope = PairingAdmissionScope(clock::read, permissive())
-        assertTrue(granted(scope.tryStart("peer-inflight", "src-inflight")))
+        assertTrue(granted(scope.start("peer-inflight", "src-inflight")))
         scope.close()
         // An in-flight coordinator releases in a finally, after the lease stopped. That path must
         // remain reachable and must not drive the count negative.
-        scope.releaseConcurrency()
-        scope.releaseConcurrency()
+        releaseLast()
+        releaseLast()
         assertEquals(0, scope.concurrentPairings())
     }
 
@@ -160,9 +183,12 @@ public class PairingAdmissionScopeTest {
         val clock = StepClock()
         val first = PairingAdmissionScope(clock::read, permissive())
         repeat(3) {
-            assertTrue(granted(first.tryStart("peer-fresh", "src-fresh")))
-            first.recordOutcome("peer-fresh", "src-fresh", PairingAttemptOutcome.TRANSCRIPT_MISMATCH)
-            first.releaseConcurrency()
+            assertTrue(granted(first.start("peer-fresh", "src-fresh")))
+            assertEquals(
+                AdmissionReceipt.Recorded,
+                peekLast()?.recordOutcome(PairingAttemptOutcome.TRANSCRIPT_MISMATCH),
+            )
+            releaseLast()
             clock.advance(120_000)
         }
         assertTrue(first.isIdentityInvalidated("peer-fresh"))
@@ -172,7 +198,7 @@ public class PairingAdmissionScopeTest {
         assertTrue(
             "a restarted lease gets a fresh scope -- a process-local policy reset, not proof of a " +
                 "fresh peer, because discovery advertisements are unauthenticated",
-            granted(second.tryStart("peer-fresh", "src-fresh")),
+            granted(second.start("peer-fresh", "src-fresh")),
         )
         second.close()
         assertEquals(0, second.concurrentPairings())
@@ -186,9 +212,9 @@ public class PairingAdmissionScopeTest {
         val scope = PairingAdmissionScope(clock::read)
         var refusals = 0
         repeat(500) { index ->
-            when (scope.tryStart("forged-$index", "forged-src-$index")) {
-                is PairingAdmission.Granted -> scope.releaseConcurrency()
-                is PairingAdmission.Refused -> refusals += 1
+            when (val admission = scope.start("forged-$index", "forged-src-$index")) {
+                is AdmissionDecision.Granted -> assertEquals(AdmissionReceipt.Released, admission.handle.release())
+                is AdmissionDecision.Refused -> refusals += 1
             }
             clock.advance(1)
         }
@@ -208,7 +234,8 @@ public class PairingAdmissionScopeTest {
         // the permit must be accounted for exactly once -- never twice, never negatively.
         repeat(100) { iteration ->
             val scope = PairingAdmissionScope(clock::read, permissive())
-            assertTrue(granted(scope.tryStart("peer-$iteration", "src-$iteration")))
+            val inflight = requireNotNull((scope.start("peer-$iteration", "src-$iteration") as? AdmissionDecision.Granted)?.handle)
+            issued.clear()
             assertEquals(1, scope.concurrentPairings())
 
             val start = CyclicBarrier(2)
@@ -226,7 +253,7 @@ public class PairingAdmissionScopeTest {
             val releaser = Thread {
                 try {
                     start.await(5, TimeUnit.SECONDS)
-                    scope.releaseConcurrency()
+                    inflight.release()
                 } catch (_: Exception) {
                     // Same: the assertions below are the real check.
                 } finally {
@@ -254,10 +281,13 @@ public class PairingAdmissionScopeTest {
     public fun `a late pairing completion cannot drive the permit count negative`() {
         val clock = StepClock()
         val scope = PairingAdmissionScope(clock::read, permissive())
-        assertTrue(granted(scope.tryStart("peer-late", "src-late")))
+        val late = requireNotNull((scope.start("peer-late", "src-late") as? AdmissionDecision.Granted)?.handle)
+        issued.clear()
         scope.close()
-        // The pairing's finally runs after lease stop, and again if some path is re-entered.
-        repeat(5) { scope.releaseConcurrency() }
+        // The pairing's finally runs after lease stop, and again if some path is re-entered. The
+        // first release is a harmless no-op against the reset limiter; the rest are typed refusals.
+        assertEquals(AdmissionReceipt.Released, late.release())
+        repeat(4) { assertEquals(AdmissionReceipt.AlreadyReleased, late.release()) }
         assertEquals(0, scope.concurrentPairings())
         assertTrue(scope.isClosed)
     }
@@ -287,12 +317,12 @@ public class PairingAdmissionScopeTest {
                 try {
                     start.await(5, TimeUnit.SECONDS)
                     repeat(60) { round ->
-                        if (granted(scope.tryStart("peer-$worker-$round", "src-$worker-$round"))) {
+                        if (granted(scope.start("peer-$worker-$round", "src-$worker-$round"))) {
                             val observed = scope.concurrentPairings()
                             if (observed < 0 || observed > capacity) {
                                 violation.compareAndSet(null, "observed $observed outside 0..$capacity")
                             }
-                            scope.releaseConcurrency()
+                            releaseLast()
                         }
                     }
                     if (worker == 0) churnDone.countDown()

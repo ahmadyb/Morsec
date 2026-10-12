@@ -389,15 +389,15 @@ check(
   const pairingCoordinator = existsSync(pairingCoordinatorPath) ? read(pairingCoordinatorPath) : '';
   check(
     'a closed scope refuses new attempts rather than admitting from dead state',
-    /internal fun tryStart\(peerIdentityKey: String, sourceKey: String\): PairingAdmission \{\s*if \(closed\.get\(\)\) \{\s*return PairingAdmission\.Refused\(PairingAdmission\.RefusalReason\.SCOPE_CLOSED, 0L\)/.test(limiter),
+    /internal fun tryStart\(peerIdentityKey: String, sourceKey: String\): AdmissionDecision \{\s*if \(closed\.get\(\)\) \{\s*return AdmissionDecision\.Refused\(PairingAdmission\.RefusalReason\.SCOPE_CLOSED, 0L\)/.test(limiter),
   );
   check(
     'scope close is idempotent and releases exactly once',
-    /override fun close\(\) \{\s*if \(!closed\.compareAndSet\(false, true\)\) return\s*limiter\.releaseAllConcurrency\(\)\s*limiter\.reset\(\)/.test(limiter),
+    /override fun close\(\) \{\s*if \(!closed\.compareAndSet\(false, true\)\) return[\s\S]{0,300}?liveGrants\.clear\(\)\s*liveKeys\.clear\(\)\s*limiter\.releaseAllConcurrency\(\)\s*limiter\.reset\(\)/.test(limiter),
   );
   check(
     'concurrency release stays reachable after close so an in-flight finally can settle',
-    /internal fun releaseConcurrency\(\) \{\s*limiter\.releaseConcurrency\(\)/.test(limiter),
+    /internal fun retireGrant\(handle: AdmissionHandle\): AdmissionReceipt \{\s*liveGrants\.remove\(handle\.token\(\)\)\s*liveKeys\.remove\(handle\.token\(\)\)\s*if \(closed\.get\(\)\) return AdmissionReceipt\.Released\s*limiter\.releaseConcurrency\(\)/.test(limiter),
   );
   check(
     'the coordinator receives the scope, not a bare limiter',
@@ -406,9 +406,9 @@ check(
 
   check(
     'the coordinator reports a classified outcome rather than an undifferentiated failure',
-    /limiter\?\.recordOutcome\(/.test(pairingCoordinator) &&
-      !/limiter\?\.recordFailure\(/.test(pairingCoordinator) &&
-      !/limiter\?\.recordSuccess\(/.test(pairingCoordinator),
+    /granted\.recordOutcome\(/.test(pairingCoordinator) &&
+      !/recordFailure\(/.test(pairingCoordinator) &&
+      !/recordSuccess\(/.test(pairingCoordinator),
   );
   check(
     'every failure path funnels through the classifier',
@@ -417,7 +417,7 @@ check(
   );
   check(
     'an authenticated result is the only outcome recorded as a success',
-    /outcome = if \(authenticated\) PairingAttemptOutcome\.AUTHENTICATED else attemptOutcome/.test(pairingCoordinator),
+    /granted\.recordOutcome\(\s*if \(authenticated\) PairingAttemptOutcome\.AUTHENTICATED else attemptOutcome/.test(pairingCoordinator),
   );
 }
 
@@ -435,10 +435,19 @@ function verifyProductionWireVersion() {
     'security', 'SecureLanPairingCoordinator.kt',
   );
   const coordinator = existsSync(coordinatorPath) ? read(coordinatorPath) : '';
+  const enginePath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'ConscryptSecureSessionEngine.kt',
+  );
+  const engine = existsSync(enginePath) ? read(enginePath) : '';
 
   check(
-    'the production coordinator encodes its hello with the V2 codec',
-    /SecurePairingHelloV2Codec\.encodeFrame\(/.test(coordinator),
+    'the production coordinator encodes its hello through the crypto factory',
+    /cryptoFactory\.encodePairingHello\(/.test(coordinator),
+  );
+  check(
+    'the real crypto factory encodes that hello with the V2 codec, never V1',
+    /override fun encodePairingHello\(offer: PairingOfferV2\): ByteArray =\s*SecurePairingHelloV2Codec\.encodeFrame\(offer\)/.test(engine),
   );
   check(
     'the production coordinator decodes the peer hello with the V2 codec',
@@ -655,6 +664,206 @@ function verifyPairingOwnershipAfterLeaseStop() {
 }
 
 verifyPairingOwnershipAfterLeaseStop();
+
+/**
+ * Applies a textual mutation and asserts that `predicate` flips from true to false.
+ *
+ * A static ordering check that still passes when the ordering it names is broken is worse than no
+ * check at all, so every ordering claim below is paired with the edit that would violate it.
+ */
+function mutation(name, source, mutate, predicate) {
+  const before = predicate(source);
+  const mutated = mutate(source);
+  const changed = mutated !== source;
+  const after = predicate(mutated);
+  check(name, before && changed && !after);
+}
+
+/**
+ * Group 16 -- cryptographic work must follow admission, and be directly countable.
+ *
+ * Socket-stream counters cannot carry this claim on their own: ephemeral key generation,
+ * certificate construction and TLS context creation are CPU, entropy and allocation work that never
+ * touches a socket. So the ordering is asserted against the crypto factory itself, in source, and
+ * each assertion is mutation-tested against the edit that would move the work before admission.
+ */
+function verifyCryptoWorkFollowsAdmission() {
+  const dir = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan', 'security',
+  );
+  const coordinator = read(join(dir, 'SecureLanPairingCoordinator.kt'));
+  const engine = read(join(dir, 'ConscryptSecureSessionEngine.kt'));
+
+  // The five operations, in the order a granted attempt performs them.
+  const operations = [
+    'generateEphemeralKeyPair',
+    'constructEphemeralCertificate',
+    'createTlsContext',
+    'startHandshake',
+    'encodePairingHello',
+  ];
+  for (const operation of operations) {
+    check(`the crypto factory exposes ${operation} as its own operation`,
+      new RegExp(`fun ${operation}\\(`).test(engine));
+  }
+
+  check(
+    'production selects the real Conscrypt factory by default, not an injected one',
+    /private val cryptoFactory: PairingCryptoFactory = ConscryptPairingCryptoFactory\(random\)/.test(coordinator) &&
+      /private val cryptoFactory: PairingCryptoFactory = ConscryptPairingCryptoFactory\(random\)/.test(engine),
+  );
+  check(
+    'the real factory is the only implementation main sources name',
+    (coordinator.match(/PairingCryptoFactory/g) || []).length >= 1 &&
+      !/object .*: PairingCryptoFactory/.test(coordinator) &&
+      /internal class ConscryptPairingCryptoFactory\(/.test(engine),
+  );
+
+  // Ordering: in the coordinator, admission is decided before any crypto factory use.
+  const admissionAt = coordinator.indexOf('limiter.tryStart(peerIdentityKey, sourceKey)');
+  const engineCallAt = coordinator.indexOf('ConscryptSecureSessionEngine(random, cryptoFactory)');
+  const helloCallAt = coordinator.indexOf('cryptoFactory.encodePairingHello(offer)');
+  check(
+    'admission is decided before the coordinator reaches any cryptographic operation',
+    admissionAt > 0 && engineCallAt > admissionAt && helloCallAt > engineCallAt,
+  );
+  mutation(
+    'moving the TLS engine construction before the admission decision fails this check',
+    coordinator,
+    (src) => src.replace(
+      'val limiter = attemptLimiter',
+      'ConscryptSecureSessionEngine(random, cryptoFactory)\n        val limiter = attemptLimiter',
+    ),
+    (src) => {
+      const a = src.indexOf('limiter.tryStart(peerIdentityKey, sourceKey)');
+      const e = src.indexOf('ConscryptSecureSessionEngine(random, cryptoFactory)');
+      return a > 0 && e > a;
+    },
+  );
+  mutation(
+    'moving MPS2 hello encoding before the admission decision fails this check',
+    coordinator,
+    (src) => src.replace(
+      'var handle: AdmissionHandle? = null',
+      'cryptoFactory.encodePairingHello(requireNotNull(localOffer))\n        var handle: AdmissionHandle? = null',
+    ),
+    (src) => {
+      const a = src.indexOf('limiter.tryStart(peerIdentityKey, sourceKey)');
+      const h = src.indexOf('cryptoFactory.encodePairingHello(');
+      return a > 0 && h > a;
+    },
+  );
+
+  // Ordering inside the engine: key generation, certificate, context, handshake -- in that order,
+  // and the first three before any socket stream is touched.
+  const body = engine.slice(engine.indexOf('fun establish('));
+  const at = (needle) => body.indexOf(needle);
+  const keyAt = at('cryptoFactory.generateEphemeralKeyPair()');
+  const certAt = at('cryptoFactory.constructEphemeralCertificate(');
+  const ctxAt = at('cryptoFactory.createTlsContext(');
+  const hsAt = at('cryptoFactory.startHandshake(');
+  const socketFactoryAt = at('context.socketFactory.createSocket(');
+  const streamAt = Math.min(
+    ...['inputStream', 'outputStream', 'peerCertificates'].map((n) => (at(n) < 0 ? Infinity : at(n))),
+  );
+  check(
+    'the engine performs key generation, certificate construction and TLS context creation in that order',
+    keyAt > 0 && keyAt < certAt && certAt < ctxAt,
+  );
+  check(
+    'the first three cryptographic operations happen before any socket stream is read',
+    ctxAt < socketFactoryAt && socketFactoryAt < streamAt,
+  );
+  check(
+    'the handshake starts only after the TLS context exists',
+    ctxAt < hsAt,
+  );
+  mutation(
+    'constructing the certificate before generating its key pair fails this check',
+    engine,
+    (src) => src.replace(
+      'val keyPair = cryptoFactory.generateEphemeralKeyPair()\n        val certificate = cryptoFactory.constructEphemeralCertificate(keyPair)',
+      'val certificate = cryptoFactory.constructEphemeralCertificate(cryptoFactory.generateEphemeralKeyPair())\n        val keyPair = cryptoFactory.generateEphemeralKeyPair()',
+    ),
+    (src) => {
+      const b = src.slice(src.indexOf('fun establish('));
+      const k = b.indexOf('val keyPair = cryptoFactory.generateEphemeralKeyPair()');
+      const c = b.indexOf('val certificate = cryptoFactory.constructEphemeralCertificate(keyPair)');
+      return k > 0 && k < c;
+    },
+  );
+  check(
+    'a refusal path performs no cryptographic operation at all',
+    /is AdmissionDecision\.Refused -> \{[\s\S]{0,700}?closeSocket\(rawSocket\)\s*return failed\(SessionFailureCode\.SECURE_SESSION_LIMIT_REACHED\)/.test(coordinator) &&
+      !/is AdmissionDecision\.Refused -> \{[\s\S]{0,700}?cryptoFactory\./.test(coordinator) &&
+      !/is AdmissionDecision\.Refused -> \{[\s\S]{0,700}?ConscryptSecureSessionEngine/.test(coordinator),
+  );
+}
+
+/**
+ * Group 17 -- an admission outcome must be unreachable without a granted handle.
+ *
+ * `recordOutcome` used to take two arbitrary strings, so any module caller could charge a budget it
+ * had never been admitted against, and an untracked key silently recorded nothing. Both failure
+ * modes are now unrepresentable: the lease-facing surface has no string-keyed outcome or release at
+ * all, and a handle is honoured only when its scope's live-grant table maps its token to that exact
+ * object.
+ */
+function verifyAdmissionHandleIsTheOnlyOutcomeRoute() {
+  const dir = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan', 'security',
+  );
+  const limiter = read(join(dir, 'SecurePairingAttemptLimiter.kt'));
+  const coordinator = read(join(dir, 'SecureLanPairingCoordinator.kt'));
+
+  const scopeBody = limiter.slice(limiter.indexOf('internal class PairingAdmissionScope('));
+  check(
+    'the lease-facing scope exposes no string-keyed outcome path',
+    !/internal fun recordOutcome\(\s*peerIdentityKey: String/.test(scopeBody),
+  );
+  check(
+    'the lease-facing scope exposes no handle-less concurrency release',
+    !/internal fun releaseConcurrency\(\)/.test(scopeBody),
+  );
+  check(
+    'a handle is honoured only by reference identity, not by its token alone',
+    /internal fun isLiveGrant\(handle: AdmissionHandle\): Boolean =\s*!closed\.get\(\) && liveGrants\[handle\.token\(\)\] === handle/.test(limiter),
+  );
+  check(
+    'an outcome cannot be applied to a handle the scope does not recognise',
+    /val key = liveKeys\[handle\.token\(\)\] \?: return AdmissionReceipt\.NotAdmitted/.test(limiter),
+  );
+  check(
+    'a handle records at most one terminal outcome',
+    /if \(!outcomeRecorded\.compareAndSet\(false, true\)\) return AdmissionReceipt\.OutcomeAlreadyRecorded/.test(limiter),
+  );
+  check(
+    'a handle returns its permit at most once',
+    /if \(!permitReturned\.compareAndSet\(false, true\)\) return AdmissionReceipt\.AlreadyReleased/.test(limiter),
+  );
+  check(
+    'a closed scope cannot be mutated through a handle',
+    /if \(owner\.isClosed\) return AdmissionReceipt\.ScopeClosed/.test(limiter) &&
+      /internal fun applyOutcome\(handle: AdmissionHandle, outcome: PairingAttemptOutcome\): AdmissionReceipt \{\s*if \(closed\.get\(\)\) return AdmissionReceipt\.ScopeClosed/.test(limiter),
+  );
+  check(
+    'no public constructor can forge a handle',
+    /internal class AdmissionHandle internal constructor\(/.test(limiter) &&
+      !/class AdmissionHandle\(/.test(limiter),
+  );
+  check(
+    'the coordinator reaches the limiter only through the handle it was granted',
+    /var handle: AdmissionHandle\? = null/.test(coordinator) &&
+      /granted\.recordOutcome\(/.test(coordinator) &&
+      /granted\.release\(\)/.test(coordinator) &&
+      !/limiter\?\.recordOutcome\(/.test(coordinator) &&
+      !/limiter\?\.releaseConcurrency\(/.test(coordinator),
+  );
+}
+
+verifyCryptoWorkFollowsAdmission();
+
+verifyAdmissionHandleIsTheOnlyOutcomeRoute();
 
 verifyControlRecordTypesShareOnePath();
 

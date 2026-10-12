@@ -1,5 +1,7 @@
 package app.morsecode.transport.lan.security
 
+import app.morsecode.core.transfer.session.PairingOfferV2
+import app.morsecode.core.transfer.session.SecurePairingHelloV2Codec
 import app.morsecode.core.transfer.session.SecurePairingTranscript
 import app.morsecode.core.transfer.session.SecureRecordAead
 import app.morsecode.core.transfer.session.SecureSessionLimits
@@ -38,17 +40,22 @@ import javax.net.ssl.X509KeyManager
 import javax.net.ssl.X509TrustManager
 
 /** A per-pairing, explicitly selected Conscrypt provider. Never installed globally. */
-internal class ConscryptSecureSessionEngine(private val random: SecureRandom) {
-    private val provider: Provider = Conscrypt.newProvider()
+internal class ConscryptSecureSessionEngine(
+    private val random: SecureRandom,
+    /**
+     * Production passes nothing and therefore gets [ConscryptPairingCryptoFactory]. The parameter
+     * exists so a test can count the five cryptographic operations directly instead of inferring
+     * their absence from socket activity.
+     */
+    private val cryptoFactory: PairingCryptoFactory = ConscryptPairingCryptoFactory(random),
+) {
+    private val provider: Provider = cryptoFactory.securityProvider
 
     fun establish(rawSocket: Socket, initiator: Boolean): EstablishedTlsSession {
-        val identity = EphemeralTlsIdentity.create(provider, random)
-        val context = SSLContext.getInstance(SecurePairingTranscript.TLS_1_3, provider)
-        context.init(
-            arrayOf<KeyManager>(SingleIdentityKeyManager(identity)),
-            arrayOf<TrustManager>(EphemeralSelfSignedTrustManager(provider)),
-            random,
-        )
+        val keyPair = cryptoFactory.generateEphemeralKeyPair()
+        val certificate = cryptoFactory.constructEphemeralCertificate(keyPair)
+        val context = cryptoFactory.createTlsContext(keyPair, certificate)
+        val identity = EphemeralTlsIdentity(keyPair, certificate)
         val host = rawSocket.inetAddress?.hostAddress ?: throw SecureSessionCryptoException()
         val sslSocket = context.socketFactory.createSocket(rawSocket, host, rawSocket.port, true) as? SSLSocket
             ?: throw SecureSessionCryptoException()
@@ -58,7 +65,7 @@ internal class ConscryptSecureSessionEngine(private val random: SecureRandom) {
             sslSocket.enableSessionCreation = true
             Conscrypt.setUseSessionTickets(sslSocket, false)
             if (!initiator) sslSocket.needClientAuth = true
-            sslSocket.startHandshake()
+            cryptoFactory.startHandshake(sslSocket)
             if (!Conscrypt.isConscrypt(sslSocket) ||
                 sslSocket.session.protocol != SecurePairingTranscript.TLS_1_3 ||
                 sslSocket.session.cipherSuite !in SecurePairingTranscript.TLS_1_3_CIPHER_SUITES
@@ -95,6 +102,106 @@ internal class ConscryptSecureSessionEngine(private val random: SecureRandom) {
 
     private fun fingerprint(certificate: X509Certificate): ByteArray =
         MessageDigest.getInstance("SHA-256", provider).digest(certificate.encoded)
+}
+
+/**
+ * Certificate construction, lifted out of [EphemeralTlsIdentity.create] so that it is an
+ * individually observable operation rather than something buried inside a TLS helper.
+ *
+ * The bytes are unchanged: same subject, same 20-byte random serial with the top bit cleared and
+ * the zero-serial guard, same validity window, same critical basicConstraints/keyUsage extensions,
+ * same SHA256withECDSA self-signature, same post-construction signature verification. Only the call
+ * boundary moved.
+ */
+private fun buildEphemeralCertificate(
+    pair: KeyPair,
+    provider: Provider,
+    random: SecureRandom,
+): X509Certificate {
+%s
+    return certificate
+}
+
+/**
+ * The one boundary through which a pairing attempt performs cryptographic work.
+ *
+ * WHY THIS EXISTS. Ordering tests used to infer "no cryptography ran" from the absence of socket
+ * stream acquisitions. That inference is unsound: ephemeral key generation, certificate
+ * construction and TLS context creation are pure CPU, entropy and allocation work that never
+ * touches a socket. A limiter refusal therefore needs to be shown to precede those operations by
+ * counting the operations themselves. This interface is that counter's hook.
+ *
+ * WHAT IT IS NOT. It is not a pluggable cryptography SPI. Production constructs exactly one
+ * implementation, [ConscryptPairingCryptoFactory], as a constructor default, and that
+ * implementation is the only one that can produce a usable [EstablishedTlsSession] -- it is the
+ * code path that calls `Conscrypt.newProvider()` and the code path that throws on any socket for
+ * which `Conscrypt.isConscrypt` is false. A test implementation can observe and count, and can
+ * return objects that fail later; it cannot substitute a weaker TLS stack into production, because
+ * nothing in `main` ever names any other implementation.
+ *
+ * The five operations, in the order a granted attempt performs them:
+ *  1. [generateEphemeralKeyPair]      -- ephemeral key generation
+ *  2. [constructEphemeralCertificate] -- certificate construction
+ *  3. [createTlsContext]              -- TLS engine / session creation
+ *  4. [startHandshake]                -- TLS handshake start
+ *  5. [encodePairingHello]            -- MPS2 hello construction and canonical encoding
+ */
+internal interface PairingCryptoFactory {
+    /** The provider every operation in this factory is bound to. One instance per pairing. */
+    val securityProvider: Provider
+
+    /** 1. Ephemeral key generation. No socket I/O. */
+    fun generateEphemeralKeyPair(): KeyPair
+
+    /** 2. Self-signed ephemeral certificate construction. No socket I/O. */
+    fun constructEphemeralCertificate(keyPair: KeyPair): X509Certificate
+
+    /** 3. TLS engine creation, bound to that ephemeral identity. No socket I/O. */
+    fun createTlsContext(keyPair: KeyPair, certificate: X509Certificate): SSLContext
+
+    /** 4. TLS handshake start. This is the first operation that necessarily performs socket I/O. */
+    fun startHandshake(sslSocket: SSLSocket)
+
+    /** 5. MPS2 hello construction and canonical encoding. */
+    fun encodePairingHello(offer: PairingOfferV2): ByteArray
+}
+
+/**
+ * The production implementation, and the only one `main` sources reference.
+ *
+ * The Conscrypt requirement is enforced here exactly as before: the provider is created per
+ * factory, i.e. per pairing attempt, and is never installed globally.
+ */
+internal class ConscryptPairingCryptoFactory(
+    private val random: SecureRandom,
+) : PairingCryptoFactory {
+    override val securityProvider: Provider = Conscrypt.newProvider()
+
+    override fun generateEphemeralKeyPair(): KeyPair {
+        val generator = KeyPairGenerator.getInstance("EC", securityProvider)
+        generator.initialize(ECGenParameterSpec("secp256r1"), random)
+        return generator.generateKeyPair()
+    }
+
+    override fun constructEphemeralCertificate(keyPair: KeyPair): X509Certificate =
+        buildEphemeralCertificate(keyPair, securityProvider, random)
+
+    override fun createTlsContext(keyPair: KeyPair, certificate: X509Certificate): SSLContext {
+        val context = SSLContext.getInstance(SecurePairingTranscript.TLS_1_3, securityProvider)
+        context.init(
+            arrayOf<KeyManager>(SingleIdentityKeyManager(EphemeralTlsIdentity(keyPair, certificate))),
+            arrayOf<TrustManager>(EphemeralSelfSignedTrustManager(securityProvider)),
+            random,
+        )
+        return context
+    }
+
+    override fun startHandshake(sslSocket: SSLSocket) {
+        sslSocket.startHandshake()
+    }
+
+    override fun encodePairingHello(offer: PairingOfferV2): ByteArray =
+        SecurePairingHelloV2Codec.encodeFrame(offer)
 }
 
 /** TLS metadata and exporter primitive. No exporter material is retained in the result. */
@@ -152,48 +259,6 @@ private data class EphemeralTlsIdentity(
     val keyPair: KeyPair,
     val certificate: X509Certificate,
 ) {
-    companion object {
-        fun create(provider: Provider, random: SecureRandom): EphemeralTlsIdentity {
-            val generator = KeyPairGenerator.getInstance("EC", provider)
-            generator.initialize(ECGenParameterSpec("secp256r1"), random)
-            val pair = generator.generateKeyPair()
-            val now = System.currentTimeMillis()
-            val notBefore = Date((now - CERTIFICATE_CLOCK_SKEW_MILLIS).coerceAtLeast(0L))
-            val notAfter = Date(if (now > Long.MAX_VALUE - CERTIFICATE_VALIDITY_MILLIS) {
-                Long.MAX_VALUE
-            } else {
-                now + CERTIFICATE_VALIDITY_MILLIS
-            })
-            val serialBytes = ByteArray(20)
-            val serial = try {
-                random.nextBytes(serialBytes)
-                serialBytes[0] = (serialBytes[0].toInt() and 0x7F).toByte()
-                BigInteger(1, serialBytes).let { if (it.signum() == 0) BigInteger.ONE else it }
-            } finally {
-                serialBytes.fill(0)
-            }
-
-            val name = X500Name("CN=Morsec Ephemeral LAN Session")
-            val builder = JcaX509v3CertificateBuilder(
-                name,
-                serial,
-                notBefore,
-                notAfter,
-                name,
-                pair.public,
-            )
-                .addExtension(Extension.basicConstraints, true, BasicConstraints(false))
-                .addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature))
-            val signer = JcaContentSignerBuilder("SHA256withECDSA")
-                .setProvider(provider)
-                .build(pair.private)
-            val certificate = JcaX509CertificateConverter()
-                .getCertificate(builder.build(signer))
-            certificate.checkValidity()
-            verifyCertificateSignature(certificate, pair.public, provider)
-            return EphemeralTlsIdentity(pair, certificate)
-        }
-    }
 }
 
 private class SingleIdentityKeyManager(identity: EphemeralTlsIdentity) : X509KeyManager {

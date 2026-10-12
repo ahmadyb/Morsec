@@ -80,6 +80,16 @@ internal class SecureLanPairingCoordinator(
     private val attemptLimiter: PairingAdmissionScope? = null,
     private val peerIdentityKey: String = controlSession.remoteProfile.peerInstanceId.value,
     private val sourceKey: String = UNKNOWN_SOURCE,
+    /**
+     * The boundary through which this coordinator reaches cryptographic work.
+     *
+     * Production omits the argument and gets the real Conscrypt-backed factory. The parameter
+     * exists so an ordering test can count ephemeral key generation, certificate construction, TLS
+     * engine creation, handshake start and MPS2 encoding directly, and prove that a limiter
+     * refusal performs none of them. Socket-stream counters alone cannot prove that, because three
+     * of those five operations never touch a socket.
+     */
+    private val cryptoFactory: PairingCryptoFactory = ConscryptPairingCryptoFactory(random),
 ) {
     @Volatile
     private var tls: EstablishedTlsSession? = null
@@ -97,11 +107,14 @@ internal class SecureLanPairingCoordinator(
             return failed(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         }
         val limiter = attemptLimiter
-        var admitted = false
+        // The only route to the limiter's outcome policy for this attempt. There is no
+        // string-keyed alternative on the lease-facing surface, so an outcome cannot be charged
+        // to an identity this attempt was never granted for.
+        var handle: AdmissionHandle? = null
         if (limiter != null) {
             when (val admission = limiter.tryStart(peerIdentityKey, sourceKey)) {
-                is PairingAdmission.Granted -> admitted = true
-                is PairingAdmission.Refused -> {
+                is AdmissionDecision.Granted -> handle = admission.handle
+                is AdmissionDecision.Refused -> {
                     // An exhausted start budget means this discovery identity is spent: it must be
                     // rediscovered rather than retried. Concurrency and cooldown refusals are not
                     // the peer's fault, so they do not invalidate it.
@@ -133,7 +146,7 @@ internal class SecureLanPairingCoordinator(
                 socket = rawSocket,
                 budgetMillis = SecureSessionLimits.TLS_HANDSHAKE_DEADLINE_MILLIS,
             ) {
-                ConscryptSecureSessionEngine(random).establish(
+                ConscryptSecureSessionEngine(random, cryptoFactory).establish(
                     rawSocket,
                     initiator = role == SecurePeerRole.INITIATOR,
                 )
@@ -322,16 +335,15 @@ internal class SecureLanPairingCoordinator(
         } catch (_: Exception) {
             return failedFromMachine(machine, SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         } finally {
-            if (admitted) {
+            val granted = handle
+            if (granted != null) {
                 // One outcome, one policy. A local cancellation or local provider failure must not
                 // be charged to the peer, and a genuine transcript mismatch must not be hidden
                 // among them -- which is exactly what the undifferentiated recordFailure did.
-                limiter?.recordOutcome(
-                    peerIdentityKey = peerIdentityKey,
-                    sourceKey = sourceKey,
-                    outcome = if (authenticated) PairingAttemptOutcome.AUTHENTICATED else attemptOutcome,
+                granted.recordOutcome(
+                    if (authenticated) PairingAttemptOutcome.AUTHENTICATED else attemptOutcome,
                 )
-                limiter?.releaseConcurrency()
+                granted.release()
             }
             localOffer?.clearSensitive()
             remoteOffer?.clearSensitive()
@@ -483,7 +495,7 @@ internal class SecureLanPairingCoordinator(
     }
 
     private fun writeOffer(output: DataOutputStream, offer: PairingOfferV2) {
-        val frame = SecurePairingHelloV2Codec.encodeFrame(offer)
+        val frame = cryptoFactory.encodePairingHello(offer)
         try {
             output.write(frame)
             output.flush()
