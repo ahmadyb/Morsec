@@ -187,6 +187,9 @@ public class AdmissionHandleTest {
                 1, list.count { it != AdmissionReceipt.AlreadyCompleted })
             assertEquals("exactly one late contender is refused as a duplicate",
                 7, list.count { it == AdmissionReceipt.AlreadyCompleted })
+            // The winner either applied the outcome or found the scope gone. Both are correct;
+            // what must never happen is the outcome being silently dropped by a *duplicate*
+            // refusal, which the count above already rules out.
             assertTrue("the winner either applied or found the scope closed",
                 list.contains(AdmissionReceipt.Completed) || list.contains(AdmissionReceipt.ScopeClosed))
             assertTrue(handle.isCompleted)

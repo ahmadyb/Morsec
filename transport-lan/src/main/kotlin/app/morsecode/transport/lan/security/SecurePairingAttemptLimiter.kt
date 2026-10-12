@@ -593,7 +593,14 @@ internal class PairingAdmissionScope(
      */
     internal fun applyOutcome(handle: AdmissionHandle, outcome: PairingAttemptOutcome): AdmissionReceipt {
         if (closed.get()) return AdmissionReceipt.ScopeClosed
-        if (!isLiveGrant(handle)) return AdmissionReceipt.NotAdmitted
+        if (!isLiveGrant(handle)) {
+            // close() sets the flag and then clears the grant table, so a concurrent teardown can
+            // win between this method's closed check and its liveness check. That is still "the
+            // scope went away", and reporting it as an unrecognised handle would make the receipt
+            // depend on which of two equivalent checks happened to catch it. The permit is returned
+            // either way, so nothing leaks -- but the caller deserves a stable answer.
+            return if (closed.get()) AdmissionReceipt.ScopeClosed else AdmissionReceipt.NotAdmitted
+        }
         val key = liveKeys[handle.token()] ?: return AdmissionReceipt.NotAdmitted
         limiter.recordOutcome(key.first, key.second, outcome)
         return AdmissionReceipt.Completed
