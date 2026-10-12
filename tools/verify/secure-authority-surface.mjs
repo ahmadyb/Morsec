@@ -800,7 +800,7 @@ function verifyEstablishmentCapacityAndObserver() {
   // The seam itself.
   check(
     'production selects the shared inert observer by default',
-    /private val establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver\.Inert,/.test(provider) &&
+    /internal var establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver\.Inert/.test(provider) &&
       /val Inert: ControlEstablishmentObserver = object : ControlEstablishmentObserver \{ \}/.test(observer),
   );
   mutation(
@@ -808,9 +808,10 @@ function verifyEstablishmentCapacityAndObserver() {
     provider,
     (src) => src.replace(
       'ControlEstablishmentObserver = ControlEstablishmentObserver.Inert,',
-      'ControlEstablishmentObserver = CountingEstablishmentObserver(),',
+      'ControlEstablishmentObserver = ControlEstablishmentObserver.Inert',
+      'ControlEstablishmentObserver = CountingEstablishmentObserver()',
     ),
-    (src) => /establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver\.Inert,/.test(src),
+    (src) => /establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver\.Inert/.test(src),
   );
   check(
     'every observer call is wrapped so a defect cannot leak a permit or skip teardown',
@@ -823,6 +824,11 @@ function verifyEstablishmentCapacityAndObserver() {
     !/Executor|Semaphore|BlockingQueue|Socket|Timer|Thread/.test(
       observer.replace(/executor|queue|socket|permit and no\s*\n?\s*\* timer/gi, ''),
     ) || !/(Executor|Semaphore|BlockingQueue|Timer)\s*[<(]/.test(observer),
+  );
+  check(
+    'the seam never appears in the public constructor signature',
+    !/public class LanPeerDiscoveryProvider\([\s\S]{0,600}?ControlEstablishmentObserver/.test(provider) &&
+      /internal var establishmentObserver: ControlEstablishmentObserver/.test(provider),
   );
   check(
     'the observer is internal, so it cannot become a public application API',

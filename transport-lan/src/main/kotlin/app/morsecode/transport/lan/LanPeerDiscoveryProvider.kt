@@ -174,13 +174,22 @@ public class LanPeerDiscoveryProvider(
     context: Context,
     private val clock: MonotonicClock = MonotonicClock { SystemClock.elapsedRealtime() },
     private val peerInstanceIdFactory: () -> PeerInstanceId = ::generatePeerInstanceId,
-    /**
-     * Read-only observation of control-establishment capacity. Production passes nothing and gets
-     * the shared inert instance, so the default path allocates nothing and observes nothing.
-     */
-    private val establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver.Inert,
 ) : PeerDiscoveryProvider {
     private val appContext: Context = context.applicationContext
+
+    /**
+     * Read-only observation of control-establishment capacity.
+     *
+     * Deliberately an internal property rather than a constructor parameter. This class is `public`,
+     * and Kotlin rejects a public signature that exposes an `internal` type -- correctly, because a
+     * constructor parameter would put the seam on the application's public API surface, which is the
+     * one thing this seam must not become. As an internal property it stays reachable from this
+     * module's tests and invisible to every caller outside it.
+     *
+     * Production never assigns it, so the value is the shared inert instance and the default path
+     * allocates nothing and observes nothing.
+     */
+    internal var establishmentObserver: ControlEstablishmentObserver = ControlEstablishmentObserver.Inert
     private var activeLease: LanDiscoveryLease? = null
 
 
