@@ -807,7 +807,6 @@ function verifyEstablishmentCapacityAndObserver() {
     'selecting a counting observer in production fails this check',
     provider,
     (src) => src.replace(
-      'ControlEstablishmentObserver = ControlEstablishmentObserver.Inert,',
       'ControlEstablishmentObserver = ControlEstablishmentObserver.Inert',
       'ControlEstablishmentObserver = CountingEstablishmentObserver()',
     ),
