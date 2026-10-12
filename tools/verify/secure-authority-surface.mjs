@@ -1072,11 +1072,11 @@ function verifyAdmissionHandleIsTheOnlyOutcomeRoute() {
   );
   check(
     'an outcome cannot be applied to a handle the scope does not recognise',
-    /val key = liveKeys\[handle\.token\(\)\] \?: return AdmissionReceipt\.NotAdmitted/.test(limiter),
+    /if \(!isLiveGrant\(handle\)\) \{[\s\S]{0,700}?return if \(closed\.get\(\)\) AdmissionReceipt\.ScopeClosed else AdmissionReceipt\.NotAdmitted\s*\}\s*val key = liveKeys\[handle\.token\(\)\] \?: return AdmissionReceipt\.NotAdmitted/.test(limiter),
   );
   check(
     'the outcome path re-verifies reference identity, because tokens collide across scopes',
-    /internal fun applyOutcome[\s\S]{0,600}?if \(!isLiveGrant\(handle\)\) return AdmissionReceipt\.NotAdmitted/.test(limiter),
+    /internal fun applyOutcome[\s\S]{0,900}?if \(!isLiveGrant\(handle\)\) \{/.test(limiter),
   );
   check(
     'a teardown that loses the liveness race is reported as scope closure, not as a forged handle',
