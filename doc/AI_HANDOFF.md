@@ -1663,8 +1663,8 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Latest verified code SHA | `62fc7bc084b12c041808275a736fa585993ae1a8` |
-| Latest verified code CI | Run 38265627917 — https://github.com/ahmadyb/Morsec/actions/runs/38265627917 — `success`, zero failing steps, 2884 tests / 0 failed / 0 skipped in 177 reports; lint 0 errors; API 23 step green; `app-debug.apk` 32.25 MiB and androidTest 1.10 MiB |
+| Latest verified code SHA | `6e9c72374a5ed96e2dfa97381a78a075be2a17a0` |
+| Latest verified code CI | Run 38291262887 — https://github.com/ahmadyb/Morsec/actions/runs/38291262887 — `success`, zero failing steps, 2908 tests / 0 failed / 0 skipped in 179 reports; lint 0 errors; API 23 step green including the new deadline instrumentation; `app-debug.apk` 32.25 MiB and androidTest 1.10 MiB |
 | Documentation commit SHA | **Deliberately not recorded here.** A document cannot state its own commit SHA without being stale the instant it is committed. Read it from `git log -1 --format=%H -- doc/AI_HANDOFF.md`. |
 
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
@@ -1810,6 +1810,57 @@ store, not as dangling objects, and no bundle or patch of them survives. The wor
 section is a re-implementation, not a recovery. The lesson is recorded deliberately: commits
 that exist only in a sandbox are not saved work, and pushing early costs less than losing the
 only copy.
+
+## A4 correction: the body-timeout misclassification, and why static checks missed it
+
+Run 38278825445 failed five new classification tests with the same message: expected
+`RECEIVE/BODY/<type>`, got `RECEIVE/HEADER/UNKNOWN`. The cause was in the A4 wiring itself.
+`readExact` lets a read deadline escape as `SocketTimeoutException` rather than returning `false`,
+so a body-phase timeout never reached the branch that reports `BODY` with the decoded type. It
+reached the outer catch, which hard-coded `HEADER` and `UNKNOWN`. Every body-phase timeout on every
+control type was being reported as an unknown-type header timeout, so PING, PONG and SESSION_CLOSE
+were still indistinguishable and the header/body distinction the context exists to carry was simply
+wrong.
+
+**Why static verification missed it.** Verifier group 18 checked that the source *contained* a
+`BODY` branch reporting the decoded type, and it did. Nothing in the source said which branch a real
+read deadline actually reaches -- that is a runtime property of `readExact`, not a textual one. Only
+driving the production channel over a real loopback pair, with a peer that stalled mid-tag, exposed
+it. This is the clearest case so far in this codebase of a static ordering guard being satisfied by
+code that did not behave the way the guard described.
+
+The fix tracks phase and decoded type as the read progresses -- `HEADER` with a null type until
+`decodeHeader` succeeds, then `BODY` with the header's type -- and the escaping-timeline catch
+reports what was actually reached. A mutation test now hard-codes `HEADER` back into that catch to
+prove the check fails.
+
+## A4 evidence split: real kernel writes versus controlled receive stalls
+
+Three different kinds of evidence, and they are not interchangeable.
+
+- **Real JVM kernel backpressure** -- `BlockingWriteReleaseTest` blocks a genuine production write on
+  a real kernel socket with a peer that stops reading. This is the OS-level proof that the write
+  deadline closes the owning socket and that a write cannot report success after expiry.
+- **Real API 23 receive deadlines** -- `SecureLanPairingCoordinatorApi23Test` now pairs over a real
+  Conscrypt TLS 1.3 handshake on an API 23 emulator and then drives the production
+  `SecureLanControlChannel` over the authenticated socket. A truncated header gives
+  `RECEIVE/HEADER/UNKNOWN`; a complete PING header followed by a stalled AEAD tag gives
+  `RECEIVE/BODY/PING`. Both assert the socket closes, the channel goes terminal, later operations
+  are refused, and teardown runs once.
+- **Static pins for the send classification** -- `SEND`/`FLUSH` context is pinned by verifier group
+  18 and mutation-tested, but is *not* exercised end to end on the emulator. Control frames are tens
+  of bytes against an emulator socket buffer of tens of kilobytes, so producing a genuine blocked
+  write there would require shrinking buffers until the test measured the shim rather than the
+  channel. Calling that real-world backpressure would be false, so it is not done.
+
+Both API 23 deadline tests use an advancing monotonic clock. The honest-path test's fixed clock would
+leave `deadline - now` constant across every read, so a slow peer would never be ended and a
+deadline test built on it would prove nothing.
+
+## A3 status: still open
+
+Control-establishment capacity recovery is specified and its production owner is documented below,
+but the tests driving the real provider, executor, queue and semaphore are not yet written.
 
 ## A3 naming: this is control-establishment capacity
 
