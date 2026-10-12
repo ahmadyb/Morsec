@@ -208,7 +208,13 @@ internal interface PairingCryptoFactory {
 internal class ConscryptPairingCryptoFactory(
     private val random: SecureRandom,
 ) : PairingCryptoFactory {
-    override val securityProvider: Provider = Conscrypt.newProvider()
+    /**
+     * Lazy on purpose. A coordinator is constructed before admission is even decided, and an eager
+     * initialiser here would load the Conscrypt native library at that point -- cryptographic
+     * provider work ahead of the very gate this design exists to prove. Deferring it to first use
+     * keeps provider creation inside the guarded TLS block, exactly where it was before.
+     */
+    override val securityProvider: Provider by lazy { Conscrypt.newProvider() }
 
     override fun generateEphemeralKeyPair(): KeyPair {
         val generator = KeyPairGenerator.getInstance("EC", securityProvider)

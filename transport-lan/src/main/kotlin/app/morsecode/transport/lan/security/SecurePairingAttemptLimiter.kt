@@ -485,9 +485,14 @@ internal class AdmissionHandle internal constructor(
      * outcome has already been recorded, or when the lease has closed.
      */
     internal fun recordOutcome(outcome: PairingAttemptOutcome): AdmissionReceipt {
+        // The compare-and-set comes first, so that when an outcome and a release genuinely race,
+        // exactly one caller is the outcome's owner rather than the release silently pre-empting
+        // every contender. Losing the liveness check afterwards still consumes the single slot:
+        // one attempt has one outcome, and an outcome that cannot be applied now cannot be applied
+        // later either.
+        if (!outcomeRecorded.compareAndSet(false, true)) return AdmissionReceipt.OutcomeAlreadyRecorded
         if (owner.isClosed) return AdmissionReceipt.ScopeClosed
         if (!owner.isLiveGrant(this)) return AdmissionReceipt.NotAdmitted
-        if (!outcomeRecorded.compareAndSet(false, true)) return AdmissionReceipt.OutcomeAlreadyRecorded
         return owner.applyOutcome(this, outcome)
     }
 

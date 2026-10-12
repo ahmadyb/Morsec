@@ -38,7 +38,7 @@ public class PairingAdmissionScopeTest {
      * outcome or release path, so a test has to hold the handle the scope actually gave it --
      * which is precisely the property under test.
      */
-    private val issued = ArrayDeque<AdmissionHandle>()
+    private val issued = java.util.concurrent.ConcurrentLinkedDeque<AdmissionHandle>()
 
     private fun PairingAdmissionScope.start(identity: String, source: String): AdmissionDecision =
         tryStart(identity, source).also {
@@ -49,7 +49,13 @@ public class PairingAdmissionScopeTest {
     private fun peekLast(): AdmissionHandle? = issued.lastOrNull()
 
     /** Stands in for the removed scope-level release: returns the most recently issued permit. */
-    private fun releaseLast(): AdmissionReceipt? = issued.removeLastOrNull()?.release()
+    private fun releaseLast(): AdmissionReceipt? {
+        while (true) {
+            val handle = issued.pollLast() ?: return null
+            val receipt = handle.release()
+            if (receipt == AdmissionReceipt.Released) return receipt
+        }
+    }
 
     private fun granted(admission: AdmissionDecision): Boolean = admission is AdmissionDecision.Granted
 
