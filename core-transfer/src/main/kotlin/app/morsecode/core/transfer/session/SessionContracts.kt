@@ -243,7 +243,100 @@ public enum class SessionFailureCode(
 }
 
 /** User-safe diagnostic; raw exception messages and packet fields are never retained. */
-public data class SessionFailure(public val code: SessionFailureCode) {
+/** Which control-channel operation hit a deadline or failed. Diagnostic only. */
+public enum class ControlIoOperation {
+    SEND,
+    RECEIVE,
+    CLOSE,
+}
+
+/**
+ * How far a control-channel operation had progressed when it failed.
+ *
+ * HEADER and BODY stay distinct on purpose: a deadline during the fixed-size header means the
+ * channel learned nothing about the record, while a deadline during the body means the record type
+ * and length were already known and authenticated length bounds had already been applied.
+ */
+public enum class ControlIoPhase {
+    /** Sealing the record into a frame, before any byte reaches the socket. */
+    FRAME,
+
+    /** Reading or writing the fixed-size record header. */
+    HEADER,
+
+    /** Reading or writing the ciphertext and authentication tag. */
+    BODY,
+
+    /** Verifying the AEAD tag over a fully received frame. */
+    AUTHENTICATION,
+
+    /** Pushing buffered bytes out; the write reached the socket but did not drain. */
+    FLUSH,
+
+    /** Bounded teardown of the owning socket. */
+    CLOSE,
+}
+
+/**
+ * The record type a control-I/O failure is attributable to.
+ *
+ * Deliberately separate from [SecureRecordType], which is a wire enum: adding an UNKNOWN member to
+ * a wire type would make an unrepresentable-on-the-wire value constructible, and that is a worse
+ * defect than the small duplication here. KEY_CONFIRMATION is not a control record type, so it maps
+ * to [UNKNOWN] in diagnostics rather than gaining an entry of its own.
+ */
+public enum class ControlIoRecordType {
+    PING,
+    PONG,
+    SESSION_CLOSE,
+
+    /**
+     * The deadline fired before a valid header revealed the type, or the type is not a control
+     * record type. This is the honest answer, and it must not be guessed: inventing PING for a
+     * header-phase timeout would attribute a failure to a record that may never have been sent.
+     */
+    UNKNOWN,
+}
+
+/** Maps a wire record type onto the diagnostic vocabulary. Null maps to [ControlIoRecordType.UNKNOWN]. */
+public fun controlIoRecordTypeOf(type: SecureRecordType?): ControlIoRecordType = when (type) {
+    SecureRecordType.PING -> ControlIoRecordType.PING
+    SecureRecordType.PONG -> ControlIoRecordType.PONG
+    SecureRecordType.SESSION_CLOSE -> ControlIoRecordType.SESSION_CLOSE
+    SecureRecordType.KEY_CONFIRMATION, null -> ControlIoRecordType.UNKNOWN
+}
+
+/**
+ * Structured context for a control-channel I/O failure.
+ *
+ * WHAT IT CARRIES, AND WHAT IT MUST NEVER CARRY. Three enumerations and nothing else. No frame
+ * bytes, no keys, no session or peer identifiers, no addresses, no exception messages -- every
+ * field is a closed enum, so the context cannot become a channel for peer-controlled or secret
+ * material no matter what the peer sent. That is why this is a data class of enums rather than a
+ * free-form detail string.
+ *
+ * The high-level [SessionFailureCode] is unchanged and remains the code callers branch on; this is
+ * additional structure for diagnosing *which* operation and *which* phase timed out, which
+ * `CONTROL_TIMEOUT` alone could not distinguish.
+ */
+public data class ControlIoFailureContext(
+    public val operation: ControlIoOperation,
+    public val phase: ControlIoPhase,
+    public val recordType: ControlIoRecordType,
+) {
+    override fun toString(): String =
+        "ControlIoFailureContext(operation=$operation, phase=$phase, recordType=$recordType)"
+}
+
+public data class SessionFailure(
+    public val code: SessionFailureCode,
+    /**
+     * Present only for control-channel I/O failures. Optional so that every unrelated failure and
+     * every existing call site stays source-compatible, and so the absence of context is
+     * meaningful rather than a placeholder.
+     */
+    public val controlIoContext: ControlIoFailureContext? = null,
+) {
     public val detail: String = ErrorDetailRedactor.redact(code.safeDetail)
     public val retryable: Boolean get() = code.retryable
     public val origin: ErrorOrigin get() = code.origin

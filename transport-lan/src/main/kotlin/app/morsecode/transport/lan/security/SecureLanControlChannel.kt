@@ -1,6 +1,11 @@
 package app.morsecode.transport.lan.security
 
+import app.morsecode.core.transfer.session.ControlIoFailureContext
+import app.morsecode.core.transfer.session.ControlIoOperation
+import app.morsecode.core.transfer.session.ControlIoPhase
+import app.morsecode.core.transfer.session.ControlIoRecordType
 import app.morsecode.core.transfer.session.MonotonicClock
+import app.morsecode.core.transfer.session.controlIoRecordTypeOf
 import app.morsecode.core.transfer.session.SecureControlReceiveResult
 import app.morsecode.core.transfer.session.SecureControlSendResult
 import app.morsecode.core.transfer.session.SecureRecordCodec
@@ -22,6 +27,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Bounded, authenticated control-only access to one installed secure record layer.
  * It has no plaintext fallback and deliberately exposes no file/data record type.
+ *
+ * EXECUTION MODEL, STATED PLAINLY BECAUSE IT IS EASY TO GET WRONG. [send] and [receive] are
+ * **blocking** calls that perform real socket I/O under [writeLock] and [readLock] respectively.
+ * They must never be called on the Android main thread. They are bounded by absolute monotonic
+ * deadlines rather than by any inactivity timer, and when a deadline fires the channel closes the
+ * owning socket to unblock itself.
+ *
+ * There is deliberately **no internal worker pool here**, and no detached task is ever created: a
+ * call returns on the caller's own thread or not at all until its deadline closes the socket. The
+ * bounded executor and permit semaphore in `LanPeerDiscoveryProvider` gate *control establishment*
+ * -- connect, accept and pairing -- not established control I/O. Whoever holds an authenticated
+ * channel owns the execution context it runs on, and a future transfer-engine or service
+ * integration must supply that context rather than assume this class provides one.
  */
 internal class SecureLanControlChannel(
     private val socket: Socket,
@@ -32,6 +50,8 @@ internal class SecureLanControlChannel(
     private val onTerminal: () -> Unit,
 ) : AutoCloseable {
     private val closed = AtomicBoolean(false)
+    @Volatile
+    private var closeTimedOut = false
     private val writeLock = Any()
     private val readLock = Any()
     private var lastNowElapsedMillis: Long = -1L
@@ -47,7 +67,14 @@ internal class SecureLanControlChannel(
             recordLayer.protect(type, ownedPayload)
         } catch (_: RuntimeException) {
             return@synchronized SecureControlSendResult.Refused(
-                terminate(SessionFailureCode.SECURE_SESSION_RECORD_INVALID),
+                terminate(
+                    SessionFailureCode.SECURE_SESSION_RECORD_INVALID,
+                    ControlIoFailureContext(
+                        operation = ControlIoOperation.SEND,
+                        phase = ControlIoPhase.FRAME,
+                        recordType = controlIoRecordTypeOf(type),
+                    ),
+                ),
             )
         } finally {
             ownedPayload.fill(0)
@@ -80,16 +107,22 @@ internal class SecureLanControlChannel(
                 flush()
             }
         } catch (_: SocketTimeoutException) {
-            return@synchronized SecureControlSendResult.Refused(terminate(SessionFailureCode.CONTROL_TIMEOUT))
+            return@synchronized SecureControlSendResult.Refused(
+                terminate(
+                    SessionFailureCode.CONTROL_TIMEOUT,
+                    sendTimeoutContext(type),
+                ),
+            )
         } catch (_: IOException) {
             // The deadline unblocks the write by closing the socket, which surfaces as an
             // IOException. Reporting that as a connect failure would misname a timeout.
-            val code = if (writeDeadline.isExpired()) {
-                SessionFailureCode.CONTROL_TIMEOUT
-            } else {
-                SessionFailureCode.CONTROL_CONNECT_FAILED
-            }
-            return@synchronized SecureControlSendResult.Refused(terminate(code))
+            val expired = writeDeadline.isExpired()
+            return@synchronized SecureControlSendResult.Refused(
+                terminate(
+                    if (expired) SessionFailureCode.CONTROL_TIMEOUT else SessionFailureCode.CONTROL_CONNECT_FAILED,
+                    if (expired) sendTimeoutContext(type) else null,
+                ),
+            )
         } catch (_: RuntimeException) {
             return@synchronized SecureControlSendResult.Refused(terminate(SessionFailureCode.CONTROL_CONNECT_FAILED))
         } finally {
@@ -99,7 +132,9 @@ internal class SecureLanControlChannel(
         // A write that appeared to finish at the instant the deadline fired is not a success: the
         // deadline already closed the socket, so the channel is dead either way.
         if (writeDeadline.isExpired()) {
-            return@synchronized SecureControlSendResult.Refused(terminate(SessionFailureCode.CONTROL_TIMEOUT))
+            return@synchronized SecureControlSendResult.Refused(
+                terminate(SessionFailureCode.CONTROL_TIMEOUT, sendTimeoutContext(type)),
+            )
         }
 
         if (type == SecureRecordType.SESSION_CLOSE) terminate(SessionFailureCode.OPERATION_CANCELLED)
@@ -122,7 +157,18 @@ internal class SecureLanControlChannel(
         val headerBytes = ByteArray(SecureRecordCodec.HEADER_SIZE_BYTES)
         val frame = try {
             if (!readExact(input, headerBytes, 0, headerBytes.size, deadline)) {
-                return@synchronized SecureControlReceiveResult.Refused(terminate(SessionFailureCode.CONTROL_TIMEOUT))
+                // Nothing about the record is known yet. UNKNOWN is the honest answer; guessing a
+                // type here would attribute the timeout to a record that may never have been sent.
+                return@synchronized SecureControlReceiveResult.Refused(
+                    terminate(
+                        SessionFailureCode.CONTROL_TIMEOUT,
+                        ControlIoFailureContext(
+                            operation = ControlIoOperation.RECEIVE,
+                            phase = ControlIoPhase.HEADER,
+                            recordType = ControlIoRecordType.UNKNOWN,
+                        ),
+                    ),
+                )
             }
             val expectedDirection = if (role == SecurePeerRole.INITIATOR) {
                 SecureRecordDirection.RESPONDER_TO_INITIATOR
@@ -138,11 +184,30 @@ internal class SecureLanControlChannel(
             headerBytes.copyInto(frameBytes)
             if (!readExact(input, frameBytes, headerBytes.size, frameBytes.size - headerBytes.size, deadline)) {
                 frameBytes.fill(0)
-                return@synchronized SecureControlReceiveResult.Refused(terminate(SessionFailureCode.CONTROL_TIMEOUT))
+                // The header decoded, so the type is known even though the body never arrived.
+                return@synchronized SecureControlReceiveResult.Refused(
+                    terminate(
+                        SessionFailureCode.CONTROL_TIMEOUT,
+                        ControlIoFailureContext(
+                            operation = ControlIoOperation.RECEIVE,
+                            phase = ControlIoPhase.BODY,
+                            recordType = controlIoRecordTypeOf(header.type),
+                        ),
+                    ),
+                )
             }
             frameBytes
         } catch (_: SocketTimeoutException) {
-            return@synchronized SecureControlReceiveResult.Refused(terminate(SessionFailureCode.CONTROL_TIMEOUT))
+            return@synchronized SecureControlReceiveResult.Refused(
+                terminate(
+                    SessionFailureCode.CONTROL_TIMEOUT,
+                    ControlIoFailureContext(
+                        operation = ControlIoOperation.RECEIVE,
+                        phase = ControlIoPhase.HEADER,
+                        recordType = ControlIoRecordType.UNKNOWN,
+                    ),
+                ),
+            )
         } catch (_: EOFException) {
             return@synchronized SecureControlReceiveResult.Refused(terminate(SessionFailureCode.CONTROL_CONNECT_FAILED))
         } catch (_: IOException) {
@@ -219,7 +284,21 @@ internal class SecureLanControlChannel(
         return now
     }
 
-    private fun terminate(code: SessionFailureCode): SessionFailure {
+    /**
+     * A write deadline means the bytes reached the socket but never drained, which is the flush
+     * phase: the frame was already sealed, so FRAME would understate how far the send got.
+     */
+    private fun sendTimeoutContext(type: SecureRecordType): ControlIoFailureContext =
+        ControlIoFailureContext(
+            operation = ControlIoOperation.SEND,
+            phase = ControlIoPhase.FLUSH,
+            recordType = controlIoRecordTypeOf(type),
+        )
+
+    private fun terminate(
+        code: SessionFailureCode,
+        context: ControlIoFailureContext? = null,
+    ): SessionFailure {
         if (closed.compareAndSet(false, true)) {
             recordLayer.close()
             closeSocket()
@@ -229,8 +308,18 @@ internal class SecureLanControlChannel(
                 // Terminal teardown is best-effort and contains no recoverable secret state.
             }
         }
-        return SessionFailure(code)
+        return SessionFailure(code, context)
     }
+
+    /**
+     * True when the bounded teardown deadline fired rather than the close completing.
+     *
+     * Surfaced as state rather than as a [SessionFailure] because [close] is `AutoCloseable.close`
+     * and returns nothing: a teardown deadline is not a failed operation the caller was waiting on,
+     * it is a fact about cleanup. [ControlIoOperation.CLOSE] and [ControlIoPhase.CLOSE] exist in the
+     * model for callers that need to report it.
+     */
+    internal val closeDeadlineExpired: Boolean get() = closeTimedOut
 
     private fun closeSocket() {
         // Bounded for the same reason as the pairing path: close can itself block on a socket
@@ -244,6 +333,7 @@ internal class SecureLanControlChannel(
         deadline.arm()
         try {
             socket.close()
+            closeTimedOut = deadline.isExpired()
         } catch (_: IOException) {
             // Teardown never exposes peer-controlled or platform exception details.
         } catch (_: RuntimeException) {

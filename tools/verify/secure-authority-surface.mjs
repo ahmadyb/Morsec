@@ -543,15 +543,15 @@ function verifyEstablishedSessionDeadlines() {
   );
   check(
     'a write released by deadline expiry is reported as a timeout, not a connect failure',
-    /if \(writeDeadline\.isExpired\(\)\) \{\s*SessionFailureCode\.CONTROL_TIMEOUT/.test(channel),
+    /val expired = writeDeadline\.isExpired\(\)\s*return@synchronized SecureControlSendResult\.Refused\(\s*terminate\(\s*if \(expired\) SessionFailureCode\.CONTROL_TIMEOUT else SessionFailureCode\.CONTROL_CONNECT_FAILED,\s*if \(expired\) sendTimeoutContext\(type\) else null,/.test(channel),
   );
   check(
     'a write that finished at the instant of expiry is not reported as sent',
-    /if \(writeDeadline\.isExpired\(\)\) \{\s*return@synchronized SecureControlSendResult\.Refused\(terminate\(SessionFailureCode\.CONTROL_TIMEOUT\)\)/.test(channel),
+    /if \(writeDeadline\.isExpired\(\)\) \{\s*return@synchronized SecureControlSendResult\.Refused\(\s*terminate\(SessionFailureCode\.CONTROL_TIMEOUT, sendTimeoutContext\(type\)\),/.test(channel),
   );
   check(
     'channel teardown closes the socket under a bounded deadline',
-    /label = "control-bounded-close"[\s\S]{0,220}?BOUNDED_CLOSE_DEADLINE_MILLIS[\s\S]{0,400}?deadline\.complete\(\)/.test(channel),
+    /label = "control-bounded-close"[\s\S]{0,220}?BOUNDED_CLOSE_DEADLINE_MILLIS[\s\S]{0,700}?deadline\.complete\(\)/.test(channel),
   );
   check(
     'control-record reads share one absolute deadline across header and body',
@@ -602,9 +602,110 @@ function verifyControlRecordTypesShareOnePath() {
   );
   check(
     'SESSION_CLOSE terminates the channel only after its own write has been settled',
-    /if \(writeDeadline\.isExpired\(\)\) \{\s*return@synchronized SecureControlSendResult\.Refused\(terminate\(SessionFailureCode\.CONTROL_TIMEOUT\)\)\s*\}\s*if \(type == SecureRecordType\.SESSION_CLOSE\)/.test(channel),
+    /if \(writeDeadline\.isExpired\(\)\) \{\s*return@synchronized SecureControlSendResult\.Refused\(\s*terminate\(SessionFailureCode\.CONTROL_TIMEOUT, sendTimeoutContext\(type\)\),\s*\)\s*\}\s*if \(type == SecureRecordType\.SESSION_CLOSE\)/.test(channel),
   );
 }
+
+/**
+ * Group 18 -- typed control-I/O context, and the establishment-capacity bounds it sits beside.
+ *
+ * `CONTROL_TIMEOUT` alone could not distinguish a PING send deadline from a SESSION_CLOSE receive
+ * deadline, because every timeout funnelled through `terminate(code)` and returned
+ * `SessionFailure(code)` with nothing else. The structured context fixes that without weakening the
+ * high-level code, and these checks pin the two properties that make it safe: the type is UNKNOWN
+ * until a valid header reveals it, and the context can carry no peer-controlled material.
+ */
+function verifyTypedControlIoContext() {
+  const channel = read(join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecureLanControlChannel.kt',
+  ));
+  const contracts = read(join(
+    ROOT, 'core-transfer', 'src', 'main', 'kotlin', 'app', 'morsecode', 'core', 'transfer',
+    'session', 'SessionContracts.kt',
+  ));
+  const provider = read(join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'LanPeerDiscoveryProvider.kt',
+  ));
+
+  check(
+    'the high-level failure code is unchanged and the context is optional',
+    /public val code: SessionFailureCode,\s*\/[\s\S]{0,400}?public val controlIoContext: ControlIoFailureContext\? = null,/.test(contracts),
+  );
+  check(
+    'the context carries three closed enumerations and no free-form detail',
+    /public data class ControlIoFailureContext\(\s*public val operation: ControlIoOperation,\s*public val phase: ControlIoPhase,\s*public val recordType: ControlIoRecordType,\s*\)/.test(contracts) &&
+      // The parameter list itself must stay three enums -- no free-form detail, bytes or identity.
+      !/public data class ControlIoFailureContext\(\s*public val operation: ControlIoOperation,\s*public val phase: ControlIoPhase,\s*public val recordType: ControlIoRecordType,\s*public/.test(contracts),
+  );
+  check(
+    'the diagnostic record type is separate from the wire enum, so UNKNOWN is not wire-representable',
+    /public enum class ControlIoRecordType \{/.test(contracts) &&
+      !/public enum class SecureRecordType\(public val wireId: Int\) \{[\s\S]{0,300}?UNKNOWN/.test(
+        read(join(ROOT, 'core-transfer', 'src', 'main', 'kotlin', 'app', 'morsecode', 'core',
+          'transfer', 'session', 'SecureRecordLayer.kt'))),
+  );
+  check(
+    'a receive timeout before the header reports UNKNOWN rather than guessing a type',
+    /phase = ControlIoPhase\.HEADER,\s*recordType = ControlIoRecordType\.UNKNOWN,/.test(channel),
+  );
+  check(
+    'a receive timeout after a valid header reports the decoded record type',
+    /phase = ControlIoPhase\.BODY,\s*recordType = controlIoRecordTypeOf\(header\.type\),/.test(channel),
+  );
+  check(
+    'a send timeout is attributed to the flush phase and to the type the caller asked for',
+    /private fun sendTimeoutContext\(type: SecureRecordType\): ControlIoFailureContext =\s*ControlIoFailureContext\(\s*operation = ControlIoOperation\.SEND,\s*phase = ControlIoPhase\.FLUSH,\s*recordType = controlIoRecordTypeOf\(type\),/.test(channel),
+  );
+  check(
+    'every control timeout still reports CONTROL_TIMEOUT as its high-level code',
+    (channel.match(/SessionFailureCode\.CONTROL_TIMEOUT/g) || []).length >= 5 &&
+      // Every structured context sits beside a CONTROL_TIMEOUT code, never in place of one.
+      (channel.match(/terminate\(\s*SessionFailureCode\.CONTROL_TIMEOUT/g) || []).length >= 4,
+  );
+  mutation(
+    'attributing a header-phase timeout to PING instead of UNKNOWN fails this check',
+    channel,
+    (src) => src.replaceAll(
+      'recordType = ControlIoRecordType.UNKNOWN,',
+      'recordType = ControlIoRecordType.PING,',
+    ),
+    (src) => /phase = ControlIoPhase\.HEADER,\s*recordType = ControlIoRecordType\.UNKNOWN,/.test(src),
+  );
+
+  // Establishment capacity stays bounded, and no second scheduler appears beside it.
+  check(
+    'control establishment capacity remains four active permits and a four-deep bounded queue',
+    /const val MAX_CONTROL_SESSIONS: Int = 4/.test(provider) &&
+      /const val MAX_PENDING_CONTROL_TASKS: Int = 4/.test(provider) &&
+      /private val controlPermits = Semaphore\(MAX_CONTROL_SESSIONS, true\)/.test(provider) &&
+      /threads = MAX_CONTROL_SESSIONS,\s*queueCapacity = MAX_PENDING_CONTROL_TASKS,/.test(provider),
+  );
+  check(
+    'the establishment executor is bounded and rejects rather than growing',
+    /ArrayBlockingQueue\(queueCapacity\)/.test(provider) &&
+      /ThreadPoolExecutor\.AbortPolicy\(\)/.test(provider),
+  );
+  check(
+    'establishment permit release stays exactly-once at every call site',
+    (provider.match(/compareAndSet\(false, true\)\) releaseControlCapacity\(\)/g) || []).length >= 3,
+  );
+  check(
+    'no internal control-record worker pool exists beside the establishment executor',
+    !/controlRecordExecutor|controlIoExecutor|recordExecutor|operationExecutor/.test(provider) &&
+      !/Executors\s*\.\s*new/.test(provider),
+  );
+  check(
+    'the control channel documents that its I/O is blocking and caller-executed',
+    /\*\*blocking\*\*/.test(channel) &&
+      /must never be called on the Android main thread/.test(channel) &&
+      /no internal worker pool here/.test(channel) &&
+      /no detached task is ever created/.test(channel),
+  );
+}
+
+verifyTypedControlIoContext();
 
 
 /**
