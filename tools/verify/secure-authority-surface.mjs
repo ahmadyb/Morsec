@@ -855,7 +855,7 @@ function verifyAdmissionHandleIsTheOnlyOutcomeRoute() {
   );
   check(
     'a permit is returned even when the outcome could not be applied, so capacity cannot leak',
-    /owner\.isClosed -> AdmissionReceipt\.ScopeClosed\s*!owner\.isLiveGrant\(this\) -> AdmissionReceipt\.NotAdmitted/.test(limiter) &&
+    /owner\.isClosed -> AdmissionReceipt\.ScopeClosed\s*\/\/[\s\S]{0,400}?!owner\.isLiveGrant\(this\) ->\s*if \(owner\.isClosed\) AdmissionReceipt\.ScopeClosed else AdmissionReceipt\.NotAdmitted\s*else -> owner\.applyOutcome\(this, outcome\)/.test(limiter) &&
       /owner\.retireGrant\(this\)/.test(limiter),
   );
   check(
