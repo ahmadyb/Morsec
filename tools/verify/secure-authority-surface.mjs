@@ -655,6 +655,18 @@ function verifyTypedControlIoContext() {
     /phase = ControlIoPhase\.BODY,\s*recordType = controlIoRecordTypeOf\(header\.type\),/.test(channel),
   );
   check(
+    'a read deadline that escapes as an exception still reports the phase it reached',
+    /var readPhase = ControlIoPhase\.HEADER\s*var knownType: SecureRecordType\? = null/.test(channel) &&
+      /readPhase = ControlIoPhase\.BODY\s*knownType = header\.type/.test(channel) &&
+      /catch \(_: SocketTimeoutException\) \{\s*return@synchronized SecureControlReceiveResult\.Refused\(\s*terminate\(\s*SessionFailureCode\.CONTROL_TIMEOUT,\s*ControlIoFailureContext\(\s*operation = ControlIoOperation\.RECEIVE,\s*phase = readPhase,\s*recordType = controlIoRecordTypeOf\(knownType\),/.test(channel),
+  );
+  mutation(
+    'hard-coding HEADER in the escaping-timeline catch fails this check',
+    channel,
+    (src) => src.replace('phase = readPhase,', 'phase = ControlIoPhase.HEADER,'),
+    (src) => /phase = readPhase,\s*recordType = controlIoRecordTypeOf\(knownType\),/.test(src),
+  );
+  check(
     'a send timeout is attributed to the flush phase and to the type the caller asked for',
     /private fun sendTimeoutContext\(type: SecureRecordType\): ControlIoFailureContext =\s*ControlIoFailureContext\(\s*operation = ControlIoOperation\.SEND,\s*phase = ControlIoPhase\.FLUSH,\s*recordType = controlIoRecordTypeOf\(type\),/.test(channel),
   );

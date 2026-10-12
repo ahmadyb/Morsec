@@ -13,7 +13,6 @@ import app.morsecode.core.transfer.session.SecureRecordAead
 import app.morsecode.core.transfer.session.SecureRecordCodec
 import app.morsecode.core.transfer.session.SecureRecordDirection
 import app.morsecode.core.transfer.session.SecureRecordLayer
-import app.morsecode.core.transfer.session.SecureRecordResult
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionLimits
 import app.morsecode.core.transfer.session.SessionFailure
@@ -293,11 +292,18 @@ public class ControlTimeoutClassificationTest {
         val fixture = Fixture()
         try {
             fixture.open()
-            val encoded = fixture.peerLayer.protect(SecureRecordType.PING, ByteArray(0))
-            assertTrue("the peer frame must seal", encoded is SecureRecordResult.Encoded)
-            val frame = (encoded as SecureRecordResult.Encoded).frameBytes()
-            // Corrupt the final byte, which is inside the AEAD tag.
-            frame[frame.size - 1] = (frame[frame.size - 1].toInt() xor 0xFF).toByte()
+            // A complete, correctly sized frame carrying a tag that authenticates nothing. PING
+            // has no payload, so the whole body is the AEAD tag and every byte of it is wrong.
+            // Building it from the codec rather than from a sealed frame keeps the test honest
+            // about what it is exercising: length and framing are valid, authentication is not.
+            val header = SecureRecordCodec.encodeHeader(
+                sessionId = fixture.sessionId,
+                direction = SecureRecordDirection.RESPONDER_TO_INITIATOR,
+                sequenceNumber = 0L,
+                type = SecureRecordType.PING,
+                plaintextLength = 0,
+            )
+            val frame = header + ByteArray(SecureSessionLimits.AEAD_TAG_BYTES) { 0x5A }
             fixture.peer.getOutputStream().apply {
                 write(frame)
                 flush()

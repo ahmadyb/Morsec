@@ -155,6 +155,13 @@ internal class SecureLanControlChannel(
         }
 
         val headerBytes = ByteArray(SecureRecordCodec.HEADER_SIZE_BYTES)
+        // How far the read has got, tracked as it progresses. `readExact` lets a read deadline
+        // escape as SocketTimeoutException rather than returning false, so the catch below has to
+        // be able to say whether the header had already been decoded -- hard-coding HEADER here
+        // reported every body-phase timeout as an unknown-type header timeout, which is the exact
+        // conflation this context exists to remove.
+        var readPhase = ControlIoPhase.HEADER
+        var knownType: SecureRecordType? = null
         val frame = try {
             if (!readExact(input, headerBytes, 0, headerBytes.size, deadline)) {
                 // Nothing about the record is known yet. UNKNOWN is the honest answer; guessing a
@@ -180,6 +187,8 @@ internal class SecureLanControlChannel(
                 expectedSessionId = recordLayer.sessionId,
                 expectedDirection = expectedDirection,
             ) ?: return@synchronized SecureControlReceiveResult.Refused(terminate(SessionFailureCode.SECURE_SESSION_RECORD_INVALID))
+            readPhase = ControlIoPhase.BODY
+            knownType = header.type
             val frameBytes = ByteArray(header.frameLength)
             headerBytes.copyInto(frameBytes)
             if (!readExact(input, frameBytes, headerBytes.size, frameBytes.size - headerBytes.size, deadline)) {
@@ -203,8 +212,8 @@ internal class SecureLanControlChannel(
                     SessionFailureCode.CONTROL_TIMEOUT,
                     ControlIoFailureContext(
                         operation = ControlIoOperation.RECEIVE,
-                        phase = ControlIoPhase.HEADER,
-                        recordType = ControlIoRecordType.UNKNOWN,
+                        phase = readPhase,
+                        recordType = controlIoRecordTypeOf(knownType),
                     ),
                 ),
             )
