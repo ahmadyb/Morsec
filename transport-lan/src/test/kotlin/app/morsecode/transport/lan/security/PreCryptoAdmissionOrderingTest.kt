@@ -267,6 +267,35 @@ public class PreCryptoAdmissionOrderingTest {
     }
 
     @Test
+    public fun `constructing a coordinator performs no cryptographic work at all`() {
+        // The specific regression this guards: a constructor default that eagerly built the real
+        // crypto factory used to load the Conscrypt native library at construction time, i.e.
+        // cryptographic provider work ahead of the admission decision. When a default expression
+        // executes is exactly the kind of ordering callers cannot be trusted to remember, so it is
+        // asserted here rather than argued about.
+        val crypto = CountingCryptoFactory()
+        val socket = CountingSocket()
+        val scope = PairingAdmissionScope(monotonicMillis = { 0L })
+        try {
+            SecureLanPairingCoordinator(
+                rawSocket = socket,
+                controlSession = session(),
+                role = SecurePeerRole.INITIATOR,
+                clock = FixedClock(),
+                random = SecureRandom(),
+                interaction = SpyInteraction(),
+                attemptLimiter = scope,
+                cryptoFactory = crypto,
+            )
+            assertEquals("construction must invoke no crypto-factory method", 0, crypto.totalCryptoCalls())
+            assertEquals("construction must acquire no socket stream", 0, socket.cryptoTouches())
+        } finally {
+            runCatching { socket.close() }
+            scope.close()
+        }
+    }
+
+    @Test
     public fun `a granted attempt performs cryptographic work only after admission is granted`() {
         // The converse of every refusal case above: admission is not merely "before", it is the
         // gate. The first cryptographic operation must observe a permit already held.
@@ -367,8 +396,7 @@ public class PreCryptoAdmissionOrderingTest {
             assertTrue("the seeding attempt must be admitted", admission is AdmissionDecision.Granted)
             val seeded = (admission as AdmissionDecision.Granted).handle
             // A user rejection applies a cooldown without failure escalation.
-            assertEquals(AdmissionReceipt.Recorded, seeded.recordOutcome(PairingAttemptOutcome.USER_REJECTION))
-            assertEquals(AdmissionReceipt.Released, seeded.release())
+            assertEquals(AdmissionReceipt.Completed, seeded.complete(PairingAttemptOutcome.USER_REJECTION))
             clock.set(1)
             refuseWithoutCrypto("cooldown active", scope, SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
         } finally {

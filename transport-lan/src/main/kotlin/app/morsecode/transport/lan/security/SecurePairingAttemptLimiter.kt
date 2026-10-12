@@ -414,99 +414,91 @@ internal class SecurePairingAttemptLimiter(
  * type moves the refusal into the return value, where a caller cannot fail to notice it.
  */
 internal sealed interface AdmissionReceipt {
-    /** The one terminal outcome was applied to the limiter's budget policy. */
-    data object Recorded : AdmissionReceipt
-
-    /** The concurrency permit was returned. */
-    data object Released : AdmissionReceipt
+    /**
+     * The terminal transition was claimed, the outcome was applied to the budget policy, and the
+     * concurrency permit was returned. This is the only fully successful result.
+     */
+    data object Completed : AdmissionReceipt
 
     /**
-     * The scope does not recognise this handle. It was never granted by this scope, it belongs to a
-     * different lease, or it has already been retired. Nothing was mutated.
+     * The owning lease closed, so its counters were already gone and the outcome could not be
+     * applied. The permit was still returned.
+     */
+    data object ScopeClosed : AdmissionReceipt
+
+    /**
+     * The scope no longer recognises this handle. The permit was still returned.
      */
     data object NotAdmitted : AdmissionReceipt
 
-    /** This handle already recorded its single terminal outcome. Nothing was mutated. */
-    data object OutcomeAlreadyRecorded : AdmissionReceipt
-
-    /** This handle already returned its permit. Nothing was mutated. */
-    data object AlreadyReleased : AdmissionReceipt
-
     /**
-     * The owning lease closed, so its counters are already gone. Nothing was mutated, because
-     * writing to a reset scope would be charging a lease that no longer exists.
+     * This handle already completed. Nothing was applied and no second permit was returned.
      */
-    data object ScopeClosed : AdmissionReceipt
+    data object AlreadyCompleted : AdmissionReceipt
 }
 
 /**
- * Opaque proof that one specific attempt was admitted by one specific lease.
+ * Opaque proof that one specific attempt was admitted by one specific lease, and the single
+ * terminal operation that attempt is allowed to perform.
  *
- * WHY THIS EXISTS. Recording an outcome used to take two arbitrary strings -- an identity key and a
- * source key -- so any caller in the module could charge a budget it had never been admitted
- * against, and a typo'd or stale key produced a silent no-op rather than an error. A handle cannot
- * be asked to charge a budget for an identity it was not granted for, because it carries no
- * settable identity at all.
+ * WHY ONE OPERATION AND NOT TWO. An earlier shape split this into `recordOutcome` and `release`.
+ * That split let the two race: a release could retire the grant before the outcome was recorded,
+ * and because the outcome checked liveness first, *every* contender was then refused -- so a real
+ * security failure could be erased by the very cleanup that followed it. Worse, gating the release
+ * on the scope being open leaked a permit whenever a grant was acquired in the window between the
+ * scope's own closed check and `close()`.
  *
- * WHAT MAKES IT UNFORGEABLE, STATED PRECISELY. The constructor is `internal`, not `private`: Kotlin
- * has no file-private constructor, and a `private` one would be unreachable from the scope that has
- * to issue handles. So the invariant does **not** rest on constructor visibility. It rests on
- * reference identity: a scope honours a handle only when its own live-grant table maps that
- * handle's token to *that exact object*. A second object built with the same identity, source and
- * token strings fails the identity comparison and is refused with [AdmissionReceipt.NotAdmitted],
- * and a handle issued by another lease fails the owner comparison. Forging a working handle
- * therefore requires holding the object the scope returned, which is the same thing as having been
- * admitted.
+ * [complete] is therefore the whole lifecycle, and it is atomic under one compare-and-set:
+ *  1. claim the terminal transition -- exactly one caller ever wins;
+ *  2. apply the outcome's counters, cooldown and invalidation, if the scope can still take it;
+ *  3. retire the live grant so the handle can never be honoured again;
+ *  4. return exactly one concurrency permit, unconditionally.
  *
- * One handle records at most one terminal outcome and returns its permit at most once; both are
- * single-shot compare-and-set transitions, so a duplicated or concurrent call is a typed refusal
- * rather than a double charge.
+ * Cancellation is an outcome ([PairingAttemptOutcome.LOCAL_CANCELLATION]), not a separate release,
+ * so there is no second path that can race and erase a security result.
+ *
+ * WHAT MAKES FORGERY FAIL, STATED PRECISELY. The constructor is `internal`, not `private`: Kotlin
+ * has no file-private constructor, and a private one would be unreachable from the scope that has
+ * to issue handles. The invariant therefore does not rest on visibility. It rests on reference
+ * identity -- a scope honours a handle only when its own live-grant table maps that handle's token
+ * to *that exact object* -- so a second object carrying identical identity and source strings is
+ * refused, and a handle issued by another lease is refused.
  */
 internal class AdmissionHandle internal constructor(
     private val owner: PairingAdmissionScope,
     private val token: Long,
 ) {
+    private val terminal = AtomicBoolean(false)
+
     /** Visible to the issuing scope only, so it can key its live-grant table. */
     internal fun token(): Long = token
 
-    private val outcomeRecorded = AtomicBoolean(false)
-    private val permitReturned = AtomicBoolean(false)
+    /** True once the terminal transition has been claimed, whether or not the outcome was applied. */
+    internal val isCompleted: Boolean get() = terminal.get()
 
-    /** True once this handle has applied its one terminal outcome. */
-    internal val hasRecordedOutcome: Boolean get() = outcomeRecorded.get()
-
-    /** True once this handle has returned its concurrency permit. */
-    internal val isReleased: Boolean get() = permitReturned.get()
-
-    /**
-     * Applies this attempt's single terminal outcome to the budget policy.
-     *
-     * Refused, without mutating anything, when the handle is not live in its own scope, when an
-     * outcome has already been recorded, or when the lease has closed.
-     */
-    internal fun recordOutcome(outcome: PairingAttemptOutcome): AdmissionReceipt {
-        // The compare-and-set comes first, so that when an outcome and a release genuinely race,
-        // exactly one caller is the outcome's owner rather than the release silently pre-empting
-        // every contender. Losing the liveness check afterwards still consumes the single slot:
-        // one attempt has one outcome, and an outcome that cannot be applied now cannot be applied
-        // later either.
-        if (!outcomeRecorded.compareAndSet(false, true)) return AdmissionReceipt.OutcomeAlreadyRecorded
-        if (owner.isClosed) return AdmissionReceipt.ScopeClosed
-        if (!owner.isLiveGrant(this)) return AdmissionReceipt.NotAdmitted
-        return owner.applyOutcome(this, outcome)
-    }
+    /** The outcome this handle completed with, or null before completion. */
+    @Volatile
+    internal var terminalOutcome: PairingAttemptOutcome? = null
+        private set
 
     /**
-     * Returns the concurrency permit exactly once.
+     * The one terminal operation. Idempotent: every call after the first returns
+     * [AdmissionReceipt.AlreadyCompleted] without applying anything or returning a second permit.
      *
-     * Deliberately still callable after the lease closes: an in-flight coordinator releases in a
-     * `finally`, and that release must stay reachable. The scope makes the post-close call a no-op,
-     * and the limiter's own floor at zero makes a late release harmless rather than a negative
-     * counter.
+     * The permit is returned even when the outcome could not be applied. A permit that is not
+     * returned is a permanent reduction in pairing capacity, which is a worse failure than a
+     * budget entry that could not be written to a scope that no longer exists.
      */
-    internal fun release(): AdmissionReceipt {
-        if (!permitReturned.compareAndSet(false, true)) return AdmissionReceipt.AlreadyReleased
-        return owner.retireGrant(this)
+    internal fun complete(outcome: PairingAttemptOutcome): AdmissionReceipt {
+        if (!terminal.compareAndSet(false, true)) return AdmissionReceipt.AlreadyCompleted
+        val receipt = when {
+            owner.isClosed -> AdmissionReceipt.ScopeClosed
+            !owner.isLiveGrant(this) -> AdmissionReceipt.NotAdmitted
+            else -> owner.applyOutcome(this, outcome)
+        }
+        terminalOutcome = outcome
+        owner.retireGrant(this)
+        return receipt
     }
 }
 
@@ -591,19 +583,22 @@ internal class PairingAdmissionScope(
         if (closed.get()) return AdmissionReceipt.ScopeClosed
         val key = liveKeys[handle.token()] ?: return AdmissionReceipt.NotAdmitted
         limiter.recordOutcome(key.first, key.second, outcome)
-        return AdmissionReceipt.Recorded
+        return AdmissionReceipt.Completed
     }
 
     /**
-     * Retires the grant and returns the permit. Not gated on [closed]: an in-flight coordinator
-     * releases in a `finally`, and that release must remain reachable after the scope closes.
+     * Retires the grant and returns exactly one permit.
+     *
+     * DELIBERATELY NOT GATED ON [closed]. A grant can be acquired in the window between this
+     * scope's own closed check in [tryStart] and `close()` running; that grant still holds a real
+     * permit, and the limiter's floor at zero makes a post-reset release harmless. Gating this call
+     * on `closed` is what leaked a permit under a concurrent grant/release/close churn -- the count
+     * settled at one instead of zero and never recovered.
      */
-    internal fun retireGrant(handle: AdmissionHandle): AdmissionReceipt {
+    internal fun retireGrant(handle: AdmissionHandle) {
         liveGrants.remove(handle.token())
         liveKeys.remove(handle.token())
-        if (closed.get()) return AdmissionReceipt.Released
         limiter.releaseConcurrency()
-        return AdmissionReceipt.Released
     }
 
     internal fun invalidateIdentity(peerIdentityKey: String) {

@@ -340,10 +340,12 @@ internal class SecureLanPairingCoordinator(
                 // One outcome, one policy. A local cancellation or local provider failure must not
                 // be charged to the peer, and a genuine transcript mismatch must not be hidden
                 // among them -- which is exactly what the undifferentiated recordFailure did.
-                granted.recordOutcome(
+                // One atomic terminal operation: it claims the transition, applies the outcome
+                // and returns the permit. There is no separate release for a concurrent cleanup
+                // path to race against and erase a security result.
+                granted.complete(
                     if (authenticated) PairingAttemptOutcome.AUTHENTICATED else attemptOutcome,
                 )
-                granted.release()
             }
             localOffer?.clearSensitive()
             remoteOffer?.clearSensitive()

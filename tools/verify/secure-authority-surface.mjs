@@ -397,7 +397,7 @@ check(
   );
   check(
     'concurrency release stays reachable after close so an in-flight finally can settle',
-    /internal fun retireGrant\(handle: AdmissionHandle\): AdmissionReceipt \{\s*liveGrants\.remove\(handle\.token\(\)\)\s*liveKeys\.remove\(handle\.token\(\)\)\s*if \(closed\.get\(\)\) return AdmissionReceipt\.Released\s*limiter\.releaseConcurrency\(\)/.test(limiter),
+    /internal fun retireGrant\(handle: AdmissionHandle\) \{\s*liveGrants\.remove\(handle\.token\(\)\)\s*liveKeys\.remove\(handle\.token\(\)\)\s*limiter\.releaseConcurrency\(\)/.test(limiter),
   );
   check(
     'the coordinator receives the scope, not a bare limiter',
@@ -406,7 +406,7 @@ check(
 
   check(
     'the coordinator reports a classified outcome rather than an undifferentiated failure',
-    /granted\.recordOutcome\(/.test(pairingCoordinator) &&
+    /granted\.complete\(/.test(pairingCoordinator) &&
       !/recordFailure\(/.test(pairingCoordinator) &&
       !/recordSuccess\(/.test(pairingCoordinator),
   );
@@ -417,7 +417,7 @@ check(
   );
   check(
     'an authenticated result is the only outcome recorded as a success',
-    /granted\.recordOutcome\(\s*if \(authenticated\) PairingAttemptOutcome\.AUTHENTICATED else attemptOutcome/.test(pairingCoordinator),
+    /granted\.complete\(\s*if \(authenticated\) PairingAttemptOutcome\.AUTHENTICATED else attemptOutcome/.test(pairingCoordinator),
   );
 }
 
@@ -708,6 +708,10 @@ function verifyCryptoWorkFollowsAdmission() {
   }
 
   check(
+    'the real factory creates its provider lazily, so no provider work precedes admission',
+    /override val securityProvider: Provider by lazy \{ Conscrypt\.newProvider\(\) \}/.test(engine),
+  );
+  check(
     'production selects the real Conscrypt factory by default, not an injected one',
     /private val cryptoFactory: PairingCryptoFactory = ConscryptPairingCryptoFactory\(random\)/.test(coordinator) &&
       /private val cryptoFactory: PairingCryptoFactory = ConscryptPairingCryptoFactory\(random\)/.test(engine),
@@ -834,16 +838,31 @@ function verifyAdmissionHandleIsTheOnlyOutcomeRoute() {
     /val key = liveKeys\[handle\.token\(\)\] \?: return AdmissionReceipt\.NotAdmitted/.test(limiter),
   );
   check(
-    'a handle records at most one terminal outcome',
-    /if \(!outcomeRecorded\.compareAndSet\(false, true\)\) return AdmissionReceipt\.OutcomeAlreadyRecorded/.test(limiter),
+    'one terminal operation claims the transition before anything else can',
+    /internal fun complete\(outcome: PairingAttemptOutcome\): AdmissionReceipt \{\s*if \(!terminal\.compareAndSet\(false, true\)\) return AdmissionReceipt\.AlreadyCompleted/.test(limiter),
   );
   check(
-    'a handle returns its permit at most once',
-    /if \(!permitReturned\.compareAndSet\(false, true\)\) return AdmissionReceipt\.AlreadyReleased/.test(limiter),
+    'the terminal operation records the outcome and retires the grant in one step',
+    /else -> owner\.applyOutcome\(this, outcome\)\s*\}\s*terminalOutcome = outcome\s*owner\.retireGrant\(this\)/.test(limiter),
+  );
+  check(
+    'a permit is returned even when the outcome could not be applied, so capacity cannot leak',
+    /owner\.isClosed -> AdmissionReceipt\.ScopeClosed\s*!owner\.isLiveGrant\(this\) -> AdmissionReceipt\.NotAdmitted/.test(limiter) &&
+      /owner\.retireGrant\(this\)/.test(limiter),
+  );
+  check(
+    'permit return is deliberately not gated on close, which is what leaked a permit',
+    /internal fun retireGrant\(handle: AdmissionHandle\) \{\s*liveGrants\.remove\(handle\.token\(\)\)\s*liveKeys\.remove\(handle\.token\(\)\)\s*limiter\.releaseConcurrency\(\)\s*\}/.test(limiter) &&
+      !/internal fun retireGrant\(handle: AdmissionHandle\) \{[^}]*if \(closed\.get\(\)\)/.test(limiter),
+  );
+  check(
+    'cancellation is a terminal outcome, not a separate racing release',
+    !/internal fun release\(\): AdmissionReceipt/.test(limiter) &&
+      !/internal fun recordOutcome\(outcome: PairingAttemptOutcome\)/.test(limiter),
   );
   check(
     'a closed scope cannot be mutated through a handle',
-    /if \(owner\.isClosed\) return AdmissionReceipt\.ScopeClosed/.test(limiter) &&
+    /owner\.isClosed -> AdmissionReceipt\.ScopeClosed/.test(limiter) &&
       /internal fun applyOutcome\(handle: AdmissionHandle, outcome: PairingAttemptOutcome\): AdmissionReceipt \{\s*if \(closed\.get\(\)\) return AdmissionReceipt\.ScopeClosed/.test(limiter),
   );
   check(
@@ -854,8 +873,9 @@ function verifyAdmissionHandleIsTheOnlyOutcomeRoute() {
   check(
     'the coordinator reaches the limiter only through the handle it was granted',
     /var handle: AdmissionHandle\? = null/.test(coordinator) &&
-      /granted\.recordOutcome\(/.test(coordinator) &&
-      /granted\.release\(\)/.test(coordinator) &&
+      /granted\.complete\(/.test(coordinator) &&
+      !/granted\.release\(\)/.test(coordinator) &&
+      !/granted\.recordOutcome\(/.test(coordinator) &&
       !/limiter\?\.recordOutcome\(/.test(coordinator) &&
       !/limiter\?\.releaseConcurrency\(/.test(coordinator),
   );

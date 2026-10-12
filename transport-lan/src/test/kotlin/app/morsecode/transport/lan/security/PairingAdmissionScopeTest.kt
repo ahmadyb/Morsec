@@ -50,10 +50,12 @@ public class PairingAdmissionScopeTest {
 
     /** Stands in for the removed scope-level release: returns the most recently issued permit. */
     private fun releaseLast(): AdmissionReceipt? {
+        // Abandonment is an outcome, not a separate release: LOCAL_CANCELLATION costs the peer
+        // nothing, and because there is only one terminal call it cannot erase a security result.
         while (true) {
             val handle = issued.pollLast() ?: return null
-            val receipt = handle.release()
-            if (receipt == AdmissionReceipt.Released) return receipt
+            val receipt = handle.complete(PairingAttemptOutcome.LOCAL_CANCELLATION)
+            if (receipt != AdmissionReceipt.AlreadyCompleted) return receipt
         }
     }
 
@@ -93,8 +95,8 @@ public class PairingAdmissionScopeTest {
         repeat(3) {
             assertTrue(granted(scope.start("peer-esc", "src-esc")))
             assertEquals(
-                AdmissionReceipt.Recorded,
-                peekLast()?.recordOutcome(PairingAttemptOutcome.TRANSCRIPT_MISMATCH),
+                AdmissionReceipt.Completed,
+                peekLast()?.complete(PairingAttemptOutcome.TRANSCRIPT_MISMATCH),
             )
             releaseLast()
             clock.advance(120_000)
@@ -191,8 +193,8 @@ public class PairingAdmissionScopeTest {
         repeat(3) {
             assertTrue(granted(first.start("peer-fresh", "src-fresh")))
             assertEquals(
-                AdmissionReceipt.Recorded,
-                peekLast()?.recordOutcome(PairingAttemptOutcome.TRANSCRIPT_MISMATCH),
+                AdmissionReceipt.Completed,
+                peekLast()?.complete(PairingAttemptOutcome.TRANSCRIPT_MISMATCH),
             )
             releaseLast()
             clock.advance(120_000)
@@ -219,7 +221,10 @@ public class PairingAdmissionScopeTest {
         var refusals = 0
         repeat(500) { index ->
             when (val admission = scope.start("forged-$index", "forged-src-$index")) {
-                is AdmissionDecision.Granted -> assertEquals(AdmissionReceipt.Released, admission.handle.release())
+                is AdmissionDecision.Granted -> assertEquals(
+                    AdmissionReceipt.Completed,
+                    admission.handle.complete(PairingAttemptOutcome.LOCAL_CANCELLATION),
+                )
                 is AdmissionDecision.Refused -> refusals += 1
             }
             clock.advance(1)
@@ -259,7 +264,7 @@ public class PairingAdmissionScopeTest {
             val releaser = Thread {
                 try {
                     start.await(5, TimeUnit.SECONDS)
-                    inflight.release()
+                    inflight.complete(PairingAttemptOutcome.LOCAL_CANCELLATION)
                 } catch (_: Exception) {
                     // Same: the assertions below are the real check.
                 } finally {
@@ -292,8 +297,10 @@ public class PairingAdmissionScopeTest {
         scope.close()
         // The pairing's finally runs after lease stop, and again if some path is re-entered. The
         // first release is a harmless no-op against the reset limiter; the rest are typed refusals.
-        assertEquals(AdmissionReceipt.Released, late.release())
-        repeat(4) { assertEquals(AdmissionReceipt.AlreadyReleased, late.release()) }
+        assertEquals(AdmissionReceipt.Completed, late.complete(PairingAttemptOutcome.PEER_DISCONNECT))
+        repeat(4) {
+            assertEquals(AdmissionReceipt.AlreadyCompleted, late.complete(PairingAttemptOutcome.PEER_DISCONNECT))
+        }
         assertEquals(0, scope.concurrentPairings())
         assertTrue(scope.isClosed)
     }
