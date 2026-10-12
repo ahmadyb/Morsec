@@ -1663,8 +1663,8 @@ actually verified, and separates it from what was not.
 
 | Claim | Evidence |
 | --- | --- |
-| Latest verified code SHA | `9e0eb902a8e0b4159ad45cdc3ea1f3e124a32908` |
-| Latest verified code CI | Run 38224261555 — https://github.com/ahmadyb/Morsec/actions/runs/38224261555 — `success`, zero failing steps, 2873 tests / 0 failed / 0 skipped in 176 reports; lint 0 errors; API 23 step green; `app-debug.apk` 32.25 MiB and androidTest 1.10 MiB |
+| Latest verified code SHA | `62fc7bc084b12c041808275a736fa585993ae1a8` |
+| Latest verified code CI | Run 38265627917 — https://github.com/ahmadyb/Morsec/actions/runs/38265627917 — `success`, zero failing steps, 2884 tests / 0 failed / 0 skipped in 177 reports; lint 0 errors; API 23 step green; `app-debug.apk` 32.25 MiB and androidTest 1.10 MiB |
 | Documentation commit SHA | **Deliberately not recorded here.** A document cannot state its own commit SHA without being stale the instant it is committed. Read it from `git log -1 --format=%H -- doc/AI_HANDOFF.md`. |
 
 | Baseline the work descends from | `d93dd54158cabe6ed1c74d67f5d38605e53735c1`, confirmed by `git ls-remote` before any edit |
@@ -1810,6 +1810,25 @@ store, not as dangling objects, and no bundle or patch of them survives. The wor
 section is a re-implementation, not a recovery. The lesson is recorded deliberately: commits
 that exist only in a sandbox are not saved work, and pushing early costs less than losing the
 only copy.
+
+## A3 naming: this is control-establishment capacity
+
+The bounded owner described below gates **control establishment** -- connect, accept and pairing. It
+is not a control-operation worker pool and must not be described as one. Established control I/O
+runs synchronously on the caller's own execution context; see the `SecureLanControlChannel` KDoc.
+
+## A4 status: typed control-I/O context is implemented and green
+
+`ControlIoFailureContext(operation, phase, recordType)` over three closed enums now rides on
+`SessionFailure` as an optional second parameter, so the high-level code stays `CONTROL_TIMEOUT` and
+every pre-existing call site stays source compatible. A receive deadline before the header decodes
+reports `HEADER`/`UNKNOWN`; after a valid header it reports `BODY` with the decoded type; a send
+deadline reports `FLUSH` with the type the caller asked for. A bounded-close deadline is surfaced as
+`closeDeadlineExpired` state, because `AutoCloseable.close` returns nothing.
+
+Still open: the six end-to-end PING/PONG/SESSION_CLOSE send and receive timeout classifications are
+pinned statically by verifier group 18 but are not yet exercised at runtime through the production
+channel, and the API 23 deadline instrumentation is not yet written.
 
 ## A3 finding: production has no bounded worker pool for authenticated control-record I/O
 
