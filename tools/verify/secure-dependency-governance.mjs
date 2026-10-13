@@ -41,9 +41,20 @@ check('transport-lan consumes the reviewed crypto dependencies',
   transportBuild.includes('implementation(libs.conscrypt.android)') &&
   transportBuild.includes('implementation(libs.bouncycastle.pkix)'));
 check('transport-lan remains minSdk 23', /minSdk\s*=\s*23/.test(transportBuild));
+// The API 23 step invokes its command as ONE line because this action splits
+// `script` on newlines and runs every line as a separate `sh -c`, aborting at the
+// first non-zero exit. An inline multi-line block therefore never executes as one
+// script: runs 38365708870, 38368188165 and 38370664983 failed that way with all
+// four tests passing. So pin the single-line form here and follow it to the file
+// that actually names the Gradle task, rather than loosening the gate.
+const api23Script = read('ci/run-api23-instrumentation.sh');
 check('API 23 emulator instrumentation is a CI gate',
   workflow.includes('Run bundled Conscrypt TLS 1.3 compatibility test on API 23') &&
-  /api-level:\s*23/.test(workflow) && workflow.includes(':transport-lan:connectedDebugAndroidTest'));
+  /api-level:\s*23/.test(workflow) &&
+  /script:\s*bash ci\/run-api23-instrumentation\.sh\s*$/m.test(workflow) &&
+  api23Script.includes(':transport-lan:connectedDebugAndroidTest') &&
+  api23Script.includes('exit "$status"') &&
+  workflow.includes('Diagnose API 23 instrumentation results'));
 
 const resolvedArgumentIndex = process.argv.indexOf('--resolved');
 if (resolvedArgumentIndex >= 0) {

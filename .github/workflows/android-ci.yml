@@ -415,31 +415,14 @@ jobs:
           profile: Nexus 6
           disable-animations: true
           emulator-boot-timeout: 600
-          # Self-diagnosing. Run 38302267476 failed here with a bare exit code
-          # and no annotation, because this step wrote nothing into ci-logs/ and
-          # run logs and artifacts are unreachable from the working environment.
-          # The console is now captured verbatim, the device state is
-          # snapshotted before and after, and a bounded logcat tail is taken on
-          # failure. errexit is switched off first so a failing snapshot cannot
-          # mask the real status, which is re-raised explicitly at the end.
-          script: |
-            set +e
-            set -u
-            mkdir -p ci-logs
-            adb devices -l > ci-logs/60-api23-device-before.log 2>&1
-            adb shell getprop ro.build.version.sdk > ci-logs/60-api23-api-level.log 2>&1
-            ./gradlew --no-daemon --stacktrace --console=plain :transport-lan:connectedDebugAndroidTest > ci-logs/60-api23-connected.log 2>&1
-            status=$?
-            printf '%s\n' "$status" > ci-logs/60-api23-exit-status.txt
-            echo "connectedDebugAndroidTest exit status: $status"
-            tail -n 150 ci-logs/60-api23-connected.log
-            if [ "$status" -ne 0 ]; then
-              adb devices -l > ci-logs/61-api23-device-after.log 2>&1
-              adb logcat -d -t 400 > ci-logs/61-api23-logcat-tail.logcat 2>&1
-            fi
-            printf 'completed %s\n' "$status" > ci-logs/60-api23-script-completed.txt
-            echo "status=$status" >> "${GITHUB_OUTPUT:-/dev/null}"
-            exit "$status"
+          # ONE LINE, deliberately. This action splits `script` on newlines and
+          # runs every line as a separate `sh -c`, aborting at the first non-zero
+          # exit, so a multi-line block is not a script: `set +e` applies to
+          # nothing, variables do not carry to the next line, and an `if` header
+          # alone is a syntax error that fails the step even after Gradle
+          # succeeds. Runs 38365708870, 38368188165 and 38370664983 failed that
+          # way with 4 of 4 tests passing. The logic lives in the script file.
+          script: bash ci/run-api23-instrumentation.sh
 
       # Reports only. It exits 0 by design: the instrumentation step's own
       # non-zero status is what fails the job, and this step must never convert
