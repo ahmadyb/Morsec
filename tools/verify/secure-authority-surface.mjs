@@ -1136,6 +1136,138 @@ verifyEstablishedSessionDeadlines();
 
 verifyProductionWireVersion();
 
+/**
+ * Group 20 -- the two capacity models stay distinct, and each refusal keeps its own meaning.
+ *
+ * Establishment and post-establishment pairing share one executor but not one gate. Establishment
+ * takes a permit from a fair `Semaphore(4)` *before* it submits, so a fifth attempt is refused as
+ * `CONTROL_CAPACITY_REACHED` and never reaches the queue at all. Pairing submits *without* a permit,
+ * which is what lets the bounded queue fill and `AbortPolicy` produce `OPERATION_QUEUE_FULL`. Blurring
+ * those two -- letting pairing take an establishment permit, or reporting a semaphore refusal as a
+ * queue rejection -- would make the numbers in the capacity tests mean nothing, so both orderings are
+ * pinned here and mutation-tested against the edit that would confuse them.
+ */
+function verifyEstablishmentAndPairingCapacityStayDistinct() {
+  const provider = read(join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'LanPeerDiscoveryProvider.kt',
+  ));
+  const channel = read(join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecureLanControlChannel.kt',
+  ));
+
+  const firstReserve = provider.indexOf('if (!reserveControlCapacity())');
+  const secondReserve = provider.indexOf('if (!reserveControlCapacity())', firstReserve + 1);
+  const firstExecute = provider.indexOf('controlExecutor).execute(');
+  const secondExecute = provider.indexOf('controlExecutor).execute(', firstExecute + 1);
+
+  check(
+    'both establishment paths acquire the permit before submitting to the executor',
+    firstReserve > 0 && secondReserve > firstReserve &&
+      firstExecute > firstReserve && secondExecute > secondReserve,
+  );
+  mutation(
+    'dropping the outbound permit gate before submission fails this check',
+    provider,
+    (src) => src.replace(
+      `            if (!reserveControlCapacity()) {
+                postControlFailure(listener, SessionFailureCode.CONTROL_CAPACITY_REACHED)
+                return NoopOperation
+            }
+`,
+      '',
+    ),
+    (src) => {
+      const a = src.indexOf('if (!reserveControlCapacity())');
+      const b = src.indexOf('if (!reserveControlCapacity())', a + 1);
+      const x = src.indexOf('controlExecutor).execute(');
+      const y = src.indexOf('controlExecutor).execute(', x + 1);
+      return a > 0 && b > a && x > a && y > b;
+    },
+  );
+
+  check(
+    'a fifth establishment is reported as CONTROL_CAPACITY_REACHED, never as a queue rejection',
+    provider.includes('postControlFailure(listener, SessionFailureCode.CONTROL_CAPACITY_REACHED)'),
+  );
+  mutation(
+    'reporting a semaphore refusal as OPERATION_QUEUE_FULL fails this check',
+    provider,
+    (src) => src.replace(
+      'postControlFailure(listener, SessionFailureCode.CONTROL_CAPACITY_REACHED)',
+      'postControlFailure(listener, SessionFailureCode.OPERATION_QUEUE_FULL)',
+    ),
+    (src) => src.includes(
+      'postControlFailure(listener, SessionFailureCode.CONTROL_CAPACITY_REACHED)',
+    ),
+  );
+
+  const pairingStart = provider.indexOf('private inner class LanSecureSessionOperation(');
+  const pairingSubmit = provider.indexOf(
+    'completeFailure(SessionFailureCode.OPERATION_QUEUE_FULL)', pairingStart,
+  );
+  const pairingRegion = pairingStart > 0 && pairingSubmit > pairingStart
+    ? provider.slice(pairingStart, pairingSubmit)
+    : '';
+
+  check(
+    'the pairing path submits without taking an establishment permit',
+    pairingRegion.length > 0 &&
+      pairingRegion.includes('controlExecutor).execute(work)') &&
+      !pairingRegion.includes('reserveControlCapacity'),
+  );
+  mutation(
+    'giving the pairing path an establishment permit fails this check',
+    provider,
+    (src) => src.replace(
+      '                        requireNotNull(controlExecutor).execute(work)',
+      '                        reserveControlCapacity()\n' +
+        '                        requireNotNull(controlExecutor).execute(work)',
+    ),
+    (src) => {
+      const start = src.indexOf('private inner class LanSecureSessionOperation(');
+      const end = src.indexOf('completeFailure(SessionFailureCode.OPERATION_QUEUE_FULL)', start);
+      const region = start > 0 && end > start ? src.slice(start, end) : '';
+      return region.length > 0 &&
+        region.includes('controlExecutor).execute(work)') &&
+        !region.includes('reserveControlCapacity');
+    },
+  );
+
+  check(
+    'a rejected establishment returns its permit exactly once before it is dropped',
+    provider.includes(`                observe { it.onControlTaskRejected() }
+                inFlightSockets.remove(socket)
+                closeSocket(socket)
+                releaseIncomingPermit(socket)`),
+  );
+  mutation(
+    'dropping the permit release on establishment rejection fails this check',
+    provider,
+    (src) => src.replace(
+      `                observe { it.onControlTaskRejected() }
+                inFlightSockets.remove(socket)
+                closeSocket(socket)
+                releaseIncomingPermit(socket)`,
+      `                observe { it.onControlTaskRejected() }
+                inFlightSockets.remove(socket)
+                closeSocket(socket)`,
+    ),
+    (src) => src.includes(`                observe { it.onControlTaskRejected() }
+                inFlightSockets.remove(socket)
+                closeSocket(socket)
+                releaseIncomingPermit(socket)`),
+  );
+
+  check(
+    'control records are caller-executed: the channel submits nothing to any executor',
+    !/execute\(/.test(channel) && !/Executor/.test(channel),
+  );
+}
+
+verifyEstablishmentAndPairingCapacityStayDistinct();
+
 console.log('\nPart B capability trust boundary verification');
 console.log(checks.join('\n'));
 console.log(`\n${checks.length - failures}/${checks.length} checks passed, ${failures} failed`);
