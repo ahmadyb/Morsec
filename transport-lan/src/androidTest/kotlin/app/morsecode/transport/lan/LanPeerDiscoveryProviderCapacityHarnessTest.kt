@@ -1,8 +1,8 @@
 package app.morsecode.transport.lan
 
-import android.Manifest
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.morsecode.core.model.NetworkPorts
 import app.morsecode.core.transfer.session.ControlConnectionResult
 import app.morsecode.core.transfer.session.DiscoveryDiagnostics
@@ -11,7 +11,6 @@ import app.morsecode.core.transfer.session.DiscoveryPhase
 import app.morsecode.core.transfer.session.DiscoveryRequest
 import app.morsecode.core.transfer.session.DiscoveryStartResult
 import app.morsecode.core.transfer.session.DiscoveredPeer
-import app.morsecode.core.transfer.session.MonotonicClock
 import app.morsecode.transport.lan.security.ControlEstablishmentObserver
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -22,26 +21,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows
-import org.robolectric.annotation.Config
 
 /**
  * Establishes that control-establishment capacity can be driven through the real provider.
  *
  * Every capacity scenario worth asserting runs against the production owner -- the real
  * [LanPeerDiscoveryProvider], its real `controlExecutor`, its real `ArrayBlockingQueue`, its real
- * `AbortPolicy` and its real fair semaphore. None of that can be asserted unless a started lease,
- * a reachable control port and a working observation seam all exist at once, and until now nothing
- * in this module had ever constructed the provider to find out whether they do.
+ * `AbortPolicy` and its real fair semaphore. None of that can be asserted unless a started lease, a
+ * reachable control port and a working observation seam all exist at once.
  *
- * Each phase is guarded separately and reports the throwing frame, because there is no local
- * toolchain here: a failure that says only "UnsatisfiedLinkError" costs a whole CI run to learn
- * nothing about which construction caused it, and the first version of this test failed exactly
- * that way. Naming the phase and the top frames turns that run into an answer.
+ * THIS RUNS ON A DEVICE, NOT UNDER ROBOLECTRIC, AND THAT IS NOT A PREFERENCE. A Robolectric version
+ * of this test was tried first and failed with `UnsatisfiedLinkError: no conscrypt_jni in
+ * java.library.path`, in both unit test variants. Conscrypt ships native libraries for Android ABIs
+ * and none for the host JVM, and Robolectric's Android security stack reaches that provider during
+ * sandbox setup -- the failure escaped a guard wrapped around every phase of the test body, which is
+ * how it was located outside it. So the capacity harness belongs where the native library exists,
+ * alongside the other real-TLS pairing tests in this source set.
+ *
+ * Each phase still reports the throwing frame. There is no local toolchain here, so a failure that
+ * names only an exception type costs a whole CI run to learn nothing about its cause.
  */
-@RunWith(RobolectricTestRunner::class)
-@Config(sdk = [23])
+@RunWith(AndroidJUnit4::class)
 public class LanPeerDiscoveryProviderCapacityHarnessTest {
 
     private class RecordingListener : DiscoveryListener {
@@ -66,24 +66,14 @@ public class LanPeerDiscoveryProviderCapacityHarnessTest {
 
     @Test
     public fun realProviderStartsBindsTheControlPortAndReportsCapacityEvents() {
-        val application = phase("obtaining the Robolectric application") {
+        val application = phase("obtaining the instrumentation application") {
             ApplicationProvider.getApplicationContext<Application>()
-        }
-        phase("granting the multicast permission") {
-            Shadows.shadowOf(application)
-                .grantPermissions(Manifest.permission.CHANGE_WIFI_MULTICAST_STATE)
         }
 
         val acquired = CountDownLatch(1)
         val submitted = CountDownLatch(1)
         val provider = phase("constructing the provider") {
-            LanPeerDiscoveryProvider(
-                context = application,
-                // A real advancing clock. Robolectric's SystemClock does not move on its own, and a
-                // clock that never advances would make every deadline in the provider behave as
-                // though no time had passed.
-                clock = MonotonicClock { System.nanoTime() / 1_000_000L },
-            )
+            LanPeerDiscoveryProvider(context = application)
         }
         phase("installing the observation seam") {
             provider.establishmentObserver = object : ControlEstablishmentObserver {
@@ -145,7 +135,7 @@ public class LanPeerDiscoveryProviderCapacityHarnessTest {
 
     private companion object {
         const val CONNECT_TIMEOUT_MILLIS = 10_000
-        const val OBSERVE_TIMEOUT_SECONDS = 20L
+        const val OBSERVE_TIMEOUT_SECONDS = 30L
         const val FRAME_LIMIT = 12
     }
 }

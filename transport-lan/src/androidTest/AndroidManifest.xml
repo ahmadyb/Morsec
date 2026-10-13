@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Permissions the control-establishment capacity tests need, declared for the
+  instrumentation APK only.
+
+  LanPeerDiscoveryProvider.start() refuses with MULTICAST_PERMISSION_MISSING
+  unless CHANGE_WIFI_MULTICAST_STATE is granted, and it reads the connectivity
+  manager to decide which network a peer was discovered on. transport-lan's own
+  library manifest declares INTERNET and nothing else, and the app manifest is
+  what supplies these in production. Declaring them here keeps the harness honest
+  about what the provider requires without widening the shipped library manifest,
+  which is a privacy surface and not this test's business to change.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+</manifest>
