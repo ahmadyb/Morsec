@@ -405,6 +405,7 @@ jobs:
           ./gradlew --no-daemon --stacktrace :app:assembleDebugAndroidTest :transport-lan:assembleDebugAndroidTest 2>&1 | tee ci-logs/45-android-test.log
 
       - name: Run bundled Conscrypt TLS 1.3 compatibility test on API 23
+        id: api23
         if: ${{ !cancelled() }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -414,7 +415,42 @@ jobs:
           profile: Nexus 6
           disable-animations: true
           emulator-boot-timeout: 600
-          script: ./gradlew --no-daemon --stacktrace :transport-lan:connectedDebugAndroidTest
+          # Self-diagnosing. Run 38302267476 failed here with a bare exit code
+          # and no annotation, because this step wrote nothing into ci-logs/ and
+          # run logs and artifacts are unreachable from the working environment.
+          # The console is now captured verbatim, the device state is
+          # snapshotted before and after, and a bounded logcat tail is taken on
+          # failure. errexit is switched off first so a failing snapshot cannot
+          # mask the real status, which is re-raised explicitly at the end.
+          script: |
+            set +e
+            set -u
+            mkdir -p ci-logs
+            adb devices -l > ci-logs/60-api23-device-before.log 2>&1
+            adb shell getprop ro.build.version.sdk > ci-logs/60-api23-api-level.log 2>&1
+            ./gradlew --no-daemon --stacktrace --console=plain :transport-lan:connectedDebugAndroidTest > ci-logs/60-api23-connected.log 2>&1
+            status=$?
+            printf '%s\n' "$status" > ci-logs/60-api23-exit-status.txt
+            echo "connectedDebugAndroidTest exit status: $status"
+            tail -n 150 ci-logs/60-api23-connected.log
+            if [ "$status" -ne 0 ]; then
+              adb devices -l > ci-logs/61-api23-device-after.log 2>&1
+              adb logcat -d -t 400 > ci-logs/61-api23-logcat-tail.logcat 2>&1
+            fi
+            echo "status=$status" >> "${GITHUB_OUTPUT:-/dev/null}"
+            exit "$status"
+
+      # Reports only. It exits 0 by design: the instrumentation step's own
+      # non-zero status is what fails the job, and this step must never convert
+      # that into a success or obscure it. On a green run it emits one notice
+      # naming the test counts it read, which is what proves the channel works.
+      - name: Diagnose API 23 instrumentation results
+        if: always()
+        env:
+          API23_EXIT_STATUS: ${{ steps.api23.outputs.status }}
+        run: |
+          set -uo pipefail
+          python3 tools/ci/api23-diagnostics.py
 
       - name: Summarise test and lint results
         if: always()
@@ -690,6 +726,7 @@ jobs:
           path: |
             **/build/reports/**
             **/build/test-results/**
+            **/build/outputs/androidTest-results/**
             ci-logs/**
           if-no-files-found: ignore
           retention-days: 14
