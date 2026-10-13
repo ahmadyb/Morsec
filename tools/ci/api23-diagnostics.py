@@ -49,6 +49,13 @@ MAX_STACK_LINES = 16             # per failure stack excerpt
 MAX_CHARS_PER_ANNOTATION = 1400
 MAX_LINE_WIDTH = 220
 MAX_ANNOTATIONS = 40             # hard cap so a catastrophic run cannot spam
+# Annotations carrying a console tail get a larger budget. GitHub allows far
+# more; the point of the cap is to keep the finding readable, and the tail is
+# the finding, so it must not be the part that gets cut.
+MAX_CHARS_WITH_TAIL = 6000
+# Gradle task lines that report no work. They are the majority of the log and
+# carry no information, so they are dropped before the tail is budgeted.
+GRADLE_NOISE = re.compile(r"^> Task .*(UP-TO-DATE|NO-SOURCE|FROM-CACHE)$")
 
 # Result paths the Android Gradle Plugin actually writes for connected tests.
 # AGP places one directory per device under .../connected/, which is also where
@@ -87,13 +94,24 @@ ASSERTION_TYPES = re.compile(
 # Ordered: the first match wins, so the most specific infrastructure signals are
 # tested before the generic runtime-crash patterns that would also match them.
 INFRASTRUCTURE_CATEGORIES = (
+    # An emulator that dies after the tests started is not a boot failure, and
+    # calling it one would point the reader at boot configuration when the run
+    # had already produced passing results.
+    (
+        "Emulator terminated during or after the run",
+        re.compile(
+            r"(The emulator process for AVD .* has terminated"
+            r"|Emulator process .* terminated|emulator: .* terminated"
+            r"|Emulator terminated)",
+            re.I,
+        ),
+    ),
     (
         "Emulator boot failure",
         re.compile(
             r"(PANIC:|Cannot find AVD|emulator: ERROR|Waiting for emulator"
             r"|Timed out waiting for emulator|AVD .*not found|x86 emulation"
-            r"|KVM is not installed|/dev/kvm|Failed to (start|boot) the emulator"
-            r"|The emulator process for AVD)",
+            r"|KVM is not installed|/dev/kvm|Failed to (start|boot) the emulator)",
             re.I,
         ),
     ),
@@ -187,9 +205,12 @@ def console_tail(max_lines: int = 20) -> str:
     SUCCESSFUL is a failure outside Gradle.
     """
     lines = [line.strip() for line in read_log(CONSOLE_LOG).splitlines() if line.strip()]
-    if not lines:
+    kept = [line for line in lines if not GRADLE_NOISE.match(line)] or lines
+    if not kept:
         return "[console log absent or empty]"
-    return "\n".join(lines[-max_lines:])
+    dropped = len(lines) - len(kept)
+    head = f"[{dropped} no-work task lines omitted]\n" if dropped else ""
+    return head + "\n".join(kept[-max_lines:])
 
 
 def read_log(path: str) -> str:
@@ -292,9 +313,20 @@ def classify_logs(paths: list[str]):
 def classify_outcome(terminated: bool, log_paths: list[str]):
     """The category, its evidence source and the evidence lines.
 
-    A script that never wrote its completion marker was killed mid-flight. That
-    is more specific than any keyword in the log, so it wins first.
+    A keyword found in the log names the *cause* and wins the title, because
+    "the script was killed" is the symptom, not the reason. Termination is still
+    reported alongside it. Only when the log holds no recognisable cause does
+    termination itself become the category.
     """
+    classified = classify_logs(log_paths)
+    if classified:
+        name, source, hits = classified
+        if terminated:
+            hits = [
+                f"the script was also killed mid-flight (no completion marker); "
+                f"category taken from the log evidence: {name}"
+            ] + hits
+        return name, source, hits
     if terminated:
         return (
             "Instrumentation script terminated before completion",
@@ -302,11 +334,9 @@ def classify_outcome(terminated: bool, log_paths: list[str]):
             [
                 "the script wrote a console log but never wrote its completion marker, "
                 "so it was killed mid-flight instead of exiting",
+                "keyword scan over the full log matched no known category",
             ],
         )
-    classified = classify_logs(log_paths)
-    if classified:
-        return classified
     return (
         "Unclassified infrastructure failure",
         os.path.basename(CONSOLE_LOG),
@@ -366,7 +396,8 @@ def main() -> int:
                 f"script ran to completion: {script_completed}\n"
                 f"--- matching lines ---\n" + "\n".join(hits)
                 + f"\n--- console tail ---\n{console_tail()}",
-                MAX_EVIDENCE_LINES + 28,
+                MAX_EVIDENCE_LINES + 34,
+                MAX_CHARS_WITH_TAIL,
             ),
         )
     else:
@@ -416,7 +447,8 @@ def main() -> int:
                 f"evidence source: {source}\n"
                 f"--- matching lines ---\n" + "\n".join(hits)
                 + f"\n--- console tail ---\n{console_tail()}",
-                MAX_EVIDENCE_LINES + 28,
+                MAX_EVIDENCE_LINES + 34,
+                MAX_CHARS_WITH_TAIL,
             ),
         )
 
