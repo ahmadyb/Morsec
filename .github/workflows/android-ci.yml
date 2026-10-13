@@ -437,6 +437,7 @@ jobs:
               adb devices -l > ci-logs/61-api23-device-after.log 2>&1
               adb logcat -d -t 400 > ci-logs/61-api23-logcat-tail.logcat 2>&1
             fi
+            printf 'completed %s\n' "$status" > ci-logs/60-api23-script-completed.txt
             echo "status=$status" >> "${GITHUB_OUTPUT:-/dev/null}"
             exit "$status"
 

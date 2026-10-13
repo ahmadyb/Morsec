@@ -71,6 +71,10 @@ CONSOLE_LOG = "ci-logs/60-api23-connected.log"
 # only through bounded().
 LOGCAT_LOG = "ci-logs/61-api23-logcat-tail.logcat"
 STATUS_FILE = "ci-logs/60-api23-exit-status.txt"
+# Written as the script's last act. Its absence while the console log exists
+# means the instrumentation script was terminated mid-flight, which is a
+# different failure from anything the log itself can report.
+MARKER_FILE = "ci-logs/60-api23-script-completed.txt"
 
 # Long hex runs are keys, transcript digests or peer instance identifiers. Keep
 # enough to recognise which value was involved; never the value.
@@ -175,6 +179,19 @@ def bounded(text: str, max_lines: int, max_chars: int = MAX_CHARS_PER_ANNOTATION
     return redact("\n".join(out)) or "[no message]"
 
 
+def console_tail(max_lines: int = 20) -> str:
+    """The end of the captured instrumentation console, bounded and redacted.
+
+    Where the output *stops* is the finding when no category pattern matches: a
+    log that ends mid-test is a killed run, a log that ends after BUILD
+    SUCCESSFUL is a failure outside Gradle.
+    """
+    lines = [line.strip() for line in read_log(CONSOLE_LOG).splitlines() if line.strip()]
+    if not lines:
+        return "[console log absent or empty]"
+    return "\n".join(lines[-max_lines:])
+
+
 def read_log(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
@@ -251,18 +268,52 @@ def classify_failure(failure: dict) -> str:
     return "Unclassified test failure"
 
 
+# A line ending in PASSED or SKIPPED is a test *name*, and test names in this
+# module contain words like "Conscrypt" and "TLS". Classifying from one produced
+# a false "Conscrypt / TLS provider failure" against a run whose tests all
+# passed, so passing lines are excluded before any pattern is tried.
+PASSING_LINE = re.compile(r"\b(PASSED|SKIPPED)\b")
+
+
 def classify_logs(paths: list[str]):
-    """Return (category, evidence lines) from the captured logs, or None."""
+    """Return (category, evidence source, evidence lines) from the logs, or None."""
     for path in paths:
         text = read_log(path)
         if not text:
             continue
-        lines = text.splitlines()
+        lines = [line for line in text.splitlines() if not PASSING_LINE.search(line)]
         for name, pattern in INFRASTRUCTURE_CATEGORIES:
             hits = [line.strip() for line in lines if pattern.search(line)]
             if hits:
                 return name, os.path.basename(path), hits[:MAX_EVIDENCE_LINES]
     return None
+
+
+def classify_outcome(terminated: bool, log_paths: list[str]):
+    """The category, its evidence source and the evidence lines.
+
+    A script that never wrote its completion marker was killed mid-flight. That
+    is more specific than any keyword in the log, so it wins first.
+    """
+    if terminated:
+        return (
+            "Instrumentation script terminated before completion",
+            os.path.basename(CONSOLE_LOG),
+            [
+                "the script wrote a console log but never wrote its completion marker, "
+                "so it was killed mid-flight instead of exiting",
+            ],
+        )
+    classified = classify_logs(log_paths)
+    if classified:
+        return classified
+    return (
+        "Unclassified infrastructure failure",
+        os.path.basename(CONSOLE_LOG),
+        [line.strip() for line in read_log(CONSOLE_LOG).splitlines() if line.strip()][
+            -MAX_EVIDENCE_LINES:
+        ],
+    )
 
 
 def main() -> int:
@@ -293,21 +344,16 @@ def main() -> int:
         print(workflow_command(level, title, message))
         annotations_emitted += 1
 
+    script_completed = bool(read_log(MARKER_FILE).strip())
+    terminated = bool(read_log(CONSOLE_LOG)) and not script_completed
+
     if not xmls:
         # The distinct annotation the recovery contract asks for. No XML means
         # the instrumentation run never produced a result, which is never a
         # test failure and must not be reported as one.
-        classified = classify_logs([CONSOLE_LOG, LOGCAT_LOG] + list(DEVICE_LOGS))
-        if classified:
-            category, source, hits = classified
-        else:
-            category, source, hits = (
-                "Unclassified infrastructure failure",
-                os.path.basename(CONSOLE_LOG),
-                [line.strip() for line in read_log(CONSOLE_LOG).splitlines() if line.strip()][
-                    -MAX_EVIDENCE_LINES:
-                ],
-            )
+        category, source, hits = classify_outcome(
+            terminated, [CONSOLE_LOG, LOGCAT_LOG] + list(DEVICE_LOGS)
+        )
         emit(
             "error" if not step_passed else "warning",
             "API 23 infrastructure failure — no instrumentation result XML produced",
@@ -317,8 +363,10 @@ def main() -> int:
                 f"sdk: {sdk}\n"
                 f"result xml found: 0\n"
                 f"evidence source: {source}\n"
-                f"---\n" + "\n".join(hits),
-                MAX_EVIDENCE_LINES + 8,
+                f"script ran to completion: {script_completed}\n"
+                f"--- matching lines ---\n" + "\n".join(hits)
+                + f"\n--- console tail ---\n{console_tail()}",
+                MAX_EVIDENCE_LINES + 28,
             ),
         )
     else:
@@ -356,33 +404,21 @@ def main() -> int:
     elif xmls and not failures:
         # Results exist and every test passed, yet the job may still be red.
         # Say what the logs hold rather than letting the run look explained.
-        classified = classify_logs([CONSOLE_LOG, LOGCAT_LOG])
-        if classified:
-            category, source, hits = classified
-            emit(
-                "error",
-                f"API 23 {category} — tests passed but the instrumentation step still failed",
-                bounded(
-                    f"category: {category}\n"
-                    f"result xml: {len(xmls)} file(s), {tests_seen} test(s), 0 failure(s)\n"
-                    f"evidence source: {source}\n"
-                    f"---\n" + "\n".join(hits),
-                    MAX_EVIDENCE_LINES + 8,
-                ),
-            )
-        else:
-            emit(
-                "warning",
-                "API 23 instrumentation step failed with no failing test in the result XML",
-                bounded(
-                    f"result xml: {len(xmls)} file(s), {tests_seen} test(s), 0 failure(s)\n"
-                    f"instrumentation exit status: {status_label}\n"
-                    "No category pattern matched the captured console or logcat output. "
-                    "The failure is outside the instrumentation results and is unexplained "
-                    "by this diagnostic.",
-                    MAX_EVIDENCE_LINES,
-                ),
-            )
+        category, source, hits = classify_outcome(terminated, [CONSOLE_LOG, LOGCAT_LOG])
+        emit(
+            "error",
+            f"API 23 {category} — tests passed but the instrumentation step still failed",
+            bounded(
+                f"category: {category}\n"
+                f"result xml: {len(xmls)} file(s), {tests_seen} test(s), 0 failure(s)\n"
+                f"instrumentation exit status: {status_label}\n"
+                f"script ran to completion: {script_completed}\n"
+                f"evidence source: {source}\n"
+                f"--- matching lines ---\n" + "\n".join(hits)
+                + f"\n--- console tail ---\n{console_tail()}",
+                MAX_EVIDENCE_LINES + 28,
+            ),
+        )
 
     # Always emit one summary, on green runs too. That is what proves the
     # channel itself is alive: a green run that says "3 tests, 0 failures"
