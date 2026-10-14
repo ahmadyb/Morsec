@@ -369,7 +369,10 @@ public class ControlEstablishmentCapacityTest {
      * soTimeout is what keeps this bounded: a timeout throws, is not an EOF, and reads as untouched.
      */
     private fun productionTouched(socket: Socket): Boolean =
-        socket.available() > 0 || runCatching { socket.getInputStream().read() }.getOrNull() == -1
+        // available() lives on the stream, not on Socket -- a first attempt called it on the
+        // socket and failed to compile for exactly that reason.
+        socket.getInputStream().available() > 0 ||
+            runCatching { socket.getInputStream().read() }.getOrNull() == -1
 
     /**
      * Saturates the production pairing executor with nine real sessions, then attempts an
@@ -554,9 +557,14 @@ public class ControlEstablishmentCapacityTest {
                 phase("closing every remaining session") {
                     sessions.drop(1).forEach { runCatching { it.close() } }
                 }
+                // Indices ACTIVE_LIMIT+1 until the last: the remaining queued sessions. The final
+                // index is the refused ninth, which is asserted separately as never having run, so
+                // dropping rather than slicing it out would have waited on a socket production
+                // will never touch.
                 assertTrue("a queued pairing never reached its socket after every worker was released",
                     awaitTrue(RELEASE_TIMEOUT_SECONDS) {
-                        farEnds.drop(ACTIVE_LIMIT + 1).all { productionTouched(it) }
+                        farEnds.subList(ACTIVE_LIMIT + 1, SESSION_TOTAL - 1)
+                            .all { productionTouched(it) }
                     })
 
                 // The refused ninth must never run late, and nothing may authenticate.
