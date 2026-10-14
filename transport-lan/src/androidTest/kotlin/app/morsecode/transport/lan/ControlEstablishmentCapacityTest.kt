@@ -5,6 +5,8 @@ import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.morsecode.core.model.NetworkPorts
+import app.morsecode.core.model.TransportKind
+import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.session.ControlConnectionResult
 import app.morsecode.core.transfer.session.DiscoveryDiagnostics
 import app.morsecode.core.transfer.session.DiscoveryLease
@@ -13,10 +15,24 @@ import app.morsecode.core.transfer.session.DiscoveryPhase
 import app.morsecode.core.transfer.session.DiscoveryRequest
 import app.morsecode.core.transfer.session.DiscoveryStartResult
 import app.morsecode.core.transfer.session.DiscoveredPeer
+import app.morsecode.core.transfer.session.EncryptionCapability
+import app.morsecode.core.transfer.session.NegotiatedCapabilities
+import app.morsecode.core.transfer.session.NegotiatedSession
+import app.morsecode.core.transfer.session.PairableControlSession
+import app.morsecode.core.transfer.session.PeerInstanceId
+import app.morsecode.core.transfer.session.ProtocolRange
+import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
+import app.morsecode.core.transfer.session.SecurePairingListener
+import app.morsecode.core.transfer.session.SecurePairingResult
+import app.morsecode.core.transfer.session.SecurePeerRole
+import app.morsecode.core.transfer.session.SessionCapabilities
 import app.morsecode.core.transfer.session.SessionFailureCode
+import app.morsecode.core.transfer.session.SessionFeature
+import app.morsecode.core.transfer.session.SessionPeerProfile
 import app.morsecode.transport.lan.security.ControlEstablishmentObserver
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketAddress
 import java.util.concurrent.CountDownLatch
@@ -273,6 +289,9 @@ public class ControlEstablishmentCapacityTest {
             mark("four_permits_released",
                 "acquired=${observer.acquired.get()} released=${observer.released.get()}")
 
+            // --- the pairing executor's own queue, and an establishment attempt while it is full -
+            runPairingQueueMatrix(provider, activeLease, observer, listener)
+
             // --- a misbehaving observer must not change scheduling or block cleanup --------------
             observer.throwOnEveryEvent = true
             observer.delayMillis = OBSERVER_DELAY_MILLIS
@@ -337,6 +356,273 @@ public class ControlEstablishmentCapacityTest {
         }
     }
 
+    /**
+     * True once production has written to, or closed, the fixture's far end.
+     *
+     * Both count as "a task ran". A queued task has done neither: it cannot reach the socket at
+     * all, so its far end stays silent and open. That difference is what separates active from
+     * queued here, and it is observable from production doing real work rather than from reading a
+     * private field. The attempt limiter closes the socket before any TLS byte is written when it
+     * refuses an attempt, so a refusal looks like a close rather than a write, and this treats both
+     * as "reached the socket" on purpose.
+     *
+     * soTimeout is what keeps this bounded: a timeout throws, is not an EOF, and reads as untouched.
+     */
+    private fun productionTouched(socket: Socket): Boolean =
+        socket.available() > 0 || runCatching { socket.getInputStream().read() }.getOrNull() == -1
+
+    /**
+     * Saturates the production pairing executor with nine real sessions, then attempts an
+     * establishment while its queue is still full.
+     *
+     * The sessions come from the internal test factory rather than from injected registry entries,
+     * so no peer is faked and nothing about discovery is mutated. Everything downstream is
+     * production: the real [PairableControlSession.beginSecurePairing], the real secure session
+     * operation, and the one shared `controlExecutor` whose four workers and four pending slots are
+     * the thing under test.
+     *
+     * TIMING. An active pairing task blocks in the TLS handshake, which production bounds with
+     * `TLS_HANDSHAKE_TIMEOUT_MILLIS` of 5s against a far end that never answers. So the window in
+     * which four tasks are demonstrably active and four demonstrably queued is a few seconds wide.
+     * Every "nothing has started yet" assertion below is therefore taken immediately after the
+     * refusal is observed, and every positive assertion uses a bounded poll rather than a sleep.
+     */
+    private fun runPairingQueueMatrix(
+        provider: LanPeerDiscoveryProvider,
+        lease: DiscoveryLease,
+        observer: CountingObserver,
+        listener: RecordingListener,
+    ) {
+        val submittedBefore = observer.submitted.get()
+        val rejectedBefore = observer.rejected.get()
+        val acquiredBefore = observer.acquired.get()
+        val releasedBefore = observer.released.get()
+        val deliveredBefore = listener.delivered.get()
+        mark("pairing_matrix_started", "sessions=$SESSION_TOTAL")
+
+        ServerSocket(0).use { server ->
+            server.soTimeout = ACCEPT_TIMEOUT_MILLIS
+            val sessions = ArrayList<PairableControlSession>(SESSION_TOTAL)
+            val farEnds = ArrayList<Socket>(SESSION_TOTAL)
+            val outcomes = ArrayList<PairingOutcome>(SESSION_TOTAL)
+            try {
+                repeat(SESSION_TOTAL) { index ->
+                    val near = Socket()
+                    near.connect(
+                        InetSocketAddress(InetAddress.getLoopbackAddress(), server.localPort),
+                        CONNECT_TIMEOUT_MILLIS,
+                    )
+                    // The test holds the far end and never answers it.
+                    val far = phase("accepting fixture socket ${index + 1}") { server.accept() }
+                    // A short probe timeout, deliberately not PEER_READ_TIMEOUT_MILLIS. The
+                    // "a queued session has begun no work" assertions have to read every
+                    // queued far end and get nothing, and at four seconds a read that
+                    // finds nothing would cost four seconds each and blow the test bound.
+                    far.soTimeout = PROBE_READ_TIMEOUT_MILLIS
+                    farEnds += far
+                    outcomes += PairingOutcome()
+                    sessions += phase("constructing control session ${index + 1}") {
+                        provider.createControlSessionForPairingCapacityTest(
+                            lease = lease,
+                            socket = near,
+                            negotiated = pairingFixture(index),
+                            role = SecurePeerRole.INITIATOR,
+                        )
+                    }
+                }
+
+                sessions.forEachIndexed { index, session ->
+                    phase("beginning pairing on session ${index + 1}") {
+                        session.beginSecurePairing(outcomes[index])
+                    }
+                }
+
+                assertTrue(
+                    "only ${observer.submitted.get() - submittedBefore} of $SESSION_TOTAL pairing " +
+                        "tasks reached the production executor",
+                    awaitTrue(SUBMISSION_TIMEOUT_SECONDS) {
+                        observer.submitted.get() - submittedBefore == SESSION_TOTAL
+                    },
+                )
+
+                // The ninth is refused by AbortPolicy, not run and not queued.
+                assertTrue(
+                    "the ninth pairing never reached a terminal result; observed " +
+                        "${outcomes.last().result}",
+                    outcomes.last().awaitTerminal(QUEUE_REFUSAL_TIMEOUT_SECONDS),
+                )
+                val ninthFailure = (outcomes.last().result as? SecurePairingResult.Failed)?.failure
+                assertEquals(
+                    "the ninth pairing was refused with ${ninthFailure?.code} rather than a " +
+                        "queue-full refusal",
+                    SessionFailureCode.OPERATION_QUEUE_FULL,
+                    ninthFailure?.code,
+                )
+                assertEquals(
+                    "the production executor rejected ${observer.rejected.get() - rejectedBefore} " +
+                        "tasks, expected exactly the ninth",
+                    1,
+                    observer.rejected.get() - rejectedBefore,
+                )
+                mark("ninth_pairing_refused",
+                    "code=operation_queue_full rejected=${observer.rejected.get()}")
+
+                // Four ran, four are still queued, and a queued session has begun no work at all.
+                assertTrue(
+                    "fewer than $ACTIVE_LIMIT pairing tasks reached their socket; touched " +
+                        "${farEnds.take(ACTIVE_LIMIT).count { productionTouched(it) }}",
+                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) {
+                        farEnds.take(ACTIVE_LIMIT).all { productionTouched(it) }
+                    },
+                )
+                val startedWhileQueued = farEnds.drop(ACTIVE_LIMIT).count { productionTouched(it) }
+                assertEquals(
+                    "$startedWhileQueued queued pairing(s) reached their socket while all four " +
+                        "workers were busy, so the pending queue is not bounding anything",
+                    0,
+                    startedWhileQueued,
+                )
+                assertEquals(
+                    "the pairing path acquired ${observer.acquired.get() - acquiredBefore} " +
+                        "establishment permits; pairing and establishment capacity are separate " +
+                        "limits and only establishment may take one",
+                    0,
+                    observer.acquired.get() - acquiredBefore,
+                )
+                assertEquals(
+                    "the pairing path released ${observer.released.get() - releasedBefore} " +
+                        "establishment permits it never held",
+                    0,
+                    observer.released.get() - releasedBefore,
+                )
+                mark("pairing_queue_saturated",
+                    "active=$ACTIVE_LIMIT queued=$ACTIVE_LIMIT rejected=1 permits_held=0")
+
+                // --- mixed saturation: an establishment attempt against a full pairing queue -----
+                val mixedAcquiredBefore = observer.acquired.get()
+                val mixedReleasedBefore = observer.released.get()
+                val mixedRejectedBefore = observer.rejected.get()
+                val mixedAttempt = phase("attempting an establishment with the pairing queue full") {
+                    connectPeer()
+                }
+                try {
+                    assertTrue(
+                        "the establishment attempt was not refused while the pairing queue was " +
+                            "full; rejections stayed at ${observer.rejected.get() - mixedRejectedBefore}",
+                        awaitTrue(MIXED_REFUSAL_TIMEOUT_SECONDS) {
+                            observer.rejected.get() > mixedRejectedBefore
+                        },
+                    )
+                    assertEquals(
+                        "the saturated establishment attempt acquired " +
+                            "${observer.acquired.get() - mixedAcquiredBefore} permits, expected " +
+                            "exactly one before submission was attempted",
+                        1,
+                        observer.acquired.get() - mixedAcquiredBefore,
+                    )
+                    assertTrue(
+                        "the saturated establishment attempt did not return its permit exactly " +
+                            "once; acquired ${observer.acquired.get() - mixedAcquiredBefore}, " +
+                            "released ${observer.released.get() - mixedReleasedBefore}",
+                        awaitTrue(RELEASE_TIMEOUT_SECONDS) {
+                            observer.released.get() - mixedReleasedBefore == 1
+                        },
+                    )
+                    assertEquals(
+                        "the saturated establishment attempt returned " +
+                            "${observer.released.get() - mixedReleasedBefore} permits, expected one",
+                        1,
+                        observer.released.get() - mixedReleasedBefore,
+                    )
+                    assertTrue("the saturated establishment attempt was left connected",
+                        awaitTrue(REFUSAL_TIMEOUT_SECONDS) { peerEndIsClosed(mixedAttempt) })
+                    assertEquals("a session was delivered for the saturated establishment attempt",
+                        deliveredBefore, listener.delivered.get())
+                    mark("mixed_saturation_refused",
+                        "permit_acquired=1 permit_released=1 delivered=0")
+                } finally {
+                    runCatching { mixedAttempt.close() }
+                }
+
+                // --- release one blocker and a queued pairing progresses -------------------------
+                phase("closing session 1 to release a worker") { sessions[0].close() }
+                assertTrue("no queued pairing progressed after a worker was released",
+                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) { productionTouched(farEnds[ACTIVE_LIMIT]) })
+                mark("queued_pairing_progressed", "released_one=true")
+
+                // --- release everything and the rest of the queued work runs ---------------------
+                phase("closing every remaining session") {
+                    sessions.drop(1).forEach { runCatching { it.close() } }
+                }
+                assertTrue("a queued pairing never reached its socket after every worker was released",
+                    awaitTrue(RELEASE_TIMEOUT_SECONDS) {
+                        farEnds.drop(ACTIVE_LIMIT + 1).all { productionTouched(it) }
+                    })
+
+                // The refused ninth must never run late, and nothing may authenticate.
+                assertTrue(
+                    "the refused ninth pairing reached its socket later, so a rejected task " +
+                        "executed after rejection",
+                    !productionTouched(farEnds.last()),
+                )
+                val authenticated = outcomes.count { it.result is SecurePairingResult.Authenticated }
+                assertEquals("$authenticated pairing(s) authenticated with a silent fixture peer",
+                    0, authenticated)
+                assertEquals("a session was delivered during the pairing matrix",
+                    deliveredBefore, listener.delivered.get())
+                mark("pairing_matrix_completed",
+                    "rejected=${observer.rejected.get()} authenticated=0 delivered=0")
+            } finally {
+                sessions.forEach { runCatching { it.close() } }
+                farEnds.forEach { runCatching { it.close() } }
+            }
+        }
+    }
+
+    /** Receives the production terminal result for one fixture session. */
+    private class PairingOutcome : SecurePairingListener {
+        private val terminal = CountDownLatch(1)
+
+        @Volatile
+        var result: SecurePairingResult? = null
+            private set
+
+        override fun onApprovalRequired(request: SecurePairingApprovalRequest) {
+            // A silent fixture peer can never reach an approval, and production has no
+            // auto-approval implementation to reach for either.
+        }
+
+        override fun onCompleted(result: SecurePairingResult) {
+            this.result = result
+            terminal.countDown()
+        }
+
+        fun awaitTerminal(timeoutSeconds: Long): Boolean =
+            terminal.await(timeoutSeconds, TimeUnit.SECONDS)
+    }
+
+    /** An unauthenticated control session fixture; grants nothing and proves nothing by itself. */
+    private fun pairingFixture(index: Int): NegotiatedSession = NegotiatedSession(
+        attemptId = SessionId("attempt-${index + 1}"),
+        localProfile = pairingProfile(index + 1, "Local"),
+        remoteProfile = pairingProfile(index + 512, "Remote"),
+        protocolVersion = 1,
+        capabilities = NegotiatedCapabilities(
+            features = setOf(SessionFeature.CONTROL_HANDSHAKE),
+            maxChunkSizeBytes = 4_096,
+            resumeSupported = false,
+            encryption = EncryptionCapability.NONE,
+        ),
+    )
+
+    private fun pairingProfile(seed: Int, name: String): SessionPeerProfile = SessionPeerProfile(
+        peerInstanceId = PeerInstanceId("%032x".format(seed)),
+        displayName = name,
+        appVersion = "1.0.0",
+        protocolRange = ProtocolRange.CURRENT,
+        capabilities = SessionCapabilities.controlOnly(TransportKind.LAN),
+    )
+
     private companion object {
         const val PHASE_TAG = "MorsecA3Phase"
         const val ACTIVE_LIMIT = 4
@@ -352,5 +638,12 @@ public class ControlEstablishmentCapacityTest {
         const val FRAME_LIMIT = 12
         const val TEST_TIMEOUT_MILLIS = 120_000L
         const val OBSERVER_DELAY_MILLIS = 50L
+        const val PROBE_READ_TIMEOUT_MILLIS = 200
+        const val SESSION_TOTAL = 9
+        const val ACCEPT_TIMEOUT_MILLIS = 10_000
+        const val SUBMISSION_TIMEOUT_SECONDS = 8L
+        const val QUEUE_REFUSAL_TIMEOUT_SECONDS = 8L
+        const val ACTIVE_WORK_TIMEOUT_SECONDS = 6L
+        const val MIXED_REFUSAL_TIMEOUT_SECONDS = 8L
     }
 }

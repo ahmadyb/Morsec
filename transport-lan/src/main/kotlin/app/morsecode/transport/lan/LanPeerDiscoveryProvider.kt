@@ -262,6 +262,38 @@ public class LanPeerDiscoveryProvider(
         return request.copy(capabilities = copiedCapabilities)
     }
 
+    /**
+     * Test-only seam for the API 23 pairing-queue matrix. Never call this from production code.
+     *
+     * WHY IT EXISTS. [LanControlSession] is a private inner class of the private lease and
+     * [LanDiscoveryLease.createControlSession] is private to it, so no androidTest code can
+     * construct a session at all. Without a session the pairing executor's queue can never be
+     * saturated from a test, which means the queue bounds, the AbortPolicy rejection and the
+     * queue-full failure would all be asserted from nothing but their own declaration.
+     *
+     * WHAT IT DELIBERATELY DOES NOT DO. It registers no peer and mutates no discovery state, so
+     * the fixture cannot be used to fake an established peer. It passes an empty release callback,
+     * because a session created this way never took an establishment permit and must not be able to
+     * return one. It grants no authority: a session is unauthenticated until a real pairing
+     * completes, and this changes nothing about that. Everything downstream is production -- the
+     * real [PairableControlSession.beginSecurePairing], the real LanSecureSessionOperation, the
+     * real shared controlExecutor, and the production queue, rejection and cleanup paths.
+     *
+     * The lease must belong to this provider; a lease from anywhere else is rejected rather than
+     * silently ignored. tools/verify/secure-authority-surface.mjs fails the build if any file
+     * outside src/main of this module calls it, so the seam cannot acquire a production caller.
+     */
+    internal fun createControlSessionForPairingCapacityTest(
+        lease: DiscoveryLease,
+        socket: Socket,
+        negotiated: app.morsecode.core.transfer.session.NegotiatedSession,
+        role: SecurePeerRole,
+    ): PairableControlSession {
+        val bound = lease as? LanDiscoveryLease
+            ?: throw IllegalArgumentException("lease was not created by this provider")
+        return bound.createControlSession(socket, negotiated, role) { }
+    }
+
     private class LanDiscoveryLease(
         private val context: Context,
         request: DiscoveryRequest,

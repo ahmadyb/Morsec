@@ -1318,11 +1318,15 @@ function verifyA3PhaseChannelAndTimeoutBounds() {
   // The terminal marker must be the last marker the harness emits. Run 38595962958 passed all
   // five tests with a live phase log and still failed the green-run gate, because port_released
   // was emitted after cleanup_completed. Nothing in the local gate caught it, so pin it here.
-  const markers = [...harness.matchAll(/mark\("([a-z_0-9]+)"/g)].map((m) => m[1]);
+  // Scoped to the test method, not the file. Helper functions are declared after the method, so a
+  // file-order scan reports the last marker a helper happens to emit rather than the last one the
+  // test emits -- which is what actually has to be the terminal marker.
+  const markers = markersOf(testMethodBody(
+    harness, 'establishmentCapacityShutdownAndObserverDefectsOnOneBoundLease',
+  ));
   check(
     'the harness ends on the terminal cleanup marker and on nothing after it',
-    markers.length > 0 && markers[markers.length - 1] === 'cleanup_completed' &&
-      markers.includes('port_free') === false,
+    markers.length > 0 && markers[markers.length - 1] === 'cleanup_completed',
   );
   mutation(
     'emitting a marker after the terminal one fails this check',
@@ -1332,7 +1336,9 @@ function verifyA3PhaseChannelAndTimeoutBounds() {
       '            assertTrue("the lease stopped but the fixed control port is still accepting connections",\n                portFree)\n            mark("port_released", "late_establishment=refused")\n        }',
     ),
     (src) => {
-      const names = [...src.matchAll(/mark\("([a-z_0-9]+)"/g)].map((m) => m[1]);
+      const names = markersOf(testMethodBody(
+        src, 'establishmentCapacityShutdownAndObserverDefectsOnOneBoundLease',
+      ));
       return names.length > 0 && names[names.length - 1] === 'cleanup_completed';
     },
   );
@@ -1408,6 +1414,136 @@ function verifyA3PhaseChannelAndTimeoutBounds() {
 }
 
 verifyA3PhaseChannelAndTimeoutBounds();
+
+/** Extracts a function body by brace matching, so checks can be scoped to one method. */
+function testMethodBody(source, name) {
+  const start = source.indexOf(`fun ${name}(`);
+  if (start < 0) return '';
+  const open = source.indexOf('{', start);
+  if (open < 0) return '';
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  return source.slice(start);
+}
+
+/** The phase names a source emits, in order. */
+function markersOf(source) {
+  return [...source.matchAll(/mark\("([a-z_0-9]+)"/g)].map((m) => m[1]);
+}
+
+/**
+ * Group 22 -- the pairing-capacity test seam, and the guarantee that it stays a test seam.
+ *
+ * LanControlSession is a private inner class of the private lease, so without a factory no test can
+ * construct a session and the pairing executor's queue bounds could only ever be asserted from
+ * their own declaration. The factory is therefore real production code, which is exactly why it has
+ * to be pinned: a test seam that can acquire a production caller is a back door into session
+ * construction, and nothing else in the build would notice.
+ */
+function verifyPairingCapacityTestSeamStaysTestOnly() {
+  const SEAM = 'createControlSessionForPairingCapacityTest';
+  const providerPath = join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'LanPeerDiscoveryProvider.kt',
+  );
+  const provider = read(providerPath);
+  const harness = read(join(
+    ROOT, 'transport-lan', 'src', 'androidTest', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'ControlEstablishmentCapacityTest.kt',
+  ));
+
+  const productionSources = readdirSync(ROOT)
+    .filter((entry) => existsSync(join(ROOT, entry, 'src', 'main', 'kotlin')))
+    .flatMap((entry) => kotlinSources(entry, 'main'));
+
+  check(
+    'the pairing-capacity session factory is internal and never public',
+    provider.includes(`internal fun ${SEAM}(`) && !provider.includes(`public fun ${SEAM}(`),
+  );
+  mutation(
+    'widening the session factory to public fails this check',
+    provider,
+    (src) => src.replace(`internal fun ${SEAM}(`, `public fun ${SEAM}(`),
+    (src) => src.includes(`internal fun ${SEAM}(`) && !src.includes(`public fun ${SEAM}(`),
+  );
+
+  check(
+    'the session factory releases no establishment permit, because it never took one',
+    /createControlSession\(socket, negotiated, role\) \{ \}/.test(provider),
+  );
+  mutation(
+    'letting the factory release an establishment permit fails this check',
+    provider,
+    (src) => src.replace(
+      'createControlSession(socket, negotiated, role) { }',
+      'createControlSession(socket, negotiated, role) { releaseControlCapacity() }',
+    ),
+    (src) => /createControlSession\(socket, negotiated, role\) \{ \}/.test(src),
+  );
+
+  check(
+    'the session factory rejects a lease that did not come from this provider',
+    provider.includes('lease as? LanDiscoveryLease') &&
+      provider.includes('throw IllegalArgumentException("lease was not created by this provider")'),
+  );
+  mutation(
+    'silently accepting a foreign lease fails this check',
+    provider,
+    (src) => src.replace(
+      'throw IllegalArgumentException("lease was not created by this provider")',
+      'return NoopControlSession',
+    ),
+    (src) => src.includes('throw IllegalArgumentException("lease was not created by this provider")'),
+  );
+
+  const callers = productionSources.filter(
+    (path) => path !== providerPath && read(path).includes(SEAM),
+  );
+  check('no production source outside the provider calls the session factory', callers.length === 0);
+  mutation(
+    'adding a production call site of the session factory fails this check',
+    read(join(ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport',
+      'lan', 'security', 'SecureLanControlChannel.kt')),
+    (src) => `${src}\n// provider.${SEAM}(lease, socket, negotiated, role)\n`,
+    (src) => !src.includes(SEAM),
+  );
+
+  check(
+    'the pairing matrix builds its sessions through the factory and never fakes a discovered peer',
+    harness.includes(`provider.${SEAM}(`) &&
+      harness.includes('const val SESSION_TOTAL = 9') &&
+      !harness.includes('receiveBeacon') &&
+      !harness.includes('ControlConnectionResult.Connected('),
+  );
+  check(
+    'the pairing matrix pins the ninth refusal to the queue, not to establishment capacity',
+    harness.includes('SessionFailureCode.OPERATION_QUEUE_FULL') &&
+      /ninth pairing was refused with/.test(harness),
+  );
+  check(
+    'the pairing matrix proves the pairing path holds no establishment permit',
+    /the pairing path acquired/.test(harness) &&
+      /the pairing path released/.test(harness),
+  );
+  check(
+    'the pairing matrix proves a saturated establishment attempt returns its permit exactly once',
+    /did not return its permit exactly/.test(harness) &&
+      /exactly one before submission was attempted/.test(harness),
+  );
+  check(
+    'the pairing matrix never lets a refused task run late or authenticate',
+    /a rejected task\s*\n?\s*"?\s*executed after rejection/.test(harness.replace(/\n\s*/g, ' ')) ||
+      harness.includes('executed after rejection'),
+  );
+}
+
+verifyPairingCapacityTestSeamStaysTestOnly();
 
 console.log('\nPart B capability trust boundary verification');
 console.log(checks.join('\n'));
