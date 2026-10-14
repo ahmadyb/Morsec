@@ -1321,21 +1321,35 @@ function verifyA3PhaseChannelAndTimeoutBounds() {
       (harness.match(/Log\.[a-z]+\((?!PHASE_TAG)/g) || []).length === 0,
   );
 
+  // The capture must be an actual adb logcat command that writes the phase log, and it must sit
+  // outside the failure-only branch. Pinning merely the filename is not enough: a truncation line
+  // alone would satisfy it, and deleting the fallback post-run dump -- which is now secondary to
+  // the stream -- would leave the check satisfied while the real capture was gone. That exact
+  // weakness is what made an earlier version of this mutation pass for the wrong reason.
+  const failureBranch = wrapper.indexOf('if [ "$status" -ne 0 ]');
+  const streamingCapture = wrapper.indexOf(
+    'adb logcat -v time -s "$A3_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &',
+  );
   check(
-    'the wrapper captures the phase tag from logcat on every outcome',
-    wrapper.includes('adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I"') &&
-      wrapper.includes('> ci-logs/62-api23-phases.log') &&
-      wrapper.indexOf('62-api23-phases.log') < wrapper.indexOf('if [ "$status" -ne 0 ]'),
+    'the wrapper streams the phase tag from before Gradle starts, on every outcome',
+    streamingCapture >= 0 &&
+      streamingCapture < wrapper.indexOf('timeout --kill-after=') &&
+      streamingCapture < failureBranch &&
+      wrapper.includes('kill "$A3_LOGCAT_PID"') &&
+      wrapper.indexOf('kill "$A3_LOGCAT_PID"') > wrapper.indexOf('timeout --kill-after='),
   );
   mutation(
-    'moving the phase capture inside the failure-only branch fails this check',
+    'dropping the streaming phase capture fails this check',
     wrapper,
     (src) => src.replace(
-      'adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I" > ci-logs/62-api23-phases.log 2>&1',
+      'adb logcat -v time -s "$A3_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &',
       '',
     ),
-    (src) => src.includes('62-api23-phases.log') &&
-      src.indexOf('62-api23-phases.log') < src.indexOf('if [ "$status" -ne 0 ]'),
+    (src) => {
+      const at = src.indexOf('adb logcat -v time -s "$A3_TAG:I" >> ci-logs/62-api23-phases.log');
+      return at >= 0 && at < src.indexOf('timeout --kill-after=') &&
+        at < src.indexOf('if [ "$status" -ne 0 ]');
+    },
   );
 
   check(

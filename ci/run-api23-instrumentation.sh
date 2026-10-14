@@ -30,6 +30,24 @@ mkdir -p ci-logs
 adb devices -l > ci-logs/60-api23-device-before.log 2>&1
 adb shell getprop ro.build.version.sdk > ci-logs/60-api23-api-level.log 2>&1
 
+# The A3 phase markers travel by logcat, because instrumentation stdout does not reach the
+# Gradle console and API 23 does not support an additional test output directory.
+#
+# WHY A CONTINUOUS CAPTURE AND NOT A SINGLE DUMP
+# A one-shot `adb logcat -d` after the run reported "last phase marker: none" on run 38593221201
+# even though all five tests passed and every marker had been logged. API 23 keeps a small logcat
+# ring buffer on a chatty emulator, so markers written minutes earlier had already rotated out by
+# the time anything read them. Streaming the tag into the file from before Gradle starts means the
+# evidence is on disk the moment it is produced, and survives a hang, a kill and a disconnect.
+#
+# One tag only, so no unbounded logcat is collected: fixed phase names and bounded counts, never a
+# peer or session identifier, address, certificate, proof or key.
+A3_TAG="${A3_PHASE_TAG:-MorsecA3Phase}"
+: > ci-logs/62-api23-phases.log
+adb logcat -c > /dev/null 2>&1
+adb logcat -v time -s "$A3_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &
+A3_LOGCAT_PID=$!
+
 timeout --kill-after="${TIMEOUT_GRACE_SECONDS}s" "${TIMEOUT_BOUND_SECONDS}s" \
   ./gradlew --no-daemon --stacktrace --console=plain \
   :transport-lan:connectedDebugAndroidTest > ci-logs/60-api23-connected.log 2>&1
@@ -49,7 +67,11 @@ tail -n 150 ci-logs/60-api23-connected.log
 # Gradle console and API 23 does not support an additional test output directory. Captured on
 # every outcome -- success, failure and timeout alike -- and before any cleanup, while the
 # emulator is still reachable. One tag only, so no unbounded logcat is collected.
-adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I" > ci-logs/62-api23-phases.log 2>&1
+# Stop the stream first, then dump what the buffer still holds as a fallback in case the stream
+# died early -- for example on an ADB disconnect mid-run.
+kill "$A3_LOGCAT_PID" > /dev/null 2>&1
+wait "$A3_LOGCAT_PID" > /dev/null 2>&1
+adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I" >> ci-logs/62-api23-phases.log 2>&1
 
 if [ "$status" -ne 0 ]; then
   adb devices -l > ci-logs/61-api23-device-after.log 2>&1
