@@ -458,8 +458,9 @@ def main() -> int:
                     f"device: {failure['device']} (API {sdk})\n"
                     f"result xml: {failure['source']}\n"
                     f"message: {failure['message']}\n"
+                    f"--- phase trail ---\n" + "\n".join(phase_report()[1]) + "\n"
                     f"--- stack excerpt ---\n{excerpt}",
-                    MAX_STACK_LINES + 12,
+                    MAX_STACK_LINES + MAX_EVIDENCE_LINES + 12,
                 ),
             )
 

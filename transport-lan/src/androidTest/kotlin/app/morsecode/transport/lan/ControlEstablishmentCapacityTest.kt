@@ -434,9 +434,33 @@ public class ControlEstablishmentCapacityTest {
                     }
                 }
 
-                sessions.forEachIndexed { index, session ->
+                // The first four go in alone, and the remaining five only after those four are
+                // provably running.
+                //
+                // Submitting all nine in one tight loop does NOT produce "four active and four
+                // queued", and run 38631866637 measured why: with four idle workers and a
+                // four-slot queue, execute() offers the first four tasks to the queue before any
+                // worker has dequeued them, so the queue is already full and the next submissions
+                // are rejected. That run rejected four tasks instead of one. Waiting for the first
+                // four to reach their sockets proves they have left the queue, which is what makes
+                // the queue state deterministic rather than a race against worker wake-up.
+                repeat(ACTIVE_LIMIT) { index ->
                     phase("beginning pairing on session ${index + 1}") {
-                        session.beginSecurePairing(outcomes[index])
+                        sessions[index].beginSecurePairing(outcomes[index])
+                    }
+                }
+                assertTrue(
+                    "fewer than $ACTIVE_LIMIT pairing tasks reached their socket, so the pending " +
+                        "queue cannot be filled deterministically; touched " +
+                        "${farEnds.take(ACTIVE_LIMIT).count { productionTouched(it) }}",
+                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) {
+                        farEnds.take(ACTIVE_LIMIT).all { productionTouched(it) }
+                    },
+                )
+
+                (ACTIVE_LIMIT until SESSION_TOTAL).forEach { index ->
+                    phase("beginning pairing on session ${index + 1}") {
+                        sessions[index].beginSecurePairing(outcomes[index])
                     }
                 }
 
@@ -470,14 +494,7 @@ public class ControlEstablishmentCapacityTest {
                 mark("ninth_pairing_refused",
                     "code=operation_queue_full rejected=${observer.rejected.get()}")
 
-                // Four ran, four are still queued, and a queued session has begun no work at all.
-                assertTrue(
-                    "fewer than $ACTIVE_LIMIT pairing tasks reached their socket; touched " +
-                        "${farEnds.take(ACTIVE_LIMIT).count { productionTouched(it) }}",
-                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) {
-                        farEnds.take(ACTIVE_LIMIT).all { productionTouched(it) }
-                    },
-                )
+                // Four are running, four are still queued, and a queued session has begun no work.
                 val startedWhileQueued = farEnds.drop(ACTIVE_LIMIT).count { productionTouched(it) }
                 assertEquals(
                     "$startedWhileQueued queued pairing(s) reached their socket while all four " +
