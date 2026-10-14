@@ -1458,6 +1458,11 @@ function verifyPairingCapacityTestSeamStaysTestOnly() {
     'ControlEstablishmentCapacityTest.kt',
   ));
 
+  const limiter = read(join(
+    ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'security', 'SecurePairingAttemptLimiter.kt',
+  ));
+
   const productionSources = readdirSync(ROOT)
     .filter((entry) => existsSync(join(ROOT, entry, 'src', 'main', 'kotlin')))
     .flatMap((entry) => kotlinSources(entry, 'main'));
@@ -1528,31 +1533,67 @@ function verifyPairingCapacityTestSeamStaysTestOnly() {
   );
 
   check(
-    'the pairing matrix builds its sessions through the factory and never fakes a discovered peer',
+    'the pairing fixtures are built through the factory and never fake a discovered peer',
     harness.includes(`provider.${SEAM}(`) &&
-      harness.includes('const val SESSION_TOTAL = 9') &&
       !harness.includes('receiveBeacon') &&
       !harness.includes('ControlConnectionResult.Connected('),
   );
+
+  // The layered design, pinned as three separate numbers. Run 38634422755 measured that pairing
+  // work alone cannot fill the executor, because the attempt limiter admits two concurrent pairings
+  // and refuses the rest before any socket work, so refused tasks free their workers immediately.
+  // Only establishment work, which never touches the pairing limiter, can hold all four workers.
   check(
-    'the pairing matrix pins the ninth refusal to the queue, not to establishment capacity',
-    harness.includes('SessionFailureCode.OPERATION_QUEUE_FULL') &&
-      /ninth pairing was refused with/.test(harness),
+    'establishment capacity, executor workers and pending slots are each four',
+    provider.includes('const val MAX_CONTROL_SESSIONS: Int = 4') &&
+      provider.includes('const val MAX_PENDING_CONTROL_TASKS: Int = 4') &&
+      provider.includes('threads = MAX_CONTROL_SESSIONS') &&
+      provider.includes('queueCapacity = MAX_PENDING_CONTROL_TASKS'),
   );
   check(
-    'the pairing matrix proves the pairing path holds no establishment permit',
-    /the pairing path acquired/.test(harness) &&
-      /the pairing path released/.test(harness),
+    'pairing security concurrency stays at two and the harness mirrors it',
+    limiter.includes('val maxConcurrentPairings: Int = 2') &&
+      limiter.includes('inFlight.get() >= limits.maxConcurrentPairings') &&
+      harness.includes('const val MAX_CONCURRENT_PAIRINGS = 2'),
+  );
+  mutation(
+    'raising the pairing concurrency limit fails this check',
+    limiter,
+    (src) => src.replace('val maxConcurrentPairings: Int = 2', 'val maxConcurrentPairings: Int = 4'),
+    (src) => src.includes('val maxConcurrentPairings: Int = 2'),
+  );
+
+  check(
+    'the queue-full case is a fifth pairing behind four blocked establishments',
+    harness.includes('const val QUEUED_PAIRINGS = 4') &&
+      harness.includes('SessionFailureCode.OPERATION_QUEUE_FULL') &&
+      /fifth pairing was refused with/.test(harness) &&
+      /connecting blocking establishment/.test(harness),
   );
   check(
-    'the pairing matrix proves a saturated establishment attempt returns its permit exactly once',
-    /did not return its permit exactly/.test(harness) &&
-      /exactly one before submission was attempted/.test(harness),
+    'no assertion still requires four active pairings, which production cannot produce',
+    !/four active pairing/i.test(harness) &&
+      !harness.includes('const val SESSION_TOTAL = 9'),
   );
   check(
-    'the pairing matrix never lets a refused task run late or authenticate',
-    /a rejected task\s*\n?\s*"?\s*executed after rejection/.test(harness.replace(/\n\s*/g, ' ')) ||
-      harness.includes('executed after rejection'),
+    'the harness pins the concurrency cap separately from executor capacity',
+    /more than \$MAX_CONCURRENT_PAIRINGS pairings were doing cryptographic work/.test(harness) &&
+      /more than \$MAX_CONCURRENT_PAIRINGS queued pairings reached cryptographic work/.test(harness) &&
+      harness.includes('SessionFailureCode.SECURE_SESSION_LIMIT_REACHED'),
+  );
+  check(
+    'the harness proves the pairing path holds no establishment permit',
+    /the pairing path acquired/.test(harness),
+  );
+  check(
+    'the harness proves capacity recovers with an honest establishment afterwards',
+    harness.includes('honest_establishment_recovered') &&
+      /the honest establishment was rejected after recovery/.test(harness),
+  );
+  check(
+    'the harness never lets a refused pairing run late or authenticate',
+    harness.includes('so it ran after rejection') &&
+      /authenticated against a silent peer/.test(harness),
   );
 }
 

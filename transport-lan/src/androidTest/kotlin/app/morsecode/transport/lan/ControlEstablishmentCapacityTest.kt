@@ -289,15 +289,22 @@ public class ControlEstablishmentCapacityTest {
             mark("four_permits_released",
                 "acquired=${observer.acquired.get()} released=${observer.released.get()}")
 
-            // --- the pairing executor's own queue, and an establishment attempt while it is full -
-            runPairingQueueMatrix(provider, activeLease, observer, listener)
+            // --- the shared executor's queue, reached the way production can reach it ------------
+            runMixedSaturationMatrix(provider, activeLease, observer, listener)
+
+            // --- the tighter security bound, pinned independently of executor capacity -----------
+            runPairingConcurrencyCap(provider, activeLease, observer)
 
             // --- a misbehaving observer must not change scheduling or block cleanup --------------
             observer.throwOnEveryEvent = true
             observer.delayMillis = OBSERVER_DELAY_MILLIS
             val eightAcquired = phase("installing the second acquisition latch") {
-                observer.latchAtAcquisitions(ACTIVE_LIMIT * 2)
+                // Relative, not a fixed total: the mixed-saturation and concurrency-cap phases
+                // above consume acquisitions first, and a threshold registered below the
+                // count already reached would never count down.
+                observer.latchAtAcquisitions(observer.acquired.get() + ACTIVE_LIMIT)
             }
+            val defectAcquisitionTarget = observer.acquired.get() + ACTIVE_LIMIT
             val defectPeers = mutableListOf<Socket>()
             try {
                 repeat(ACTIVE_LIMIT) { index ->
@@ -306,8 +313,8 @@ public class ControlEstablishmentCapacityTest {
                     }
                 }
                 assertTrue(
-                    "only ${observer.acquired.get()} permits were acquired while the observer was " +
-                        "defective, expected ${ACTIVE_LIMIT * 2}",
+                    "the defective observer stopped permits being acquired; reached " +
+                        "${observer.acquired.get()}, expected $defectAcquisitionTarget",
                     eightAcquired.await(DEFECT_PERMIT_TIMEOUT_SECONDS, TimeUnit.SECONDS),
                 )
                 val refused = phase("connecting peer-5 with a defective observer") { connectPeer() }
@@ -374,53 +381,85 @@ public class ControlEstablishmentCapacityTest {
         socket.getInputStream().available() > 0 ||
             runCatching { socket.getInputStream().read() }.getOrNull() == -1
 
+    /** True once a pairing operation has been admitted by the limiter and is doing real work. */
+    private fun admittedAndRunning(outcome: PairingOutcome, farEnd: Socket): Boolean =
+        outcome.result == null && productionTouched(farEnd)
+
+    /** The refusal code a pairing operation ended with, or null if it has not ended. */
+    private fun refusalCode(outcome: PairingOutcome): SessionFailureCode? =
+        (outcome.result as? SecurePairingResult.Failed)?.failure?.code
+
     /**
-     * Saturates the production pairing executor with nine real sessions, then attempts an
-     * establishment while its queue is still full.
+     * Mixed saturation, which is how production can actually fill the shared executor's queue.
      *
-     * The sessions come from the internal test factory rather than from injected registry entries,
-     * so no peer is faked and nothing about discovery is mutated. Everything downstream is
-     * production: the real [PairableControlSession.beginSecurePairing], the real secure session
-     * operation, and the one shared `controlExecutor` whose four workers and four pending slots are
-     * the thing under test.
+     * Four silent inbound establishments take all four permits and park all four workers inside
+     * `readHandshake`. Four pairing operations then enter the queue and cannot run, and a fifth is
+     * rejected by AbortPolicy with OPERATION_QUEUE_FULL.
      *
-     * TIMING. An active pairing task blocks in the TLS handshake, which production bounds with
-     * `TLS_HANDSHAKE_TIMEOUT_MILLIS` of 5s against a far end that never answers. So the window in
-     * which four tasks are demonstrably active and four demonstrably queued is a few seconds wide.
-     * Every "nothing has started yet" assertion below is therefore taken immediately after the
-     * refusal is observed, and every positive assertion uses a bounded poll rather than a sleep.
+     * WHY NOT PAIRING WORK ALONE. A first version of this submitted nine pairings and expected four
+     * active and four queued. Run 38634422755 measured why that is impossible: the lease-scoped
+     * attempt limiter admits at most `maxConcurrentPairings` (2) concurrent pairings and refuses the
+     * rest before any socket work, so refused tasks finish in microseconds and free their workers.
+     * Pairing work alone cannot hold four workers, so it cannot keep the queue full. Establishment
+     * work can, because it never goes through the pairing limiter. The layered design is therefore
+     * establishment capacity 4, executor 4 workers plus 4 queued, pairing security concurrency 2.
+     *
+     * Queue emptiness is proved rather than read: there is no visible queue size, but if four
+     * pairing tasks are accepted and the fifth is rejected, the queue held exactly four free slots.
      */
-    private fun runPairingQueueMatrix(
+    private fun runMixedSaturationMatrix(
         provider: LanPeerDiscoveryProvider,
         lease: DiscoveryLease,
         observer: CountingObserver,
         listener: RecordingListener,
     ) {
-        val submittedBefore = observer.submitted.get()
-        val rejectedBefore = observer.rejected.get()
         val acquiredBefore = observer.acquired.get()
         val releasedBefore = observer.released.get()
+        val submittedBefore = observer.submitted.get()
+        val rejectedBefore = observer.rejected.get()
         val deliveredBefore = listener.delivered.get()
-        mark("pairing_matrix_started", "sessions=$SESSION_TOTAL")
+        val fourHeld = observer.latchAtAcquisitions(acquiredBefore + ACTIVE_LIMIT)
+        val pairingTotal = QUEUED_PAIRINGS + 1
+        mark("mixed_matrix_started", "establishments=$ACTIVE_LIMIT pairings=$pairingTotal")
 
         ServerSocket(0).use { server ->
             server.soTimeout = ACCEPT_TIMEOUT_MILLIS
-            val sessions = ArrayList<PairableControlSession>(SESSION_TOTAL)
-            val farEnds = ArrayList<Socket>(SESSION_TOTAL)
-            val outcomes = ArrayList<PairingOutcome>(SESSION_TOTAL)
+            val establishments = ArrayList<Socket>(ACTIVE_LIMIT)
+            val sessions = ArrayList<PairableControlSession>(pairingTotal)
+            val farEnds = ArrayList<Socket>(pairingTotal)
+            val outcomes = ArrayList<PairingOutcome>(pairingTotal)
             try {
-                repeat(SESSION_TOTAL) { index ->
+                // --- occupy every worker with a real establishment -------------------------------
+                repeat(ACTIVE_LIMIT) { index ->
+                    establishments += phase("connecting blocking establishment ${index + 1}") {
+                        connectPeer()
+                    }
+                }
+                assertTrue(
+                    "only ${observer.acquired.get() - acquiredBefore} of $ACTIVE_LIMIT " +
+                        "establishment permits were acquired",
+                    fourHeld.await(PERMIT_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+                )
+                assertEquals(
+                    "four establishments produced " +
+                        "${observer.submitted.get() - submittedBefore} submissions, expected " +
+                        "$ACTIVE_LIMIT",
+                    ACTIVE_LIMIT,
+                    observer.submitted.get() - submittedBefore,
+                )
+                assertEquals("a blocked establishment was delivered as a control session",
+                    deliveredBefore, listener.delivered.get())
+                mark("establishments_blocking",
+                    "active=$ACTIVE_LIMIT permits_held=$ACTIVE_LIMIT delivered=0")
+
+                // --- fill the pending queue with pairing work ------------------------------------
+                repeat(pairingTotal) { index ->
                     val near = Socket()
                     near.connect(
                         InetSocketAddress(InetAddress.getLoopbackAddress(), server.localPort),
                         CONNECT_TIMEOUT_MILLIS,
                     )
-                    // The test holds the far end and never answers it.
                     val far = phase("accepting fixture socket ${index + 1}") { server.accept() }
-                    // A short probe timeout, deliberately not PEER_READ_TIMEOUT_MILLIS. The
-                    // "a queued session has begun no work" assertions have to read every
-                    // queued far end and get nothing, and at four seconds a read that
-                    // finds nothing would cost four seconds each and blow the test bound.
                     far.soTimeout = PROBE_READ_TIMEOUT_MILLIS
                     farEnds += far
                     outcomes += PairingOutcome()
@@ -433,170 +472,321 @@ public class ControlEstablishmentCapacityTest {
                         )
                     }
                 }
-
-                // The first four go in alone, and the remaining five only after those four are
-                // provably running.
-                //
-                // Submitting all nine in one tight loop does NOT produce "four active and four
-                // queued", and run 38631866637 measured why: with four idle workers and a
-                // four-slot queue, execute() offers the first four tasks to the queue before any
-                // worker has dequeued them, so the queue is already full and the next submissions
-                // are rejected. That run rejected four tasks instead of one. Waiting for the first
-                // four to reach their sockets proves they have left the queue, which is what makes
-                // the queue state deterministic rather than a race against worker wake-up.
-                repeat(ACTIVE_LIMIT) { index ->
-                    phase("beginning pairing on session ${index + 1}") {
+                repeat(QUEUED_PAIRINGS) { index ->
+                    phase("beginning queued pairing ${index + 1}") {
                         sessions[index].beginSecurePairing(outcomes[index])
                     }
                 }
                 assertTrue(
-                    "fewer than $ACTIVE_LIMIT pairing tasks reached their socket, so the pending " +
-                        "queue cannot be filled deterministically; touched " +
-                        "${farEnds.take(ACTIVE_LIMIT).count { productionTouched(it) }}",
-                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) {
-                        farEnds.take(ACTIVE_LIMIT).all { productionTouched(it) }
-                    },
-                )
-
-                (ACTIVE_LIMIT until SESSION_TOTAL).forEach { index ->
-                    phase("beginning pairing on session ${index + 1}") {
-                        sessions[index].beginSecurePairing(outcomes[index])
-                    }
-                }
-
-                assertTrue(
-                    "only ${observer.submitted.get() - submittedBefore} of $SESSION_TOTAL pairing " +
-                        "tasks reached the production executor",
+                    "only ${observer.submitted.get() - submittedBefore - ACTIVE_LIMIT} pairing " +
+                        "tasks were submitted, expected $QUEUED_PAIRINGS",
                     awaitTrue(SUBMISSION_TIMEOUT_SECONDS) {
-                        observer.submitted.get() - submittedBefore == SESSION_TOTAL
+                        observer.submitted.get() - submittedBefore - ACTIVE_LIMIT == QUEUED_PAIRINGS
                     },
                 )
+                // A queued task has not run at all: no socket activity, and no terminal result, so
+                // it has not even reached the attempt limiter.
+                assertEquals("a queued pairing reached its socket while every worker was blocked",
+                    0, farEnds.take(QUEUED_PAIRINGS).count { productionTouched(it) })
+                assertEquals("a queued pairing reached a terminal result, so it ran and met the limiter",
+                    0, outcomes.take(QUEUED_PAIRINGS).count { it.result != null })
+                assertEquals(
+                    "the pairing path acquired " +
+                        "${observer.acquired.get() - acquiredBefore - ACTIVE_LIMIT} establishment " +
+                        "permits; pairing and establishment are separate limits",
+                    0,
+                    observer.acquired.get() - acquiredBefore - ACTIVE_LIMIT,
+                )
+                mark("pairing_queue_filled",
+                    "queued=$QUEUED_PAIRINGS started=0 limiter_hits=0 permits_held=$ACTIVE_LIMIT")
 
-                // The ninth is refused by AbortPolicy, not run and not queued.
+                // --- the fifth pairing is rejected by AbortPolicy ---------------------------------
+                phase("beginning the fifth pairing with the queue full") {
+                    sessions[QUEUED_PAIRINGS].beginSecurePairing(outcomes[QUEUED_PAIRINGS])
+                }
                 assertTrue(
-                    "the ninth pairing never reached a terminal result; observed " +
-                        "${outcomes.last().result}",
-                    outcomes.last().awaitTerminal(QUEUE_REFUSAL_TIMEOUT_SECONDS),
+                    "the fifth pairing never reached a terminal result; observed " +
+                        "${outcomes[QUEUED_PAIRINGS].result}",
+                    outcomes[QUEUED_PAIRINGS].awaitTerminal(QUEUE_REFUSAL_TIMEOUT_SECONDS),
                 )
-                val ninthFailure = (outcomes.last().result as? SecurePairingResult.Failed)?.failure
                 assertEquals(
-                    "the ninth pairing was refused with ${ninthFailure?.code} rather than a " +
-                        "queue-full refusal",
+                    "the fifth pairing was refused with ${refusalCode(outcomes[QUEUED_PAIRINGS])} " +
+                        "rather than a queue-full refusal",
                     SessionFailureCode.OPERATION_QUEUE_FULL,
-                    ninthFailure?.code,
+                    refusalCode(outcomes[QUEUED_PAIRINGS]),
                 )
                 assertEquals(
-                    "the production executor rejected ${observer.rejected.get() - rejectedBefore} " +
-                        "tasks, expected exactly the ninth",
+                    "the production executor rejected " +
+                        "${observer.rejected.get() - rejectedBefore} tasks, expected exactly the " +
+                        "fifth pairing",
                     1,
                     observer.rejected.get() - rejectedBefore,
                 )
-                mark("ninth_pairing_refused",
+                assertTrue("the rejected pairing reached its socket, so it ran after rejection",
+                    !productionTouched(farEnds[QUEUED_PAIRINGS]))
+                assertEquals("the rejected pairing published an approval",
+                    0, outcomes[QUEUED_PAIRINGS].approvals.get())
+                mark("fifth_pairing_refused",
                     "code=operation_queue_full rejected=${observer.rejected.get()}")
 
-                // Four are running, four are still queued, and a queued session has begun no work.
-                val startedWhileQueued = farEnds.drop(ACTIVE_LIMIT).count { productionTouched(it) }
-                assertEquals(
-                    "$startedWhileQueued queued pairing(s) reached their socket while all four " +
-                        "workers were busy, so the pending queue is not bounding anything",
-                    0,
-                    startedWhileQueued,
-                )
-                assertEquals(
-                    "the pairing path acquired ${observer.acquired.get() - acquiredBefore} " +
-                        "establishment permits; pairing and establishment capacity are separate " +
-                        "limits and only establishment may take one",
-                    0,
-                    observer.acquired.get() - acquiredBefore,
-                )
-                assertEquals(
-                    "the pairing path released ${observer.released.get() - releasedBefore} " +
-                        "establishment permits it never held",
-                    0,
-                    observer.released.get() - releasedBefore,
-                )
-                mark("pairing_queue_saturated",
-                    "active=$ACTIVE_LIMIT queued=$ACTIVE_LIMIT rejected=1 permits_held=0")
-
-                // --- mixed saturation: an establishment attempt against a full pairing queue -----
-                val mixedAcquiredBefore = observer.acquired.get()
-                val mixedReleasedBefore = observer.released.get()
-                val mixedRejectedBefore = observer.rejected.get()
-                val mixedAttempt = phase("attempting an establishment with the pairing queue full") {
-                    connectPeer()
+                // --- drain one worker at a time; the limiter admits at most two -------------------
+                phase("releasing the first establishment worker") {
+                    runCatching { establishments[0].close() }
                 }
-                try {
-                    assertTrue(
-                        "the establishment attempt was not refused while the pairing queue was " +
-                            "full; rejections stayed at ${observer.rejected.get() - mixedRejectedBefore}",
-                        awaitTrue(MIXED_REFUSAL_TIMEOUT_SECONDS) {
-                            observer.rejected.get() > mixedRejectedBefore
-                        },
-                    )
-                    assertEquals(
-                        "the saturated establishment attempt acquired " +
-                            "${observer.acquired.get() - mixedAcquiredBefore} permits, expected " +
-                            "exactly one before submission was attempted",
-                        1,
-                        observer.acquired.get() - mixedAcquiredBefore,
-                    )
-                    assertTrue(
-                        "the saturated establishment attempt did not return its permit exactly " +
-                            "once; acquired ${observer.acquired.get() - mixedAcquiredBefore}, " +
-                            "released ${observer.released.get() - mixedReleasedBefore}",
-                        awaitTrue(RELEASE_TIMEOUT_SECONDS) {
-                            observer.released.get() - mixedReleasedBefore == 1
-                        },
-                    )
-                    assertEquals(
-                        "the saturated establishment attempt returned " +
-                            "${observer.released.get() - mixedReleasedBefore} permits, expected one",
-                        1,
-                        observer.released.get() - mixedReleasedBefore,
-                    )
-                    assertTrue("the saturated establishment attempt was left connected",
-                        awaitTrue(REFUSAL_TIMEOUT_SECONDS) { peerEndIsClosed(mixedAttempt) })
-                    assertEquals("a session was delivered for the saturated establishment attempt",
-                        deliveredBefore, listener.delivered.get())
-                    mark("mixed_saturation_refused",
-                        "permit_acquired=1 permit_released=1 delivered=0")
-                } finally {
-                    runCatching { mixedAttempt.close() }
-                }
-
-                // --- release one blocker and a queued pairing progresses -------------------------
-                phase("closing session 1 to release a worker") { sessions[0].close() }
-                assertTrue("no queued pairing progressed after a worker was released",
-                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) { productionTouched(farEnds[ACTIVE_LIMIT]) })
-                mark("queued_pairing_progressed", "released_one=true")
-
-                // --- release everything and the rest of the queued work runs ---------------------
-                phase("closing every remaining session") {
-                    sessions.drop(1).forEach { runCatching { it.close() } }
-                }
-                // Indices ACTIVE_LIMIT+1 until the last: the remaining queued sessions. The final
-                // index is the refused ninth, which is asserted separately as never having run, so
-                // dropping rather than slicing it out would have waited on a socket production
-                // will never touch.
-                assertTrue("a queued pairing never reached its socket after every worker was released",
-                    awaitTrue(RELEASE_TIMEOUT_SECONDS) {
-                        farEnds.subList(ACTIVE_LIMIT + 1, SESSION_TOTAL - 1)
-                            .all { productionTouched(it) }
+                assertTrue("no queued pairing began after the first worker was released",
+                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) {
+                        (0 until QUEUED_PAIRINGS).count {
+                            admittedAndRunning(outcomes[it], farEnds[it])
+                        } >= 1
                     })
-
-                // The refused ninth must never run late, and nothing may authenticate.
-                assertTrue(
-                    "the refused ninth pairing reached its socket later, so a rejected task " +
-                        "executed after rejection",
-                    !productionTouched(farEnds.last()),
+                phase("releasing the second establishment worker") {
+                    runCatching { establishments[1].close() }
+                }
+                assertTrue("a second queued pairing did not begin after the second worker was released",
+                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) {
+                        (0 until QUEUED_PAIRINGS).count {
+                            admittedAndRunning(outcomes[it], farEnds[it])
+                        } >= MAX_CONCURRENT_PAIRINGS
+                    })
+                // Taken now, while both are still inside the handshake. Waiting for the refusals
+                // first could let the admitted pairings hit their own handshake deadline.
+                assertEquals(
+                    "more than $MAX_CONCURRENT_PAIRINGS queued pairings reached cryptographic work",
+                    MAX_CONCURRENT_PAIRINGS,
+                    (0 until QUEUED_PAIRINGS).count { admittedAndRunning(outcomes[it], farEnds[it]) },
                 )
-                val authenticated = outcomes.count { it.result is SecurePairingResult.Authenticated }
-                assertEquals("$authenticated pairing(s) authenticated with a silent fixture peer",
-                    0, authenticated)
-                assertEquals("a session was delivered during the pairing matrix",
+
+                phase("releasing the remaining establishment workers") {
+                    establishments.drop(MAX_CONCURRENT_PAIRINGS).forEach { runCatching { it.close() } }
+                }
+                assertTrue(
+                    "the pairings beyond the concurrency cap did not report a limit refusal; " +
+                        "observed ${outcomes.take(QUEUED_PAIRINGS).map { it.result }}",
+                    awaitTrue(RELEASE_TIMEOUT_SECONDS) {
+                        outcomes.take(QUEUED_PAIRINGS).count {
+                            refusalCode(it) == SessionFailureCode.SECURE_SESSION_LIMIT_REACHED
+                        } == QUEUED_PAIRINGS - MAX_CONCURRENT_PAIRINGS
+                    },
+                )
+                // "No cryptographic work" for a limiter refusal is proved by the refusal code
+                // itself, not by socket activity. The limiter is consulted before
+                // ConscryptSecureSessionEngine is constructed, and its refusal path closes the raw
+                // socket -- so a refused pairing legitimately shows a closed far end, and socket
+                // state cannot distinguish it from one that did handshake work. What separates them
+                // is that an admitted pairing is still running while a refused one has terminated.
+                assertEquals(
+                    "a pairing beyond the concurrency cap was still running cryptographic work",
+                    0,
+                    (0 until QUEUED_PAIRINGS).count {
+                        refusalCode(outcomes[it]) ==
+                            SessionFailureCode.SECURE_SESSION_LIMIT_REACHED &&
+                            outcomes[it].result == null
+                    },
+                )
+                mark("pairing_queue_drained",
+                    "admitted=$MAX_CONCURRENT_PAIRINGS " +
+                        "limit_refusals=${QUEUED_PAIRINGS - MAX_CONCURRENT_PAIRINGS}")
+
+                // --- settle ----------------------------------------------------------------------
+                phase("closing every fixture session") {
+                    sessions.forEach { runCatching { it.close() } }
+                }
+                assertTrue("a pairing operation never reached a terminal result",
+                    awaitTrue(RELEASE_TIMEOUT_SECONDS) { outcomes.all { it.result != null } })
+                assertEquals("a fixture pairing authenticated against a silent peer",
+                    0, outcomes.count { it.result is SecurePairingResult.Authenticated })
+                phase("closing every blocking establishment") {
+                    establishments.forEach { runCatching { it.close() } }
+                }
+                assertTrue(
+                    "establishment permits did not settle; acquired " +
+                        "${observer.acquired.get() - acquiredBefore}, released " +
+                        "${observer.released.get() - releasedBefore}",
+                    awaitTrue(RELEASE_TIMEOUT_SECONDS) {
+                        observer.released.get() - releasedBefore ==
+                            observer.acquired.get() - acquiredBefore
+                    },
+                )
+                assertEquals("a session was delivered during the mixed saturation matrix",
                     deliveredBefore, listener.delivered.get())
-                mark("pairing_matrix_completed",
-                    "rejected=${observer.rejected.get()} authenticated=0 delivered=0")
+                mark("mixed_matrix_completed",
+                    "acquired=${observer.acquired.get() - acquiredBefore} " +
+                        "released=${observer.released.get() - releasedBefore} delivered=0")
+
+                // --- honest recovery --------------------------------------------------------------
+                runHonestRecovery(observer, listener, deliveredBefore)
+            } finally {
+                sessions.forEach { runCatching { it.close() } }
+                farEnds.forEach { runCatching { it.close() } }
+                establishments.forEach { runCatching { it.close() } }
+            }
+        }
+    }
+
+    /** One ordinary establishment, admitted and accepted again after everything has drained. */
+    private fun runHonestRecovery(
+        observer: CountingObserver,
+        listener: RecordingListener,
+        deliveredBefore: Int,
+    ) {
+        val acquiredBefore = observer.acquired.get()
+        val submittedBefore = observer.submitted.get()
+        val rejectedBefore = observer.rejected.get()
+        val honest = phase("starting an honest establishment after recovery") {
+            connectPeer().also { it.soTimeout = PROBE_READ_TIMEOUT_MILLIS }
+        }
+        try {
+            assertTrue("the honest establishment acquired no permit after recovery",
+                awaitTrue(PERMIT_TIMEOUT_SECONDS) { observer.acquired.get() > acquiredBefore })
+            assertTrue("the honest establishment was never submitted to the executor",
+                awaitTrue(SUBMISSION_TIMEOUT_SECONDS) { observer.submitted.get() > submittedBefore })
+            assertEquals("the honest establishment was rejected after recovery",
+                0, observer.rejected.get() - rejectedBefore)
+            // A read that times out proves the peer is still connected and production is waiting on
+            // it, which is the controlled blocking phase. peerEndIsClosed cannot be used here: it
+            // reports a timeout as "closed", because it was written to wait for a refusal rather
+            // than to prove a connection is alive.
+            val stillWaiting = runCatching { honest.getInputStream().read() }
+                .exceptionOrNull() is java.net.SocketTimeoutException
+            assertTrue("the honest establishment was closed instead of reaching its blocking phase",
+                stillWaiting)
+            assertEquals("the honest establishment was delivered without completing a handshake",
+                deliveredBefore, listener.delivered.get())
+            mark("honest_establishment_recovered",
+                "acquired=1 submitted=1 rejected=0 delivered=0")
+        } finally {
+            runCatching { honest.close() }
+        }
+    }
+
+    /**
+     * The tighter bound, pinned independently of executor capacity.
+     *
+     * On an idle executor every submitted pairing task runs at once, so what stops more than two
+     * from doing cryptographic work is the lease-scoped attempt limiter, not the pool. This is the
+     * security-relevant limit and it is asserted on its own so that a future change to executor
+     * sizing cannot quietly move it.
+     */
+    private fun runPairingConcurrencyCap(
+        provider: LanPeerDiscoveryProvider,
+        lease: DiscoveryLease,
+        observer: CountingObserver,
+    ) {
+        val acquiredBefore = observer.acquired.get()
+        val total = MAX_CONCURRENT_PAIRINGS + 2
+        mark("pairing_cap_started", "pairings=$total cap=$MAX_CONCURRENT_PAIRINGS")
+
+        ServerSocket(0).use { server ->
+            server.soTimeout = ACCEPT_TIMEOUT_MILLIS
+            val sessions = ArrayList<PairableControlSession>(total)
+            val farEnds = ArrayList<Socket>(total)
+            val outcomes = ArrayList<PairingOutcome>(total)
+            try {
+                repeat(total) { index ->
+                    val near = Socket()
+                    near.connect(
+                        InetSocketAddress(InetAddress.getLoopbackAddress(), server.localPort),
+                        CONNECT_TIMEOUT_MILLIS,
+                    )
+                    val far = phase("accepting cap fixture socket ${index + 1}") { server.accept() }
+                    far.soTimeout = PROBE_READ_TIMEOUT_MILLIS
+                    farEnds += far
+                    outcomes += PairingOutcome()
+                    sessions += phase("constructing cap control session ${index + 1}") {
+                        provider.createControlSessionForPairingCapacityTest(
+                            lease = lease,
+                            socket = near,
+                            negotiated = pairingFixture(CAP_FIXTURE_OFFSET + index),
+                            role = SecurePeerRole.INITIATOR,
+                        )
+                    }
+                }
+                sessions.forEachIndexed { index, session ->
+                    phase("beginning cap pairing ${index + 1}") {
+                        session.beginSecurePairing(outcomes[index])
+                    }
+                }
+
+                assertTrue(
+                    "fewer than $MAX_CONCURRENT_PAIRINGS pairings reached cryptographic work on an " +
+                        "idle executor",
+                    awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) {
+                        (0 until total).count { admittedAndRunning(outcomes[it], farEnds[it]) } >=
+                            MAX_CONCURRENT_PAIRINGS
+                    },
+                )
+                // Counts, not indices: the pool does not guarantee which task runs first.
+                assertEquals(
+                    "more than $MAX_CONCURRENT_PAIRINGS pairings were doing cryptographic work",
+                    MAX_CONCURRENT_PAIRINGS,
+                    (0 until total).count { admittedAndRunning(outcomes[it], farEnds[it]) },
+                )
+                assertTrue(
+                    "the pairings beyond the cap did not report a concurrency limit refusal; " +
+                        "observed ${outcomes.map { it.result }}",
+                    awaitTrue(RELEASE_TIMEOUT_SECONDS) {
+                        outcomes.count {
+                            refusalCode(it) == SessionFailureCode.SECURE_SESSION_LIMIT_REACHED
+                        } == total - MAX_CONCURRENT_PAIRINGS
+                    },
+                )
+                assertEquals("the pairing path acquired establishment permits",
+                    0, observer.acquired.get() - acquiredBefore)
+                mark("pairing_cap_enforced",
+                    "admitted=$MAX_CONCURRENT_PAIRINGS " +
+                        "limit_refusals=${total - MAX_CONCURRENT_PAIRINGS} permits_held=0")
+
+                phase("closing every cap fixture session") {
+                    sessions.forEach { runCatching { it.close() } }
+                }
+                assertTrue("a cap pairing never reached a terminal result",
+                    awaitTrue(RELEASE_TIMEOUT_SECONDS) { outcomes.all { it.result != null } })
+                assertEquals("a cap pairing authenticated against a silent peer",
+                    0, outcomes.count { it.result is SecurePairingResult.Authenticated })
+
+                // Closing the admitted pairings must give the capacity back.
+                val restoredSessions = ArrayList<PairableControlSession>(MAX_CONCURRENT_PAIRINGS)
+                val restoredFarEnds = ArrayList<Socket>(MAX_CONCURRENT_PAIRINGS)
+                val restoredOutcomes = ArrayList<PairingOutcome>(MAX_CONCURRENT_PAIRINGS)
+                try {
+                    repeat(MAX_CONCURRENT_PAIRINGS) { index ->
+                        val near = Socket()
+                        near.connect(
+                            InetSocketAddress(InetAddress.getLoopbackAddress(), server.localPort),
+                            CONNECT_TIMEOUT_MILLIS,
+                        )
+                        val far = phase("accepting restore socket ${index + 1}") { server.accept() }
+                        far.soTimeout = PROBE_READ_TIMEOUT_MILLIS
+                        restoredFarEnds += far
+                        restoredOutcomes += PairingOutcome()
+                        restoredSessions += phase("constructing restore session ${index + 1}") {
+                            provider.createControlSessionForPairingCapacityTest(
+                                lease = lease,
+                                socket = near,
+                                negotiated = pairingFixture(CAP_FIXTURE_OFFSET + 32 + index),
+                                role = SecurePeerRole.INITIATOR,
+                            )
+                        }
+                    }
+                    restoredSessions.forEachIndexed { index, session ->
+                        phase("beginning restore pairing ${index + 1}") {
+                            session.beginSecurePairing(restoredOutcomes[index])
+                        }
+                    }
+                    assertTrue(
+                        "pairing capacity was not restored after the admitted pairings closed; " +
+                            "observed ${restoredOutcomes.map { it.result }}",
+                        awaitTrue(ACTIVE_WORK_TIMEOUT_SECONDS) {
+                            (0 until MAX_CONCURRENT_PAIRINGS).count {
+                                admittedAndRunning(restoredOutcomes[it], restoredFarEnds[it])
+                            } == MAX_CONCURRENT_PAIRINGS
+                        },
+                    )
+                    mark("pairing_capacity_restored", "admitted=$MAX_CONCURRENT_PAIRINGS")
+                } finally {
+                    restoredSessions.forEach { runCatching { it.close() } }
+                    restoredFarEnds.forEach { runCatching { it.close() } }
+                }
             } finally {
                 sessions.forEach { runCatching { it.close() } }
                 farEnds.forEach { runCatching { it.close() } }
@@ -607,6 +797,7 @@ public class ControlEstablishmentCapacityTest {
     /** Receives the production terminal result for one fixture session. */
     private class PairingOutcome : SecurePairingListener {
         private val terminal = CountDownLatch(1)
+        val approvals = AtomicInteger(0)
 
         @Volatile
         var result: SecurePairingResult? = null
@@ -614,7 +805,9 @@ public class ControlEstablishmentCapacityTest {
 
         override fun onApprovalRequired(request: SecurePairingApprovalRequest) {
             // A silent fixture peer can never reach an approval, and production has no
-            // auto-approval implementation to reach for either.
+            // auto-approval implementation to reach for either. Counted so a rejected operation
+            // can be shown never to have published one.
+            approvals.incrementAndGet()
         }
 
         override fun onCompleted(result: SecurePairingResult) {
@@ -664,11 +857,13 @@ public class ControlEstablishmentCapacityTest {
         const val TEST_TIMEOUT_MILLIS = 120_000L
         const val OBSERVER_DELAY_MILLIS = 50L
         const val PROBE_READ_TIMEOUT_MILLIS = 200
-        const val SESSION_TOTAL = 9
+        const val QUEUED_PAIRINGS = 4
+        /** Mirrors SecurePairingAttemptLimiter.Limits.maxConcurrentPairings. Pinned by the verifier. */
+        const val MAX_CONCURRENT_PAIRINGS = 2
+        const val CAP_FIXTURE_OFFSET = 64
         const val ACCEPT_TIMEOUT_MILLIS = 10_000
         const val SUBMISSION_TIMEOUT_SECONDS = 8L
         const val QUEUE_REFUSAL_TIMEOUT_SECONDS = 8L
         const val ACTIVE_WORK_TIMEOUT_SECONDS = 6L
-        const val MIXED_REFUSAL_TIMEOUT_SECONDS = 8L
     }
 }
