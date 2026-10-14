@@ -187,7 +187,10 @@ public class ControlEstablishmentCapacityTest {
                 )
             }
             assertTrue("expected a started lease but got $result", result is DiscoveryStartResult.Started)
-            lease = (result as DiscoveryStartResult.Started).lease
+            // An immutable local, not the captured var. Kotlin refuses to smart-cast a `var` that a
+            // closure mutates, so the close below would not compile against `lease` directly.
+            val activeLease = (result as DiscoveryStartResult.Started).lease
+            lease = activeLease
             mark("listener_bound", "peers=0 permits=0")
 
             // --- four establishments, each holding one real permit -------------------------------
@@ -261,7 +264,7 @@ public class ControlEstablishmentCapacityTest {
 
             // --- stop the lease ------------------------------------------------------------------
             mark("lease_stop_started")
-            phase("closing the lease") { lease.close() }
+            phase("closing the lease") { activeLease.close() }
             lease = null
             mark("lease_stop_completed")
         } finally {
