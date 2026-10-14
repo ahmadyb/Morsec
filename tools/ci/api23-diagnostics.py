@@ -78,6 +78,11 @@ CONSOLE_LOG = "ci-logs/60-api23-connected.log"
 # only through bounded().
 LOGCAT_LOG = "ci-logs/61-api23-logcat-tail.logcat"
 STATUS_FILE = "ci-logs/60-api23-exit-status.txt"
+TIMEOUT_FILE = "ci-logs/60-api23-timed-out.txt"
+# Phase markers the A3 harness prints to standard output. They are the only evidence
+# available when a run hangs: no result XML, no stack, just the last stage that finished.
+PHASE_MARKER = re.compile(r"\bA3PHASE\s+(\S+)(.*)$")
+MAX_PHASE_LINES = 20
 # Written as the script's last act. Its absence while the console log exists
 # means the instrumentation script was terminated mid-flight, which is a
 # different failure from anything the log itself can report.
@@ -195,6 +200,23 @@ def bounded(text: str, max_lines: int, max_chars: int = MAX_CHARS_PER_ANNOTATION
         out.append(line)
         used += len(line) + 1
     return redact("\n".join(out)) or "[no message]"
+
+
+def phase_report():
+    """The last A3PHASE marker and the bounded trail leading to it.
+
+    Markers reach the host through the Gradle console, because an instrumentation
+    process on API 23 cannot write into the runner workspace and its additional test
+    output directory is not supported at that API level.
+    """
+    matches = []
+    for line in read_log(CONSOLE_LOG).splitlines():
+        found = PHASE_MARKER.search(line)
+        if found:
+            matches.append(f"{found.group(1)}{found.group(2)}".strip())
+    if not matches:
+        return "none", ["no A3PHASE marker reached the console log"]
+    return matches[-1].split(" ", 1)[0], matches[-MAX_PHASE_LINES:]
 
 
 def console_tail(max_lines: int = 20) -> str:
@@ -318,6 +340,15 @@ def classify_outcome(terminated: bool, log_paths: list[str]):
     reported alongside it. Only when the log holds no recognisable cause does
     termination itself become the category.
     """
+    if read_log(TIMEOUT_FILE).strip():
+        return (
+            "Instrumentation command exceeded its hard process bound",
+            os.path.basename(TIMEOUT_FILE),
+            [
+                read_log(TIMEOUT_FILE).strip(),
+                "gradle was sent TERM and then KILL; the status was preserved, not treated as success",
+            ],
+        )
     classified = classify_logs(log_paths)
     if classified:
         name, source, hits = classified
@@ -444,6 +475,8 @@ def main() -> int:
                 f"result xml: {len(xmls)} file(s), {tests_seen} test(s), 0 failure(s)\n"
                 f"instrumentation exit status: {status_label}\n"
                 f"script ran to completion: {script_completed}\n"
+                f"last phase marker: {phase_report()[0]}\n"
+                f"--- phase trail ---\n" + "\n".join(phase_report()[1]) + "\n"
                 f"evidence source: {source}\n"
                 f"--- matching lines ---\n" + "\n".join(hits)
                 + f"\n--- console tail ---\n{console_tail()}",
@@ -460,6 +493,7 @@ def main() -> int:
         "API 23 diagnostics",
         bounded(
             f"instrumentation exit status: {status_label}\n"
+            f"last phase marker: {phase_report()[0]}\n"
             f"result xml: {len(xmls)} file(s)\n"
             f"html reports: {len(reports)}\n"
             f"tests: {tests_seen}\n"
