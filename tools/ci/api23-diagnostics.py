@@ -79,9 +79,19 @@ CONSOLE_LOG = "ci-logs/60-api23-connected.log"
 LOGCAT_LOG = "ci-logs/61-api23-logcat-tail.logcat"
 STATUS_FILE = "ci-logs/60-api23-exit-status.txt"
 TIMEOUT_FILE = "ci-logs/60-api23-timed-out.txt"
+# The dedicated logcat tag the A3 harness writes its phase markers to.
+PHASE_LOG = "ci-logs/62-api23-phases.log"
+# The marker that proves the harness ran to the end. A green run without it means the
+# diagnostic channel is dead, which is worth failing the build over: a channel that
+# silently reports nothing is indistinguishable from a test that never emitted anything.
+TERMINAL_PHASE = "cleanup_completed"
 # Phase markers the A3 harness prints to standard output. They are the only evidence
 # available when a run hangs: no result XML, no stack, just the last stage that finished.
-PHASE_MARKER = re.compile(r"\bA3PHASE\s+(\S+)(.*)$")
+# Two shapes: a logcat line carrying the dedicated tag, and the plain console form.
+# The tag form is what the harness actually emits -- `I/MorsecA3Phase( 1234): <phase>`.
+PHASE_MARKER = re.compile(
+    r"(?:MorsecA3Phase\s*\([^)]*\)\s*:\s*|\bA3PHASE\s+)(\S+)(.*)$"
+)
 MAX_PHASE_LINES = 20
 # Written as the script's last act. Its absence while the console log exists
 # means the instrumentation script was terminated mid-flight, which is a
@@ -210,12 +220,14 @@ def phase_report():
     output directory is not supported at that API level.
     """
     matches = []
-    for line in read_log(CONSOLE_LOG).splitlines():
+    for line in (read_log(PHASE_LOG) + "\n" + read_log(CONSOLE_LOG)).splitlines():
         found = PHASE_MARKER.search(line)
         if found:
             matches.append(f"{found.group(1)}{found.group(2)}".strip())
     if not matches:
-        return "none", ["no A3PHASE marker reached the console log"]
+        return "none", [
+            "no phase marker reached either the captured logcat tag or the console log"
+        ]
     return matches[-1].split(" ", 1)[0], matches[-MAX_PHASE_LINES:]
 
 
@@ -485,6 +497,26 @@ def main() -> int:
             ),
         )
 
+    if step_passed and not failures:
+        last_phase = phase_report()[0]
+        if last_phase != TERMINAL_PHASE:
+            emit(
+                "error",
+                f"API 23 phase channel is dead — expected terminal marker {TERMINAL_PHASE}",
+                bounded(
+                    f"instrumentation exit status: {status_label}\n"
+                    f"tests: {tests_seen}, failures: 0\n"
+                    f"last phase marker: {last_phase}\n"
+                    f"phase log: {'present' if read_log(PHASE_LOG).strip() else 'absent'}\n"
+                    "The instrumentation run passed, so the missing terminal marker means the "
+                    "phase transport is broken rather than the test being incomplete. A channel "
+                    "that reports nothing cannot diagnose the next hang, which is the only reason "
+                    "it exists.",
+                    MAX_EVIDENCE_LINES + 8,
+                ),
+            )
+            return 1
+
     # Always emit one summary, on green runs too. That is what proves the
     # channel itself is alive: a green run that says "3 tests, 0 failures"
     # shows the diagnostic really read the results.
@@ -494,6 +526,7 @@ def main() -> int:
         bounded(
             f"instrumentation exit status: {status_label}\n"
             f"last phase marker: {phase_report()[0]}\n"
+            f"phase log: {'present' if read_log(PHASE_LOG).strip() else 'absent'}\n"
             f"result xml: {len(xmls)} file(s)\n"
             f"html reports: {len(reports)}\n"
             f"tests: {tests_seen}\n"

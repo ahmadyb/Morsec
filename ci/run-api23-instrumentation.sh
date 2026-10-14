@@ -45,6 +45,12 @@ fi
 echo "connectedDebugAndroidTest exit status: $status"
 tail -n 150 ci-logs/60-api23-connected.log
 
+# The A3 phase markers travel by logcat, because instrumentation stdout does not reach the
+# Gradle console and API 23 does not support an additional test output directory. Captured on
+# every outcome -- success, failure and timeout alike -- and before any cleanup, while the
+# emulator is still reachable. One tag only, so no unbounded logcat is collected.
+adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I" > ci-logs/62-api23-phases.log 2>&1
+
 if [ "$status" -ne 0 ]; then
   adb devices -l > ci-logs/61-api23-device-after.log 2>&1
   # Bounded tail. .logcat rather than .log so the generic ci-logs/*.log failure emitter cannot

@@ -1268,6 +1268,111 @@ function verifyEstablishmentAndPairingCapacityStayDistinct() {
 
 verifyEstablishmentAndPairingCapacityStayDistinct();
 
+/**
+ * Group 21 -- the A3 phase channel and the timeout bounds cannot be removed silently.
+ *
+ * Both exist because a run went wrong in a way that produced no usable evidence. Run 38460137506
+ * hung and was cancelled with nothing to read; the phase markers and the hard process bounds are the
+ * answer, and a check that can be deleted without anything noticing is not a check.
+ */
+function verifyA3PhaseChannelAndTimeoutBounds() {
+  const harness = read(join(
+    ROOT, 'transport-lan', 'src', 'androidTest', 'kotlin', 'app', 'morsecode', 'transport', 'lan',
+    'ControlEstablishmentCapacityTest.kt',
+  ));
+  const wrapper = read(join(ROOT, 'ci', 'run-api23-instrumentation.sh'));
+  const diagnostics = read(join(ROOT, 'tools', 'ci', 'api23-diagnostics.py'));
+  const workflow = read(join(ROOT, '.github', 'workflows', 'android-ci.yml'));
+
+  check(
+    'the harness emits phase markers through the dedicated Android log tag',
+    harness.includes('const val PHASE_TAG = "MorsecA3Phase"') &&
+      harness.includes('Log.i(PHASE_TAG,'),
+  );
+  mutation(
+    'replacing the Android log call with a plain print fails this check',
+    harness,
+    (src) => src.replace('Log.i(PHASE_TAG,', 'println('),
+    (src) => src.includes('Log.i(PHASE_TAG,'),
+  );
+  mutation(
+    'renaming the phase tag fails this check',
+    harness,
+    (src) => src.replace('const val PHASE_TAG = "MorsecA3Phase"',
+      'const val PHASE_TAG = "MorsecA3Phases"'),
+    (src) => harness.includes('const val PHASE_TAG = "MorsecA3Phase"') &&
+      src.includes('const val PHASE_TAG = "MorsecA3Phase"'),
+  );
+
+  check(
+    'the harness emits the terminal cleanup marker that proves the channel is alive',
+    harness.includes('mark("cleanup_completed"'),
+  );
+  mutation(
+    'dropping the terminal cleanup marker fails this check',
+    harness,
+    (src) => src.replace('mark("cleanup_completed",', 'unusedCleanupMarker('),
+    (src) => src.includes('mark("cleanup_completed"'),
+  );
+
+  check(
+    'every Android log call in the harness uses the phase tag and nothing else',
+    (harness.match(/Log\.[a-z]+\(/g) || []).length > 0 &&
+      (harness.match(/Log\.[a-z]+\((?!PHASE_TAG)/g) || []).length === 0,
+  );
+
+  check(
+    'the wrapper captures the phase tag from logcat on every outcome',
+    wrapper.includes('adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I"') &&
+      wrapper.includes('> ci-logs/62-api23-phases.log') &&
+      wrapper.indexOf('62-api23-phases.log') < wrapper.indexOf('if [ "$status" -ne 0 ]'),
+  );
+  mutation(
+    'moving the phase capture inside the failure-only branch fails this check',
+    wrapper,
+    (src) => src.replace(
+      'adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I" > ci-logs/62-api23-phases.log 2>&1',
+      '',
+    ),
+    (src) => src.includes('62-api23-phases.log') &&
+      src.indexOf('62-api23-phases.log') < src.indexOf('if [ "$status" -ne 0 ]'),
+  );
+
+  check(
+    'the diagnostic step reads the captured phase log and fails a green run that lacks the marker',
+    diagnostics.includes('PHASE_LOG = "ci-logs/62-api23-phases.log"') &&
+      diagnostics.includes('TERMINAL_PHASE = "cleanup_completed"') &&
+      /if step_passed and not failures:/.test(diagnostics) &&
+      diagnostics.includes('MorsecA3Phase'),
+  );
+
+  check(
+    'the instrumentation command is bounded outside the JVM with TERM then KILL',
+    /timeout --kill-after=/.test(wrapper) &&
+      wrapper.includes('TIMEOUT_BOUND_SECONDS') &&
+      wrapper.includes('exit "$status"'),
+  );
+  check(
+    'the workflow bounds the whole step and never converts a timeout into success',
+    workflow.includes('TIMEOUT_BOUND_SECONDS: "900"') &&
+      /timeout-minutes: 25/.test(workflow) &&
+      workflow.includes('Diagnose API 23 instrumentation results'),
+  );
+  check(
+    'the harness carries its own per-test bound',
+    harness.includes('@Test(timeout = TEST_TIMEOUT_MILLIS)') &&
+      harness.includes('const val TEST_TIMEOUT_MILLIS = 120_000L'),
+  );
+  mutation(
+    'removing the per-test bound fails this check',
+    harness,
+    (src) => src.replace('@Test(timeout = TEST_TIMEOUT_MILLIS)', '@Test'),
+    (src) => src.includes('@Test(timeout = TEST_TIMEOUT_MILLIS)'),
+  );
+}
+
+verifyA3PhaseChannelAndTimeoutBounds();
+
 console.log('\nPart B capability trust boundary verification');
 console.log(checks.join('\n'));
 console.log(`\n${checks.length - failures}/${checks.length} checks passed, ${failures} failed`);
