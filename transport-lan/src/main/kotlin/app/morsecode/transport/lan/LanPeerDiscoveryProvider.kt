@@ -989,7 +989,15 @@ public class LanPeerDiscoveryProvider(
             }
         }
 
-        private fun createControlSession(
+        /**
+         * Module-visible rather than private so the provider's test-only session factory can reach
+         * it. Unlike Java, Kotlin does not let an enclosing class touch a nested class's private
+         * members -- `:transport-lan:compileDebugKotlin` failed with "Cannot access ... it is
+         * private" the first time this was tried. `internal` is the narrowest visibility that
+         * works, and it adds nothing to the module's public surface because this class is private:
+         * nothing outside this file can name [LanDiscoveryLease] to call it.
+         */
+        internal fun createControlSession(
             socket: Socket,
             negotiated: app.morsecode.core.transfer.session.NegotiatedSession,
             role: SecurePeerRole,

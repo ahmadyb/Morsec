@@ -1502,6 +1502,19 @@ function verifyPairingCapacityTestSeamStaysTestOnly() {
     (src) => src.includes('throw IllegalArgumentException("lease was not created by this provider")'),
   );
 
+  check(
+    'the lease stays private and the session constructor stays out of the public surface',
+    provider.includes('private class LanDiscoveryLease(') &&
+      provider.includes('internal fun createControlSession(') &&
+      !provider.includes('public fun createControlSession('),
+  );
+  mutation(
+    'making the lease public fails this check',
+    provider,
+    (src) => src.replace('private class LanDiscoveryLease(', 'internal class LanDiscoveryLease('),
+    (src) => src.includes('private class LanDiscoveryLease('),
+  );
+
   const callers = productionSources.filter(
     (path) => path !== providerPath && read(path).includes(SEAM),
   );
