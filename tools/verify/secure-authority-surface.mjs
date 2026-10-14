@@ -1315,6 +1315,28 @@ function verifyA3PhaseChannelAndTimeoutBounds() {
     (src) => src.includes('mark("cleanup_completed"'),
   );
 
+  // The terminal marker must be the last marker the harness emits. Run 38595962958 passed all
+  // five tests with a live phase log and still failed the green-run gate, because port_released
+  // was emitted after cleanup_completed. Nothing in the local gate caught it, so pin it here.
+  const markers = [...harness.matchAll(/mark\("([a-z_0-9]+)"/g)].map((m) => m[1]);
+  check(
+    'the harness ends on the terminal cleanup marker and on nothing after it',
+    markers.length > 0 && markers[markers.length - 1] === 'cleanup_completed' &&
+      markers.includes('port_free') === false,
+  );
+  mutation(
+    'emitting a marker after the terminal one fails this check',
+    harness,
+    (src) => src.replace(
+      '            assertTrue("the lease stopped but the fixed control port is still accepting connections",\n                portFree)\n        }',
+      '            assertTrue("the lease stopped but the fixed control port is still accepting connections",\n                portFree)\n            mark("port_released", "late_establishment=refused")\n        }',
+    ),
+    (src) => {
+      const names = [...src.matchAll(/mark\("([a-z_0-9]+)"/g)].map((m) => m[1]);
+      return names.length > 0 && names[names.length - 1] === 'cleanup_completed';
+    },
+  );
+
   check(
     'every Android log call in the harness uses the phase tag and nothing else',
     (harness.match(/Log\.[a-z]+\(/g) || []).length > 0 &&

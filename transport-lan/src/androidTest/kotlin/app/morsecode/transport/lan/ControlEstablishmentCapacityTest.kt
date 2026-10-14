@@ -316,20 +316,25 @@ public class ControlEstablishmentCapacityTest {
             lease?.let { runCatching { it.close() } }
             peers.forEach { runCatching { it.close() } }
             peers.clear()
-            mark("cleanup_completed",
-                "acquired=${observer.acquired.get()} released=${observer.released.get()} " +
-                    "submissions=${observer.submitted.get()} rejections=${observer.rejected.get()} " +
-                    "delivered=${listener.delivered.get()}")
-        }
 
-        // After cleanup the fixed port has no listener, and a late establishment cannot start.
-        assertTrue("the lease stopped but the fixed control port is still accepting connections",
-            awaitTrue(PORT_FREE_TIMEOUT_SECONDS) {
+            // Proving the fixed port has no listener is part of proving cleanup completed, so it
+            // belongs here rather than after it. The terminal marker has to be the last thing this
+            // test emits, because CI fails a green run that does not end on it -- run 38595962958
+            // passed all five tests and still failed this check for emitting port_released
+            // afterwards. awaitTrue returns a Boolean and never throws, so it is safe in finally.
+            val portFree = awaitTrue(PORT_FREE_TIMEOUT_SECONDS) {
                 runCatching {
                     Socket().use { it.connect(controlEndpoint(), CONNECT_TIMEOUT_MILLIS) }
                 }.isFailure
-            })
-        mark("port_released", "late_establishment=refused")
+            }
+            mark("cleanup_completed",
+                "port_free=$portFree acquired=${observer.acquired.get()} " +
+                    "released=${observer.released.get()} " +
+                    "submissions=${observer.submitted.get()} rejections=${observer.rejected.get()} " +
+                    "delivered=${listener.delivered.get()}")
+            assertTrue("the lease stopped but the fixed control port is still accepting connections",
+                portFree)
+        }
     }
 
     private companion object {
