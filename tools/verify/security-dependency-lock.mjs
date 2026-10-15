@@ -47,6 +47,16 @@ const DYNAMIC = /(\+|latest\.|latest\.)|^\[|^\(|,$/;
 
 const results = [];
 let failures = 0;
+// The CLI body runs at module top level, so an uncaught throw would otherwise print a stack trace
+// with no "FAIL" line and no summary, and CI -- which greps for both -- would report nothing at all.
+// Run 38716040277 failed that way. Turn any crash into a reported failure instead.
+process.on('uncaughtException', (error) => {
+  const message = error && error.message ? error.message : String(error);
+  console.log(`  FAIL the verifier crashed instead of reporting: ${message}`);
+  console.log(`\n0/${results.length + 1} checks passed, 1 failed`);
+  process.exit(1);
+});
+
 function check(name, ok, detail) {
   results.push(`${ok ? '  ok  ' : '  FAIL'} ${name}${detail && !ok ? ` -- ${detail}` : ''}`);
   if (!ok) failures += 1;

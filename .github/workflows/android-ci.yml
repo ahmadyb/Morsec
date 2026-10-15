@@ -267,10 +267,13 @@ jobs:
           set -e
           echo "secure lock verifier exit status: ${lock_status}"
           grep -c '^' ci-logs/24-secure-lock-verify.log | sed 's/^/secure lock verify log lines: /'
-          grep -m 12 'FAIL' ci-logs/24-secure-lock-verify.log | while IFS= read -r line; do
+          # `|| true`: with pipefail still set, a grep that matches nothing returns 1 and would
+          # abort the step before the exit below, which is how runs 38705203819 to 38716040277
+          # produced no annotation at all.
+          { grep -m 12 'FAIL' ci-logs/24-secure-lock-verify.log || true; } | while IFS= read -r line; do
             echo "::error title=secure dependency lock::${line}"
           done
-          grep -m 1 'checks passed' ci-logs/24-secure-lock-verify.log \
+          { grep -m 1 'checks passed' ci-logs/24-secure-lock-verify.log || true; } \
             | sed 's/^/::notice title=secure dependency lock::/'
           exit "$lock_status"
 
