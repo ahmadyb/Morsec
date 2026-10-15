@@ -293,7 +293,14 @@ jobs:
             fi
             consumer_line=$(line_of "^:${project}:\(compile\|test\|lint\|dex\|package\|assemble\)")
             if [ -n "$consumer_line" ] && [ "$verify_line" -gt "$consumer_line" ]; then
-              echo "::error title=security lock task graph::${project} runs a consumer task at line ${consumer_line} before verification at line ${verify_line}"
+              # Name the offending task. Run 38708167687 reported "app runs a consumer task at line
+              # 123 before verification at line 143" and nothing else, which is not enough to act on
+              # because the job log cannot be retrieved through the API afterwards.
+              offender=$(sed -n "${consumer_line}p" "$log" | tr -d '\r' | cut -c1-160)
+              echo "::error title=security lock task graph::${project} runs ${offender} at line ${consumer_line} before verification at line ${verify_line}"
+              awk -v from="$((consumer_line - 2))" -v to="$((verify_line + 2))" \
+                'NR >= from && NR <= to && /^:/ { printf "::notice title=security lock task graph::plan L%d %s\n", NR, $0 }' \
+                "$log" | head -14
               fail=1
             else
               echo "::notice title=security lock task graph::${project}:verifySecureDependencyLock planned at line ${verify_line}, first consumer task at line ${consumer_line:-none}"
