@@ -253,11 +253,19 @@ jobs:
           # Capture and annotate, because the job log is not retrievable afterwards through the API
           # and an unannotated red step tells the next reader nothing. Run 38705203819 failed here
           # with no reason recoverable from either endpoint.
+          # GitHub Actions already runs this block with `set -eo pipefail`, so a failing pipeline
+          # would abort the step here and none of the annotations below would ever be emitted. Runs
+          # 38705203819 through 38712120643 all failed this step producing no annotation at all for
+          # exactly that reason. Suspend errexit across the pipeline, capture the real status, then
+          # restore it.
+          set +e
           node tools/verify/security-dependency-lock.mjs \
             --resolved transport-lan=ci-logs/23-secure-lock-transport-lan.log \
             --resolved app=ci-logs/23-secure-lock-app.log \
             --cache 2>&1 | tee ci-logs/24-secure-lock-verify.log
           lock_status="${PIPESTATUS[0]}"
+          set -e
+          echo "secure lock verifier exit status: ${lock_status}"
           grep -c '^' ci-logs/24-secure-lock-verify.log | sed 's/^/secure lock verify log lines: /'
           grep -m 12 'FAIL' ci-logs/24-secure-lock-verify.log | while IFS= read -r line; do
             echo "::error title=secure dependency lock::${line}"
