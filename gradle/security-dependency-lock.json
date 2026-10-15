@@ -48,7 +48,15 @@
         "library",
         "aar"
       ],
-      "publisherMetadata": "Gradle module metadata (.module) and POM are both published; neither is byte-verified here"
+      "publisherMetadata": "Gradle module metadata (.module) and POM are both published; neither is byte-verified here",
+      "provenance": {
+        "algorithm": "sha256",
+        "crossCheckedAgainst": [
+          "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
+        ],
+        "signatureVerified": false,
+        "note": "Digest pre-existing in gradle/secure-artifact-checksums.txt and re-verified in CI against the bytes Gradle resolved. Which checksum sidecars Maven Central publishes for this coordinate, and whether the resolved bytes match them, is measured and reported by the CI provenance step rather than asserted here."
+      }
     },
     {
       "group": "org.bouncycastle",
@@ -65,7 +73,15 @@
         "library",
         "jar"
       ],
-      "publisherMetadata": "POM published; not byte-verified here"
+      "publisherMetadata": "POM published; not byte-verified here",
+      "provenance": {
+        "algorithm": "sha256",
+        "crossCheckedAgainst": [
+          "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
+        ],
+        "signatureVerified": false,
+        "note": "Digest pre-existing in gradle/secure-artifact-checksums.txt and re-verified in CI against the bytes Gradle resolved. Which checksum sidecars Maven Central publishes for this coordinate, and whether the resolved bytes match them, is measured and reported by the CI provenance step rather than asserted here."
+      }
     },
     {
       "group": "org.bouncycastle",
@@ -82,7 +98,15 @@
         "library",
         "jar"
       ],
-      "publisherMetadata": "POM published; not byte-verified here"
+      "publisherMetadata": "POM published; not byte-verified here",
+      "provenance": {
+        "algorithm": "sha256",
+        "crossCheckedAgainst": [
+          "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
+        ],
+        "signatureVerified": false,
+        "note": "Digest pre-existing in gradle/secure-artifact-checksums.txt and re-verified in CI against the bytes Gradle resolved. Which checksum sidecars Maven Central publishes for this coordinate, and whether the resolved bytes match them, is measured and reported by the CI provenance step rather than asserted here."
+      }
     },
     {
       "group": "org.bouncycastle",
@@ -99,7 +123,15 @@
         "library",
         "jar"
       ],
-      "publisherMetadata": "POM published; not byte-verified here"
+      "publisherMetadata": "POM published; not byte-verified here",
+      "provenance": {
+        "algorithm": "sha256",
+        "crossCheckedAgainst": [
+          "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
+        ],
+        "signatureVerified": false,
+        "note": "Digest pre-existing in gradle/secure-artifact-checksums.txt and re-verified in CI against the bytes Gradle resolved. Which checksum sidecars Maven Central publishes for this coordinate, and whether the resolved bytes match them, is measured and reported by the CI provenance step rather than asserted here."
+      }
     },
     {
       "group": "org.conscrypt",
@@ -121,7 +153,20 @@
         "library",
         "jar"
       ],
-      "reachesProductionArtifact": false
+      "reachesProductionArtifact": false,
+      "provenance": {
+        "algorithm": "sha256",
+        "crossCheckedAgainst": [
+          "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
+        ],
+        "signatureAvailable": true,
+        "signatureVerified": false,
+        "publishedSidecars": [
+          "md5",
+          "sha1"
+        ],
+        "note": "Maven Central publishes a .asc detached signature and .md5/.sha1 sidecars for this artifact but no .sha256 (directory listing for 2.5.2 fetched 2026-10-15). The signature is NOT verified: no keyring, no pinned Conscrypt release-signing fingerprint, and no keyserver reachable from this environment. Provenance rests on the bytes Gradle itself resolved and on cross-checks against the published sidecars, which CI performs and reports. A locally calculated digest is recorded as locally calculated and is never described as independently published."
+      }
     }
   ],
   "configurations": [

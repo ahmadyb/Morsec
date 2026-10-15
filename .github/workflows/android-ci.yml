@@ -225,6 +225,60 @@ jobs:
       # The lock names nine configurations across two projects. Each is resolved and compared, and
       # the reports are kept per project so a configuration is checked against its own project's
       # graph rather than whichever project printed that configuration name first.
+      - name: Establish and report provenance for the locked security binaries
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          # Provenance is measured, not asserted. For each locked binary this hashes the bytes Gradle
+          # actually resolved, then fetches every checksum sidecar Maven Central publishes for that
+          # coordinate and compares. Which sidecars exist is discovered here rather than recorded from
+          # memory, and a published sidecar that does not match is a hard failure.
+          set +e
+          node tools/verify/security-dependency-lock.mjs --emit-digests 2>&1 | tee ci-logs/25-secure-lock-digests.txt
+          digest_status="${PIPESTATUS[0]}"
+          set -e
+          provenance_fail=0
+          while IFS='|' read -r gav state size sha256 sha1 md5 lockedSize lockedSha; do
+            [ -n "$gav" ] || continue
+            if [ "$state" != "present" ]; then
+              echo "::error title=secure dependency provenance::${gav##*/} was not in the Gradle module cache, so no digest could be established"
+              provenance_fail=1
+              continue
+            fi
+            base="https://repo1.maven.org/maven2/${gav}"
+            published_algorithms=""
+            matched_algorithms=""
+            mismatched=""
+            for algo in sha256 sha1 md5; do
+              sidecar=$(curl -fsSL --max-time 30 "${base}.${algo}" 2>/dev/null | tr -d '[:space:]' || true)
+              [ -n "$sidecar" ] || continue
+              published_algorithms="${published_algorithms}${published_algorithms:+,}${algo}"
+              eval "computed=\${${algo}}"
+              if [ "$sidecar" = "$computed" ]; then
+                matched_algorithms="${matched_algorithms}${matched_algorithms:+,}${algo}"
+              else
+                mismatched="${mismatched}${mismatched:+,}${algo}"
+              fi
+            done
+            # Bounded: no path, no cache location, no full URL, just the coordinate and the results.
+            if [ -n "$mismatched" ]; then
+              echo "::error title=secure dependency provenance::${gav##*/} does not match its published ${mismatched} sidecar"
+              provenance_fail=1
+            elif [ -z "$published_algorithms" ]; then
+              echo "::error title=secure dependency provenance::${gav##*/} has no published checksum sidecar to cross-check against"
+              provenance_fail=1
+            else
+              echo "::notice title=secure dependency provenance::${gav##*/} size=${size} published=[${published_algorithms}] matched=[${matched_algorithms}] sha256=${sha256} locked=${lockedSha}"
+            fi
+            if [ "$sha256" != "$lockedSha" ]; then
+              echo "::error title=secure dependency provenance::${gav##*/} resolved sha256 ${sha256} does not match the lock"
+              provenance_fail=1
+            fi
+          done < ci-logs/25-secure-lock-digests.txt
+          if [ "$digest_status" -ne 0 ]; then exit "$digest_status"; fi
+          if [ "$provenance_fail" -ne 0 ]; then exit 1; fi
+
       - name: Verify the locked security dependency graph and artifact bytes
         if: ${{ !cancelled() }}
         run: |
@@ -293,39 +347,22 @@ jobs:
           plan_status=${PIPESTATUS[0]}
           if [ "$plan_status" -ne 0 ]; then exit "$plan_status"; fi
           log=ci-logs/24-secure-lock-task-order.log
-          line_of() { grep -n "$1" "$log" | head -1 | cut -d: -f1; }
-          fail=0
-          for project in transport-lan app; do
-            verify_line=$(line_of "^:${project}:verifySecureDependencyLock ")
-            if [ -z "$verify_line" ]; then
-              echo "::error title=security lock task graph::${project}:verifySecureDependencyLock is not in the task graph at all"
-              fail=1
-              continue
-            fi
-            # Match exactly the families the Gradle wiring gates, no more. A bare "compile" prefix
-            # also matches AGP resource tasks such as :app:compileDebugNavigationResources, which is
-            # neither KotlinCompile nor JavaCompile and consumes no dependency classpath; run
-            # 38710153534 failed here on that task even though verification was correctly ordered
-            # for every real consumer. Naming Kotlin and Java compilation explicitly keeps this
-            # proof aligned with the wiring instead of stricter than it.
-            consumer_line=$(line_of "^:${project}:\(compile[A-Za-z]*\(Kotlin\|JavaWithJavac\)\|test\|lint\|dex\|package\|assemble\|bundle\|connected\)")
-            if [ -n "$consumer_line" ] && [ "$verify_line" -gt "$consumer_line" ]; then
-              # Name the offending task. Run 38708167687 reported "app runs a consumer task at line
-              # 123 before verification at line 143" and nothing else, which is not enough to act on
-              # because the job log cannot be retrieved through the API afterwards.
-              offender=$(sed -n "${consumer_line}p" "$log" | tr -d '\r' | cut -c1-160)
-              echo "::error title=security lock task graph::${project} runs ${offender} at line ${consumer_line} before verification at line ${verify_line}"
-              awk -v from="$((consumer_line - 2))" -v to="$((verify_line + 2))" \
-                'NR >= from && NR <= to && /^:/ { printf "::notice title=security lock task graph::plan L%d %s\n", NR, $0 }' \
-                "$log" | head -14
-              fail=1
-            else
-              echo "::notice title=security lock task graph::${project}:verifySecureDependencyLock planned at line ${verify_line}, first consumer task at line ${consumer_line:-none}"
-            fi
-          done
+          # The ordering rule lives in the verifier, where it is covered by fixtures, rather than in
+          # shell regexes that cannot be tested. `--plan` names Kotlin and Java compilation
+          # explicitly, so AGP resource tasks sharing a `compile` prefix are not mistaken for
+          # consumers of the locked classpath.
+          set +e
+          node tools/verify/security-dependency-lock.mjs --plan ci-logs/24-secure-lock-task-order.log 2>&1 \
+            | tee ci-logs/24-secure-lock-task-order-result.txt
+          plan_status="${PIPESTATUS[0]}"
+          set -e
+          { grep 'FAIL' ci-logs/24-secure-lock-task-order-result.txt || true; } \
+            | sed 's/^/::error title=security lock task graph::/'
+          { grep 'checks passed' ci-logs/24-secure-lock-task-order-result.txt || true; } \
+            | sed 's/^/::notice title=security lock task graph::/'
           planned=$(grep -c '^:' "$log" || true)
-          echo "::notice title=security lock task graph::${planned} task(s) planned for the five representative invocations, verification included and first"
-          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "::notice title=security lock task graph::${planned} task(s) planned for the five representative invocations"
+          exit "$plan_status"
 
       - name: Resolve and verify secure dependency graph
         if: ${{ !cancelled() }}
@@ -514,6 +551,33 @@ jobs:
           set -uo pipefail
           mkdir -p ci-logs
           ./gradlew --no-daemon --stacktrace :app:assembleDebugAndroidTest :transport-lan:assembleDebugAndroidTest 2>&1 | tee ci-logs/45-android-test.log
+
+      - name: Record the tested APK and instrumentation APK dependency layout
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          # Evidence for the app:debugAndroidTestRuntimeClasspath subset: which of the nine locked
+          # configurations resolve crypto, what the tested debug APK actually packages, and whether
+          # androidTest packaging builds the tested APK at all.
+          for log in ci-logs/23-secure-lock-transport-lan.log ci-logs/23-secure-lock-app.log; do
+            [ -f "$log" ] || continue
+            { grep -nE '^[a-z][A-Za-z]*( - )|org\.conscrypt|org\.bouncycastle' "$log" | head -30 || true; } \
+              | sed 's/^/::notice title=secure lock graph::/'
+          done
+          if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            { unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -iE 'libconscrypt_jni|\.so$' | head -12 || true; } \
+              | sed 's/^/::notice title=tested apk contents::/'
+          fi
+          set +e
+          ./gradlew --no-daemon --dry-run :app:assembleDebugAndroidTest 2>&1 \
+            | tee ci-logs/26-secure-lock-android-test-plan.log
+          set -e
+          { grep -E '^:app:(assembleDebug|packageDebug|dexBuilderDebug|compileDebugKotlin|verifySecureDependencyLock)( |$)' \
+              ci-logs/26-secure-lock-android-test-plan.log | head -12 || true; } \
+            | sed 's/^/::notice title=android test plan::/'
+          node tools/verify/security-dependency-lock.mjs --plan ci-logs/26-secure-lock-android-test-plan.log \
+            | sed 's/^/::notice title=android test plan order::/' || true
 
       - name: Run bundled Conscrypt TLS 1.3 compatibility test on API 23
         id: api23

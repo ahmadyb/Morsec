@@ -26,13 +26,14 @@
  * check fails.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
-const LOCK_PATH = join(ROOT, 'gradle', 'security-dependency-lock.json');
+let LOCK_PATH = join(ROOT, 'gradle', 'security-dependency-lock.json');
 const ROOT_BUILD = join(ROOT, 'build.gradle.kts');
 
 const APPROVED = new Set([
@@ -67,6 +68,7 @@ function check(name, ok, detail) {
 export function validateStructure(lock) {
   const problems = [];
   if (!lock || typeof lock !== 'object') return ['lock is not an object'];
+  if (lock.schemaVersion !== 1) return [`unsupported schemaVersion ${JSON.stringify(lock.schemaVersion)}, expected 1`];
   const components = lock.components;
   if (!Array.isArray(components) || components.length === 0) return ['components is not a non-empty array'];
 
@@ -102,6 +104,21 @@ export function validateStructure(lock) {
     }
     if (c.role === 'test-only' && c.reachesProductionArtifact !== false) {
       problems.push(`${c.group}:${c.artifact}: a test-only component must declare reachesProductionArtifact false`);
+    }
+    // Every entry is executable code, so every entry carries a provenance record. This is where
+    // the digest came from and what it was cross-checked against; it is never a substitute for the
+    // digest itself.
+    const prov = c.provenance;
+    if (!prov || typeof prov !== 'object') {
+      problems.push(`${c.group}:${c.artifact}: no provenance record`);
+    } else {
+      if (!prov.algorithm) problems.push(`${c.group}:${c.artifact}: provenance names no algorithm`);
+      if (!Array.isArray(prov.crossCheckedAgainst)) {
+        problems.push(`${c.group}:${c.artifact}: provenance lists nothing it was cross-checked against`);
+      }
+      if (prov.signatureVerified === true && !prov.signingKeyFingerprint) {
+        problems.push(`${c.group}:${c.artifact}: claims a verified signature with no key fingerprint`);
+      }
     }
     const coordinate = `${c.group}:${c.artifact}:${c.version}`;
     if (seen.has(coordinate)) problems.push(`duplicate lock entry ${coordinate}`);
@@ -289,6 +306,58 @@ export function wiringProblems(buildScript) {
     if (!buildScript.includes(`"${prefix}"`)) problems.push(`no task-name coverage for ${prefix}* tasks`);
   }
   if (!/dependsOn\(/.test(buildScript)) problems.push('nothing depends on the verification task');
+  return problems;
+}
+
+/**
+ * Reads a `--dry-run` task plan and proves the verification task is planned before every task that
+ * consumes the locked artifacts.
+ *
+ * The consumer pattern names Kotlin and Java compilation explicitly. A bare `compile` prefix also
+ * matches AGP resource tasks such as `:app:compileDebugNavigationResources`, which is neither
+ * KotlinCompile nor JavaCompile, consumes no dependency classpath, and is deliberately not gated by
+ * the wiring in build.gradle.kts. Run 38710153534 failed on exactly that task. Matching the gated
+ * set keeps this proof aligned with the wiring instead of stricter than it.
+ */
+export const CONSUMER_PATTERN = '(compile[A-Za-z]*(Kotlin|JavaWithJavac)|test[A-Za-z]*UnitTest|lint|dex|package|assemble|bundle|connected)';
+
+export function planOrderProblems(plan, projects) {
+  const problems = [];
+  const lines = String(plan).split(/\r?\n/);
+  for (const project of projects) {
+    const verifyAt = lines.findIndex((l) => new RegExp(`^:${project}:verifySecureDependencyLock( |$)`).test(l));
+    if (verifyAt < 0) {
+      problems.push(`${project}:verifySecureDependencyLock is not in the task graph at all`);
+      continue;
+    }
+    const consumerAt = lines.findIndex((l) => new RegExp(`^:${project}:${CONSUMER_PATTERN}`).test(l));
+    if (consumerAt < 0) continue;
+    if (verifyAt > consumerAt) {
+      problems.push(`${project} runs ${lines[consumerAt].trim()} at line ${consumerAt + 1} ` +
+        `before verification at line ${verifyAt + 1}`);
+    }
+  }
+  return problems;
+}
+
+/* ------------------------------------------------------------------ workflow wiring */
+
+/** The Gradle gate is the enforcement; the workflow must not be the only thing invoking it. */
+export function workflowProblems(workflow) {
+  const problems = [];
+  const required = [
+    ['security-dependency-lock.mjs', 'the lock verifier is not invoked'],
+    ['--dry-run', 'no task-plan proof of ordering'],
+    ['verifySecureDependencyLock', 'no reference to the verification task'],
+    [':app:assembleDebug', 'app debug assembly is not proven'],
+    [':app:assembleDebugAndroidTest', 'androidTest packaging is not proven'],
+    [':transport-lan:compileDebugKotlin', 'direct Kotlin compilation is not proven'],
+    [':transport-lan:testDebugUnitTest', 'unit test execution is not proven'],
+    [':transport-lan:lintDebug', 'lint is not proven'],
+  ];
+  for (const [needle, message] of required) {
+    if (!workflow.includes(needle)) problems.push(message);
+  }
   return problems;
 }
 
@@ -489,6 +558,113 @@ function runSelfTest() {
     reportWith('debugRuntimeClasspath'),
     [{ project: 'transport-lan', name: 'debugRuntimeClasspath', expect: 'none', note: 'x' }]);
 
+  // --- digest fixtures ------------------------------------------------------------------------
+  {
+    const trueSize = new Map(lock.components.map((c) => [c.artifact, c.sizeBytes]));
+    const trueSha = new Map(lock.components.map((c) => [c.artifact, c.sha256]));
+    const resolveTrue = (c) => ({ path: LOCK_PATH, size: trueSize.get(c.artifact) });
+    const digestTrue = (c) => trueSha.get(c.artifact);
+
+    const wrongSha = JSON.parse(JSON.stringify(lock));
+    wrongSha.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').sha256 = 'c'.repeat(64);
+    check('mutation: a wrong SHA-256 is rejected against the resolved bytes',
+      verifyBytes(wrongSha.components, resolveTrue, digestTrue).length > 0);
+
+    const wrongSize = JSON.parse(JSON.stringify(lock));
+    wrongSize.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').sizeBytes -= 1;
+    check('mutation: a wrong size is rejected against the resolved bytes',
+      verifyBytes(wrongSize.components, resolveTrue, digestTrue).length > 0);
+
+    const wrongName = JSON.parse(JSON.stringify(lock));
+    wrongName.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').fileName = 'renamed.jar';
+    check('mutation: a wrong filename is rejected',
+      validateStructure(wrongName).length > 0);
+
+    const alteredUber = JSON.parse(JSON.stringify(lock));
+    check('mutation: an altered Conscrypt OpenJDK JAR is rejected',
+      verifyBytes(alteredUber.components,
+        (c) => (c.artifact === 'conscrypt-openjdk-uber'
+          ? { path: LOCK_PATH, size: c.sizeBytes + 1 }
+          : { path: LOCK_PATH, size: c.sizeBytes }), digestTrue).length > 0);
+
+    check('baseline: a correct verified SHA-256 is accepted',
+      verifyBytes(lock.components, resolveTrue, digestTrue).length === 0,
+      verifyBytes(lock.components, resolveTrue, digestTrue).join('; '));
+  }
+
+  // --- graph fixtures for the app configurations -------------------------------------------------
+  const appReports = {
+    app: reportWith('debugRuntimeClasspath', [
+      'org.conscrypt:conscrypt-android:2.7.0',
+      'org.bouncycastle:bcpkix-jdk18on:1.86',
+      'org.bouncycastle:bcprov-jdk18on:1.86',
+      'org.bouncycastle:bcutil-jdk18on:1.86',
+    ]),
+  };
+  check('mutation: missing crypto in app:debugRuntimeClasspath is rejected',
+    verifyGraph({ ...lock, configurations: [{ project: 'app', name: 'debugRuntimeClasspath', expect: 'full' }] },
+      { app: reportWith('debugRuntimeClasspath', ['org.conscrypt:conscrypt-android:2.7.0']) }).length > 0);
+  check('baseline: app:debugRuntimeClasspath resolves the approved graph',
+    verifyGraph({ ...lock, configurations: [{ project: 'app', name: 'debugRuntimeClasspath', expect: 'full' }] },
+      appReports).length === 0,
+    verifyGraph({ ...lock, configurations: [{ project: 'app', name: 'debugRuntimeClasspath', expect: 'full' }] },
+      appReports).join('; '));
+
+  // --- task-plan fixtures ------------------------------------------------------------------------
+  const planFails = (name, plan) => check(`plan mutation: ${name}`, planOrderProblems(plan, ['transport-lan']).length > 0);
+  const verifyFirst = (consumer) =>
+    `:transport-lan:verifySecureDependencyLock SKIPPED\n:transport-lan:${consumer} SKIPPED\n`;
+  planFails('Kotlin compile before verification fails', `:transport-lan:compileDebugKotlin SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n`);
+  planFails('Java compile before verification fails', `:transport-lan:compileDebugJavaWithJavac SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n`);
+  planFails('dex before verification fails', `:transport-lan:dexBuilderDebug SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n`);
+  planFails('package before verification fails', `:transport-lan:packageDebug SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n`);
+  planFails('test before verification fails', `:transport-lan:testDebugUnitTest SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n`);
+  planFails('lint before verification fails', `:transport-lan:lintDebug SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n`);
+  planFails('instrumentation before verification fails', `:transport-lan:connectedDebugAndroidTest SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n`);
+  check('plan baseline: a resource-only compile task before verification is allowed',
+    planOrderProblems(`:transport-lan:compileDebugNavigationResources SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n:transport-lan:compileDebugKotlin SKIPPED\n`, ['transport-lan']).length === 0,
+    planOrderProblems(`:transport-lan:compileDebugNavigationResources SKIPPED\n:transport-lan:verifySecureDependencyLock SKIPPED\n:transport-lan:compileDebugKotlin SKIPPED\n`, ['transport-lan']).join('; '));
+  check('plan baseline: verification before every consumer passes',
+    planOrderProblems(verifyFirst('compileDebugKotlin') + ':transport-lan:dexBuilderDebug SKIPPED\n:transport-lan:packageDebug SKIPPED\n:transport-lan:testDebugUnitTest SKIPPED\n:transport-lan:lintDebug SKIPPED\n', ['transport-lan']).length === 0);
+  check('plan mutation: a missing verification task fails',
+    planOrderProblems(':transport-lan:compileDebugKotlin SKIPPED\n', ['transport-lan']).length > 0);
+
+  // --- workflow wiring ---------------------------------------------------------------------------
+  const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'android-ci.yml'), 'utf8');
+  check('baseline: the workflow keeps the Gradle gate and its proof', workflowProblems(workflow).length === 0,
+    workflowProblems(workflow).join('; '));
+  // replaceAll, not replace: both strings occur more than once in the workflow, and replacing only
+  // the first leaves the gate intact so the mutation would appear to be caught when it is not.
+  check('workflow mutation: bypassing the Gradle gate is rejected',
+    workflowProblems(workflow.replaceAll(':app:assembleDebugAndroidTest', ':app:somethingElse')).length > 0);
+  check('workflow mutation: dropping the task-plan proof is rejected',
+    workflowProblems(workflow.replaceAll('--dry-run', '--offline')).length > 0);
+
+  // --- verifier crashes must be reported, not silent ----------------------------------------------
+  const selfPath = process.argv[1];
+  const crashFails = (name, argv, lockContent) => {
+    let lockArg = null;
+    if (lockContent !== undefined) {
+      lockArg = join(ROOT, `.self-test-lock-${name.replace(/[^a-z0-9]/gi, '')}.json`);
+      writeFileSync(lockArg, lockContent);
+    }
+    const run = spawnSync(process.execPath, [selfPath, ...(lockArg ? ['--lock', lockArg] : []), ...argv],
+      { cwd: ROOT, encoding: 'utf8' });
+    if (lockArg) unlinkSync(lockArg);
+    const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+    const ok = run.status !== 0 && /FAIL/.test(out);
+    check(`crash: ${name}`, ok, `status=${run.status} output=${out.slice(0, 160).replace(/\s+/g, ' ')}`);
+  };
+  crashFails('missing resolved report is reported', ['--resolved', 'transport-lan=definitely/absent.log']);
+  crashFails('malformed JSON lock is reported', [], '{ this is not json');
+  crashFails('missing lock file is reported', ['--lock', 'definitely/absent-lock.json']);
+  crashFails('duplicate lock entry is reported', [],
+    JSON.stringify({ ...lock, components: [...lock.components, JSON.parse(JSON.stringify(lock.components[0]))] }));
+  crashFails('unsupported schema version is reported', [], JSON.stringify({ ...lock, schemaVersion: 99 }));
+  crashFails('unreadable lock path is reported', ['--lock', 'gradle']);
+  crashFails('malformed digest is reported', [],
+    JSON.stringify({ ...lock, components: lock.components.map((c, i) => (i === 0 ? { ...c, sha256: 'nope' } : c)) }));
+
   // The unchanged inputs must pass, or every mutation above would pass for the wrong reason.
   check('baseline: unmodified lock structure is valid', validateStructure(lock).length === 0,
     validateStructure(lock).join('; '));
@@ -503,6 +679,43 @@ function runSelfTest() {
 /* ------------------------------------------------------------------ main */
 
 const args = process.argv.slice(2);
+const lockOverride = args.indexOf('--lock');
+if (lockOverride >= 0 && args[lockOverride + 1]) LOCK_PATH = join(ROOT, args[lockOverride + 1]);
+const cacheArg = args.indexOf('--cache');
+const CACHE_ROOT = cacheArg >= 0 && args[cacheArg + 1] && !args[cacheArg + 1].startsWith('--')
+  ? args[cacheArg + 1]
+  : join(process.env.GRADLE_USER_HOME || join(homedir(), '.gradle'), 'caches', 'modules-2', 'files-2.1');
+
+if (args.includes('--emit-digests')) {
+  // Prints what CI needs to establish provenance: the bytes Gradle actually resolved, and every
+  // digest of them. Nothing here is trusted from the lock; the lock is compared afterwards.
+  const lock = JSON.parse(readFileSync(LOCK_PATH, 'utf8'));
+  const resolve = cacheResolver(CACHE_ROOT);
+  for (const c of lock.components) {
+    const located = resolve(c);
+    const gavPath = `${c.group.replace(/\./g, '/')}/${c.artifact}/${c.version}/${c.fileName}`;
+    if (!located) {
+      console.log(`${gavPath}|absent|-|-|-|-|${c.sizeBytes}|${c.sha256 ?? 'null'}`);
+      continue;
+    }
+    const bytes = readFileSync(located.path);
+    const hex = (algo) => createHash(algo).update(bytes).digest('hex');
+    console.log(`${gavPath}|present|${bytes.length}|${hex('sha256')}|${hex('sha1')}|${hex('md5')}|${c.sizeBytes}|${c.sha256 ?? 'null'}`);
+  }
+  process.exit(0);
+}
+
+if (args.includes('--plan')) {
+  const planPath = args[args.indexOf('--plan') + 1];
+  const plan = readFileSync(join(ROOT, planPath), 'utf8');
+  const problems = planOrderProblems(plan, ['transport-lan', 'app']);
+  for (const problem of problems) console.log(`  FAIL ${problem}`);
+  console.log(problems.length === 0
+    ? '  ok   the task plan places verification before every consumer task'
+    : `  FAIL the task plan does not place verification first`);
+  console.log(`\n${problems.length === 0 ? 1 : 0}/1 checks passed, ${problems.length === 0 ? 0 : 1} failed`);
+  process.exit(problems.length === 0 ? 0 : 1);
+}
 
 if (args.includes('--self-test')) {
   runSelfTest();
