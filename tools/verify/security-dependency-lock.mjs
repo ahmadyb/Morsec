@@ -40,6 +40,7 @@ const APPROVED = new Set([
   'org.bouncycastle:bcpkix-jdk18on:1.86',
   'org.bouncycastle:bcprov-jdk18on:1.86',
   'org.bouncycastle:bcutil-jdk18on:1.86',
+  'org.conscrypt:conscrypt-openjdk-uber:2.5.2',
 ]);
 
 const DYNAMIC = /(\+|latest\.|latest\.)|^\[|^\(|,$/;
@@ -61,18 +62,37 @@ export function validateStructure(lock) {
 
   const seen = new Map();
   for (const c of components) {
+    // sha256 may be explicitly null for a documented optional entry -- Maven Central publishes no
+    // .sha256 for org.conscrypt:conscrypt-openjdk-uber -- and the dedicated block below validates
+    // that case on its own terms. Every other field must still be present.
     const missing = ['group', 'artifact', 'version', 'role', 'packaging', 'fileName', 'sizeBytes', 'sha256']
-      .filter((field) => c[field] === undefined || c[field] === null || c[field] === '');
+      .filter((field) => c[field] === undefined || c[field] === '' ||
+        (c[field] === null && field !== 'sha256'));
     if (missing.length) problems.push(`${c.artifact ?? '<unknown>'}: missing field(s) ${missing.join(', ')}`);
     if (!/^[0-9]+(\.[0-9]+)*$/.test(String(c.version))) {
       problems.push(`${c.group}:${c.artifact}: version "${c.version}" is not an exact pinned version`);
     }
     if (DYNAMIC.test(String(c.version))) problems.push(`${c.group}:${c.artifact}: version "${c.version}" is dynamic or a range`);
-    if (!/^[a-f0-9]{64}$/.test(String(c.sha256))) problems.push(`${c.group}:${c.artifact}: sha256 is not 64 lowercase hex chars`);
+    if (c.sha256 === null || c.sha256 === undefined) {
+      // A null digest is only acceptable when it is optional, explained, and scoped away from
+      // production. Anything else is a lock entry that cannot detect substitution.
+      if (c.optional !== true) problems.push(`${c.group}:${c.artifact}: sha256 is missing but the entry is not optional`);
+      if (!c.digestAvailability) problems.push(`${c.group}:${c.artifact}: sha256 is missing with no digestAvailability explanation`);
+    } else if (!/^[a-f0-9]{64}$/.test(String(c.sha256))) {
+      problems.push(`${c.group}:${c.artifact}: sha256 is not 64 lowercase hex chars`);
+    }
     if (!Number.isInteger(c.sizeBytes) || c.sizeBytes <= 0) problems.push(`${c.group}:${c.artifact}: sizeBytes is not a positive integer`);
     const expectedName = `${c.artifact}-${c.version}.${c.packaging}`;
     if (c.fileName !== expectedName) problems.push(`${c.group}:${c.artifact}: fileName "${c.fileName}" does not match "${expectedName}"`);
-    if (!['direct', 'transitive'].includes(c.role)) problems.push(`${c.group}:${c.artifact}: role "${c.role}" is neither direct nor transitive`);
+    if (!['direct', 'transitive', 'test-only'].includes(c.role)) {
+      problems.push(`${c.group}:${c.artifact}: role "${c.role}" is not direct, transitive or test-only`);
+    }
+    if (c.role === 'test-only' && (!Array.isArray(c.allowedIn) || c.allowedIn.length === 0)) {
+      problems.push(`${c.group}:${c.artifact}: a test-only component must declare allowedIn`);
+    }
+    if (c.role === 'test-only' && c.reachesProductionArtifact !== false) {
+      problems.push(`${c.group}:${c.artifact}: a test-only component must declare reachesProductionArtifact false`);
+    }
     const coordinate = `${c.group}:${c.artifact}:${c.version}`;
     if (seen.has(coordinate)) problems.push(`duplicate lock entry ${coordinate}`);
     seen.set(coordinate, true);
@@ -124,10 +144,15 @@ export function cryptoComponentSections(report, configuration) {
 
 export function verifyGraph(lock, reportsByProject) {
   const problems = [];
-  const expectedFull = new Map([...APPROVED].map((c) => {
-    const [group, artifact, version] = c.split(':');
-    return [`${group}:${artifact}`, version];
-  }));
+  // Only the production graph is required everywhere. A test-only component is allowed where its
+  // allowedIn says and nowhere else, and is never part of the "full" requirement.
+  const optionalCoordinates = new Map(
+    (lock.components ?? []).filter((c) => c.optional === true)
+      .map((c) => [`${c.group}:${c.artifact}`, c.allowedIn ?? []]),
+  );
+  const expectedFull = new Map((lock.components ?? [])
+    .filter((c) => c.optional !== true)
+    .map((c) => [`${c.group}:${c.artifact}`, c.version]));
   for (const cfg of lock.configurations ?? []) {
     const report = reportsByProject[cfg.project];
     if (report === undefined) {
@@ -145,9 +170,13 @@ export function verifyGraph(lock, reportsByProject) {
       continue;
     }
     for (const [coordinate, version] of found) {
-      const approvedVersion = expectedFull.get(coordinate);
+      const allowedIn = optionalCoordinates.get(coordinate);
+      const approvedVersion = expectedFull.get(coordinate) ??
+        (lock.components ?? []).find((c) => `${c.group}:${c.artifact}` === coordinate)?.version;
       if (approvedVersion === undefined) {
         problems.push(`configuration ${cfg.project}:${cfg.name} resolved unexpected component ${coordinate}:${version}`);
+      } else if (allowedIn && !allowedIn.some((needle) => cfg.name.includes(needle))) {
+        problems.push(`configuration ${cfg.project}:${cfg.name} resolved ${coordinate}, which the lock restricts to ${allowedIn.join(', ')}`);
       } else if (approvedVersion !== version) {
         problems.push(`configuration ${cfg.project}:${cfg.name} resolved ${coordinate} at ${version}, expected ${approvedVersion}`);
       }
@@ -177,18 +206,20 @@ export function verifyBytes(components, resolve, digestOf) {
   for (const c of components) {
     const located = resolve(c);
     if (!located) {
-      problems.push(`${c.fileName} was not found in the Gradle module cache`);
+      if (c.optional !== true) problems.push(`${c.fileName} was not found in the Gradle module cache`);
       continue;
     }
     if (located.size !== c.sizeBytes) {
       problems.push(`${c.fileName} is ${located.size} bytes, lock says ${c.sizeBytes}`);
       continue;
     }
-    const digest = digestOf
-      ? digestOf(c)
-      : createHash('sha256').update(readFileSync(located.path)).digest('hex');
-    if (digest !== c.sha256) {
-      problems.push(`${c.fileName} sha256 ${digest} does not match locked ${c.sha256}`);
+    if (c.sha256) {
+      const digest = digestOf
+        ? digestOf(c)
+        : createHash('sha256').update(readFileSync(located.path)).digest('hex');
+      if (digest !== c.sha256) {
+        problems.push(`${c.fileName} sha256 ${digest} does not match locked ${c.sha256}`);
+      }
     }
   }
   return problems;
@@ -391,6 +422,38 @@ function runSelfTest() {
     (src) => src.replace('"assemble"', '"notAssemble"'));
   wiringFails('Android-test packaging with verification dependency removed',
     (src) => src.replace('"package"', '"notPackage"'));
+
+  // The test-only Robolectric transitive is graph-locked but not digest-locked, so its scope has
+  // to be enforced structurally instead.
+  structureFails('a test-only component without allowedIn is rejected', (l) => {
+    const out = JSON.parse(JSON.stringify(l));
+    delete out.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').allowedIn;
+    return out;
+  });
+  structureFails('a test-only component claiming to reach production is rejected', (l) => {
+    const out = JSON.parse(JSON.stringify(l));
+    out.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').reachesProductionArtifact = true;
+    return out;
+  });
+  structureFails('an unexplained null digest is rejected', (l) => {
+    const out = JSON.parse(JSON.stringify(l));
+    delete out.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').digestAvailability;
+    return out;
+  });
+  graphFails('a test-only component leaking into a production configuration is rejected',
+    reportWith('debugRuntimeClasspath', [
+      'org.conscrypt:conscrypt-android:2.7.0',
+      'org.bouncycastle:bcpkix-jdk18on:1.86',
+      'org.bouncycastle:bcprov-jdk18on:1.86',
+      'org.bouncycastle:bcutil-jdk18on:1.86',
+      'org.conscrypt:conscrypt-openjdk-uber:2.5.2',
+    ]));
+  // No published digest, so only the size can be checked -- and it still has to be checked.
+  // digestOf returns each component's own recorded hash so no unrelated digest noise is produced.
+  bytesFails('a component without a published digest is still size-checked',
+    (c) => fakeResolve(c, (component, base) =>
+      (component.artifact === 'conscrypt-openjdk-uber' ? { ...base, size: base.size - 1 } : base)),
+    (c) => c.sha256);
 
   // The unchanged inputs must pass, or every mutation above would pass for the wrong reason.
   check('baseline: unmodified lock structure is valid', validateStructure(lock).length === 0,

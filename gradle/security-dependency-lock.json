@@ -43,7 +43,11 @@
       "fileName": "conscrypt-android-2.7.0.aar",
       "sizeBytes": 4927898,
       "sha256": "86072ce711795e188e1e82214d023789d2983fafe342bcae83f046125cf64e7f",
-      "consumedAs": ["java-runtime", "library", "aar"],
+      "consumedAs": [
+        "java-runtime",
+        "library",
+        "aar"
+      ],
       "publisherMetadata": "Gradle module metadata (.module) and POM are both published; neither is byte-verified here"
     },
     {
@@ -56,7 +60,11 @@
       "fileName": "bcpkix-jdk18on-1.86.jar",
       "sizeBytes": 1341621,
       "sha256": "8d8b41a4b149bdae8d331f059a578870954d1e3ff29f8269a9eb3ee19a7e4ef7",
-      "consumedAs": ["java-runtime", "library", "jar"],
+      "consumedAs": [
+        "java-runtime",
+        "library",
+        "jar"
+      ],
       "publisherMetadata": "POM published; not byte-verified here"
     },
     {
@@ -69,7 +77,11 @@
       "fileName": "bcprov-jdk18on-1.86.jar",
       "sizeBytes": 7224011,
       "sha256": "2af190b300cbb0b35e248ccf5f4a06b6072030aeb3da7a98ec73abe5b4cb371f",
-      "consumedAs": ["java-runtime", "library", "jar"],
+      "consumedAs": [
+        "java-runtime",
+        "library",
+        "jar"
+      ],
       "publisherMetadata": "POM published; not byte-verified here"
     },
     {
@@ -82,27 +94,99 @@
       "fileName": "bcutil-jdk18on-1.86.jar",
       "sizeBytes": 789287,
       "sha256": "1c268e15f785aafb1e4670d8d6e5f856f69475e96c162dadcd1ff9b350e9139f",
-      "consumedAs": ["java-runtime", "library", "jar"],
+      "consumedAs": [
+        "java-runtime",
+        "library",
+        "jar"
+      ],
       "publisherMetadata": "POM published; not byte-verified here"
+    },
+    {
+      "group": "org.conscrypt",
+      "artifact": "conscrypt-openjdk-uber",
+      "version": "2.5.2",
+      "role": "test-only",
+      "declaredIn": "transitive of libs.robolectric, declared testImplementation in transport-lan/build.gradle.kts",
+      "packaging": "jar",
+      "fileName": "conscrypt-openjdk-uber-2.5.2.jar",
+      "sizeBytes": 4534256,
+      "sha256": null,
+      "digestAvailability": "Maven Central publishes only .md5 and .sha1 for this artifact; there is no .sha256. Its bytes are therefore graph-locked but not digest-locked. Recorded as a known gap rather than filled with a locally computed hash, which would be an unreviewed value presented as a reviewed one.",
+      "optional": true,
+      "allowedIn": [
+        "UnitTest"
+      ],
+      "consumedAs": [
+        "java-runtime",
+        "library",
+        "jar"
+      ],
+      "reachesProductionArtifact": false
     }
   ],
   "configurations": [
-    { "project": "transport-lan", "name": "debugCompileClasspath", "expect": "full" },
-    { "project": "transport-lan", "name": "debugRuntimeClasspath", "expect": "full" },
-    { "project": "transport-lan", "name": "releaseCompileClasspath", "expect": "full" },
-    { "project": "transport-lan", "name": "releaseRuntimeClasspath", "expect": "full" },
-    { "project": "transport-lan", "name": "debugUnitTestRuntimeClasspath", "expect": "full" },
-    { "project": "transport-lan", "name": "releaseUnitTestRuntimeClasspath", "expect": "full" },
-    { "project": "transport-lan", "name": "debugAndroidTestRuntimeClasspath", "expect": "full" },
-    { "project": "app", "name": "debugRuntimeClasspath", "expect": "full" },
-    { "project": "app", "name": "debugAndroidTestRuntimeClasspath", "expect": "full" }
+    {
+      "project": "transport-lan",
+      "name": "debugCompileClasspath",
+      "expect": "full"
+    },
+    {
+      "project": "transport-lan",
+      "name": "debugRuntimeClasspath",
+      "expect": "full"
+    },
+    {
+      "project": "transport-lan",
+      "name": "releaseCompileClasspath",
+      "expect": "full"
+    },
+    {
+      "project": "transport-lan",
+      "name": "releaseRuntimeClasspath",
+      "expect": "full"
+    },
+    {
+      "project": "transport-lan",
+      "name": "debugUnitTestRuntimeClasspath",
+      "expect": "full"
+    },
+    {
+      "project": "transport-lan",
+      "name": "releaseUnitTestRuntimeClasspath",
+      "expect": "full"
+    },
+    {
+      "project": "transport-lan",
+      "name": "debugAndroidTestRuntimeClasspath",
+      "expect": "full"
+    },
+    {
+      "project": "app",
+      "name": "debugRuntimeClasspath",
+      "expect": "full"
+    },
+    {
+      "project": "app",
+      "name": "debugAndroidTestRuntimeClasspath",
+      "expect": "full"
+    }
   ],
   "taskGraph": {
     "taskName": "verifySecureDependencyLock",
-    "protectedProjects": ["transport-lan", "app"],
+    "protectedProjects": [
+      "transport-lan",
+      "app"
+    ],
     "mustRunBefore": [
-      "Kotlin compilation", "Java compilation", "unit tests", "Android tests",
-      "lint", "dex", "APK packaging", "app debug assembly", "app Android-test assembly"
+      "Kotlin compilation",
+      "Java compilation",
+      "unit tests",
+      "Android tests",
+      "lint",
+      "dex",
+      "APK packaging",
+      "app debug assembly",
+      "app Android-test assembly"
     ]
   },
   "sources": {

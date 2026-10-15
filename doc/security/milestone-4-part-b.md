@@ -349,3 +349,44 @@ This mechanism is security-scoped. It is not Gradle's global strict dependency v
 and there is no `gradle/verification-metadata.xml`: generating a whole-repository
 verification file and calling it reviewed would be worse than the scoped lock, because the
 review that gives the lock its value would not have happened.
+
+
+### A fifth crypto artifact, found by the enforcement itself
+
+Run `38702916423` compiled the build script, ran the wired verification task, and failed with:
+
+```
+Execution failed for task ':transport-lan:verifySecureDependencyLock'
+> security dependency lock verification failed:
+    conscrypt-openjdk-uber-2.5.2.jar resolved from a crypto group but has no lock entry
+```
+
+`org.conscrypt:conscrypt-openjdk-uber:2.5.2` is a transitive of `libs.robolectric`, which
+`transport-lan` declares `testImplementation`. It reaches the JVM unit-test classpath and no APK.
+It was absent from the first version of the lock, and the task graph caught it before any
+compilation step ran. That is the mechanism working, not a defect in it, and the same run reported
+no size or digest mismatch for the four production artifacts, which confirms those locked values
+against real resolved bytes.
+
+The component is now in the lock with `role: "test-only"`, `optional: true` and
+`allowedIn: ["UnitTest"]`, so it may appear on a unit-test classpath and nowhere else, and its
+absence from `app`'s configurations is not an error.
+
+**It is graph-locked but not digest-locked, and this is a real gap.** Maven Central publishes only
+`.md5` and `.sha1` for `conscrypt-openjdk-uber-2.5.2.jar`; there is no `.sha256`
+(directory listing fetched 2026-10-15, which also shows `conscrypt-openjdk-uber-2.5.2.jar` at
+4,534,256 bytes and a 1,264-byte POM with no Gradle module metadata). The lock records
+`sha256: null` with a `digestAvailability` note rather than a locally computed hash, because a
+locally computed value would be an unreviewed number presented as a reviewed one. Consequences,
+stated plainly:
+
+- Its exact group, artifact, name and version are locked; a version change, a module substitution
+  or its appearance on any production configuration fails verification.
+- Its byte length is still compared, so a substitution of a different size fails.
+- A same-length byte substitution of this one artifact would **not** be detected.
+- It never reaches a shipped APK; it executes only in the unit-test JVM.
+
+The other four components carry SHA-256 values that were compared against resolved artifact bytes
+in CI and matched. The residual limitation section below is therefore wider than it first
+appeared: it covers unpublished POM bytes for all five components, and unpublished SHA-256 for
+one.

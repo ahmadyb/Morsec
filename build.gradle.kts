@@ -110,12 +110,18 @@ abstract class VerifySecureDependencyLock : DefaultTask() {
                 ?: throw GradleException("a locked component has no fileName")
             val expectedSize = (component["sizeBytes"] as? Number)?.toLong()
                 ?: throw GradleException("locked component $fileName has no sizeBytes")
+            // A null digest is permitted only for an entry the lock marks optional and explains;
+            // org.conscrypt:conscrypt-openjdk-uber has no published .sha256. Size is still checked,
+            // so a substituted file of a different length is caught even without a digest.
             val expectedSha = component["sha256"] as? String
-                ?: throw GradleException("locked component $fileName has no sha256")
+            val optional = component["optional"] == true
+            if (expectedSha == null && !optional) {
+                throw GradleException("locked component $fileName has no sha256 and is not optional")
+            }
 
             val file = byName[fileName]
             if (file == null) {
-                problems += "$fileName was not resolved on any verified configuration"
+                if (!optional) problems += "$fileName was not resolved on any verified configuration"
                 continue
             }
             if (file.length() != expectedSize) {
@@ -131,9 +137,11 @@ abstract class VerifySecureDependencyLock : DefaultTask() {
                     digest.update(buffer, 0, read)
                 }
             }
-            val actual = digest.digest().joinToString("") { "%02x".format(it) }
-            if (actual != expectedSha) {
-                problems += "$fileName sha256 $actual does not match the locked $expectedSha"
+            if (expectedSha != null) {
+                val actual = digest.digest().joinToString("") { "%02x".format(it) }
+                if (actual != expectedSha) {
+                    problems += "$fileName sha256 $actual does not match the locked $expectedSha"
+                }
             }
         }
 
