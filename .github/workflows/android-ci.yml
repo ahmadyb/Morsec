@@ -291,7 +291,13 @@ jobs:
               fail=1
               continue
             fi
-            consumer_line=$(line_of "^:${project}:\(compile\|test\|lint\|dex\|package\|assemble\)")
+            # Match exactly the families the Gradle wiring gates, no more. A bare "compile" prefix
+            # also matches AGP resource tasks such as :app:compileDebugNavigationResources, which is
+            # neither KotlinCompile nor JavaCompile and consumes no dependency classpath; run
+            # 38710153534 failed here on that task even though verification was correctly ordered
+            # for every real consumer. Naming Kotlin and Java compilation explicitly keeps this
+            # proof aligned with the wiring instead of stricter than it.
+            consumer_line=$(line_of "^:${project}:\(compile[A-Za-z]*\(Kotlin\|JavaWithJavac\)\|test\|lint\|dex\|package\|assemble\|bundle\|connected\)")
             if [ -n "$consumer_line" ] && [ "$verify_line" -gt "$consumer_line" ]; then
               # Name the offending task. Run 38708167687 reported "app runs a consumer task at line
               # 123 before verification at line 143" and nothing else, which is not enough to act on
