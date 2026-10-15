@@ -148,6 +148,10 @@ public class ControlEstablishmentCapacityTest {
         }
     }
 
+    /** Sockets proven to have received handshake bytes; see [productionWrote]. */
+    private val wroteSockets: MutableSet<Socket> =
+        java.util.Collections.synchronizedSet(HashSet<Socket>())
+
     /** Emits a bounded phase marker: a fixed name plus counters, and nothing identifying. */
     private fun mark(phase: String, detail: String = "") {
         Log.i(PHASE_TAG, if (detail.isEmpty()) phase else "$phase $detail")
@@ -381,9 +385,31 @@ public class ControlEstablishmentCapacityTest {
         socket.getInputStream().available() > 0 ||
             runCatching { socket.getInputStream().read() }.getOrNull() == -1
 
+    /**
+     * True only if production actually wrote bytes to this far end, which is what proves a pairing
+     * task started its handshake.
+     *
+     * Deliberately not the same as [productionTouched]. Production closes a session's socket when a
+     * pairing is rejected or refused -- `finish()` closes on any Failed result -- so a closed far
+     * end is normal cleanup and says nothing about whether cryptographic work happened. Run
+     * 38656187015 measured exactly that: the fifth pairing was correctly rejected with
+     * OPERATION_QUEUE_FULL and then correctly closed, and an assertion keyed on "touched" read the
+     * cleanup as late execution.
+     *
+     * Results are memoised per socket: a probe read consumes a byte, and a later probe must not
+     * then report that nothing was ever written.
+     */
+    private fun productionWrote(socket: Socket): Boolean {
+        if (wroteSockets.contains(socket)) return true
+        val wrote = socket.getInputStream().available() > 0 ||
+            (runCatching { socket.getInputStream().read() }.getOrNull() ?: -1) >= 0
+        if (wrote) wroteSockets.add(socket)
+        return wrote
+    }
+
     /** True once a pairing operation has been admitted by the limiter and is doing real work. */
     private fun admittedAndRunning(outcome: PairingOutcome, farEnd: Socket): Boolean =
-        outcome.result == null && productionTouched(farEnd)
+        outcome.result == null && productionWrote(farEnd)
 
     /** The refusal code a pairing operation ended with, or null if it has not ended. */
     private fun refusalCode(outcome: PairingOutcome): SessionFailureCode? =
@@ -522,8 +548,11 @@ public class ControlEstablishmentCapacityTest {
                     1,
                     observer.rejected.get() - rejectedBefore,
                 )
-                assertTrue("the rejected pairing reached its socket, so it ran after rejection",
-                    !productionTouched(farEnds[QUEUED_PAIRINGS]))
+                assertTrue(
+                    "the rejected pairing wrote handshake bytes, so it ran after rejection; a " +
+                        "closed socket here is the rejection's own cleanup, not late execution",
+                    !productionWrote(farEnds[QUEUED_PAIRINGS]),
+                )
                 assertEquals("the rejected pairing published an approval",
                     0, outcomes[QUEUED_PAIRINGS].approvals.get())
                 mark("fifth_pairing_refused",
