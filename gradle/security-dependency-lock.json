@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "description": [
+    "Exact approved cryptographic dependency graph for Milestone 4 Part B.",
+    "",
+    "WHAT THIS IS",
+    "  A machine-readable lock over the components that perform cryptography or feed it. Each",
+    "  entry pins coordinate, role, packaging, expected file name, exact byte size and SHA-256,",
+    "  so a substituted, truncated, re-versioned or extra component fails verification instead",
+    "  of being compiled into an APK. tools/verify/security-dependency-lock.mjs enforces the",
+    "  structure and the resolved graph; the Gradle task :verifySecureDependencyLock enforces",
+    "  the bytes inside the task graph, before any compiler, test runner, lint analysis, dexer",
+    "  or packager consumes the artifacts.",
+    "",
+    "WHAT THIS IS NOT",
+    "  Not provenance, and not Gradle's global strict dependency verification. The digests were",
+    "  taken from Maven Central, which is also where Gradle downloads from, so a match proves the",
+    "  bytes in the build cache are the bytes Maven Central serves -- not that Conscrypt or",
+    "  Bouncy Castle signed them. There is no gradle/verification-metadata.xml and no whole",
+    "  repository lock; the remaining AndroidX/Kotlin/Gradle transitives are pinned by",
+    "  coordinate only. See doc/security/milestone-4-part-b.md, \"Dependency bytes\"."
+  ],
+  "policy": {
+    "rejectDynamicVersions": true,
+    "rejectVersionRanges": true,
+    "rejectModuleSubstitution": true,
+    "rejectVersionSubstitution": true,
+    "rejectUnexpectedComponent": true,
+    "rejectMissingComponent": true,
+    "rejectPackagingChange": true,
+    "rejectFileNameChange": true,
+    "rejectSizeChange": true,
+    "rejectHashChange": true
+  },
+  "components": [
+    {
+      "group": "org.conscrypt",
+      "artifact": "conscrypt-android",
+      "version": "2.7.0",
+      "role": "direct",
+      "declaredIn": "transport-lan/build.gradle.kts:72 via libs.conscrypt.android",
+      "packaging": "aar",
+      "fileName": "conscrypt-android-2.7.0.aar",
+      "sizeBytes": 4927898,
+      "sha256": "86072ce711795e188e1e82214d023789d2983fafe342bcae83f046125cf64e7f",
+      "consumedAs": ["java-runtime", "library", "aar"],
+      "publisherMetadata": "Gradle module metadata (.module) and POM are both published; neither is byte-verified here"
+    },
+    {
+      "group": "org.bouncycastle",
+      "artifact": "bcpkix-jdk18on",
+      "version": "1.86",
+      "role": "direct",
+      "declaredIn": "transport-lan/build.gradle.kts:73 via libs.bouncycastle.pkix",
+      "packaging": "jar",
+      "fileName": "bcpkix-jdk18on-1.86.jar",
+      "sizeBytes": 1341621,
+      "sha256": "8d8b41a4b149bdae8d331f059a578870954d1e3ff29f8269a9eb3ee19a7e4ef7",
+      "consumedAs": ["java-runtime", "library", "jar"],
+      "publisherMetadata": "POM published; not byte-verified here"
+    },
+    {
+      "group": "org.bouncycastle",
+      "artifact": "bcprov-jdk18on",
+      "version": "1.86",
+      "role": "transitive",
+      "declaredIn": "reached through org.bouncycastle:bcpkix-jdk18on",
+      "packaging": "jar",
+      "fileName": "bcprov-jdk18on-1.86.jar",
+      "sizeBytes": 7224011,
+      "sha256": "2af190b300cbb0b35e248ccf5f4a06b6072030aeb3da7a98ec73abe5b4cb371f",
+      "consumedAs": ["java-runtime", "library", "jar"],
+      "publisherMetadata": "POM published; not byte-verified here"
+    },
+    {
+      "group": "org.bouncycastle",
+      "artifact": "bcutil-jdk18on",
+      "version": "1.86",
+      "role": "transitive",
+      "declaredIn": "reached through org.bouncycastle:bcpkix-jdk18on",
+      "packaging": "jar",
+      "fileName": "bcutil-jdk18on-1.86.jar",
+      "sizeBytes": 789287,
+      "sha256": "1c268e15f785aafb1e4670d8d6e5f856f69475e96c162dadcd1ff9b350e9139f",
+      "consumedAs": ["java-runtime", "library", "jar"],
+      "publisherMetadata": "POM published; not byte-verified here"
+    }
+  ],
+  "configurations": [
+    { "project": "transport-lan", "name": "debugCompileClasspath", "expect": "full" },
+    { "project": "transport-lan", "name": "debugRuntimeClasspath", "expect": "full" },
+    { "project": "transport-lan", "name": "releaseCompileClasspath", "expect": "full" },
+    { "project": "transport-lan", "name": "releaseRuntimeClasspath", "expect": "full" },
+    { "project": "transport-lan", "name": "debugUnitTestRuntimeClasspath", "expect": "full" },
+    { "project": "transport-lan", "name": "releaseUnitTestRuntimeClasspath", "expect": "full" },
+    { "project": "transport-lan", "name": "debugAndroidTestRuntimeClasspath", "expect": "full" },
+    { "project": "app", "name": "debugRuntimeClasspath", "expect": "full" },
+    { "project": "app", "name": "debugAndroidTestRuntimeClasspath", "expect": "full" }
+  ],
+  "taskGraph": {
+    "taskName": "verifySecureDependencyLock",
+    "protectedProjects": ["transport-lan", "app"],
+    "mustRunBefore": [
+      "Kotlin compilation", "Java compilation", "unit tests", "Android tests",
+      "lint", "dex", "APK packaging", "app debug assembly", "app Android-test assembly"
+    ]
+  },
+  "sources": {
+    "sizesAndDigestsRetrieved": "2026-10-15",
+    "listing": [
+      "https://repo1.maven.org/maven2/org/conscrypt/conscrypt-android/2.7.0/",
+      "https://repo1.maven.org/maven2/org/bouncycastle/bcpkix-jdk18on/1.86/",
+      "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.86/",
+      "https://repo1.maven.org/maven2/org/bouncycastle/bcutil-jdk18on/1.86/"
+    ],
+    "digestsPreviouslyRecordedIn": "gradle/secure-artifact-checksums.txt (2026-10-09)"
+  }
+}

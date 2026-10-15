@@ -157,10 +157,16 @@ jobs:
           set -uo pipefail
           mkdir -p ci-logs
           {
-            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs tools/verify/secure-dependency-governance.mjs tools/verify/secure-authority-surface.mjs; do
+            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs tools/verify/secure-dependency-governance.mjs tools/verify/secure-authority-surface.mjs tools/verify/security-dependency-lock.mjs; do
               echo "== $script =="
               if [ "$script" = tools/verify/room-schema.mjs ]; then
                 node "$script" --baseline-only || echo "VERIFIER FAILED: $script"
+              elif [ "$script" = tools/verify/security-dependency-lock.mjs ]; then
+                # --self-test runs the mutation fixtures; the plain run checks the committed lock
+                # and the task-graph wiring. Both, because a lock whose mutations all still pass
+                # proves nothing.
+                node "$script" --self-test || echo "VERIFIER FAILED: $script"
+                node "$script" || echo "VERIFIER FAILED: $script"
               else
                 node "$script" || echo "VERIFIER FAILED: $script"
               fi
@@ -215,6 +221,71 @@ jobs:
                           name = f"{case.get('classname')} > {case.get('name')}"
                           print(f"::error title=failing test::{name} :: {text}")
           PYEOF
+
+      # The lock names nine configurations across two projects. Each is resolved and compared, and
+      # the reports are kept per project so a configuration is checked against its own project's
+      # graph rather than whichever project printed that configuration name first.
+      - name: Verify the locked security dependency graph and artifact bytes
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --stacktrace :transport-lan:dependencies \
+            --configuration debugCompileClasspath \
+            --configuration debugRuntimeClasspath \
+            --configuration releaseCompileClasspath \
+            --configuration releaseRuntimeClasspath \
+            --configuration debugUnitTestRuntimeClasspath \
+            --configuration releaseUnitTestRuntimeClasspath \
+            --configuration debugAndroidTestRuntimeClasspath 2>&1 | tee ci-logs/23-secure-lock-transport-lan.log
+          tl_status=${PIPESTATUS[0]}
+          if [ "$tl_status" -ne 0 ]; then exit "$tl_status"; fi
+          ./gradlew --no-daemon --stacktrace :app:dependencies \
+            --configuration debugRuntimeClasspath \
+            --configuration debugAndroidTestRuntimeClasspath 2>&1 | tee ci-logs/23-secure-lock-app.log
+          app_status=${PIPESTATUS[0]}
+          if [ "$app_status" -ne 0 ]; then exit "$app_status"; fi
+          node tools/verify/security-dependency-lock.mjs \
+            --resolved transport-lan=ci-logs/23-secure-lock-transport-lan.log \
+            --resolved app=ci-logs/23-secure-lock-app.log \
+            --cache
+
+      # Step order is not enforcement. This proves the task graph itself puts verification first, by
+      # asking Gradle to plan representative consumer tasks and never invoking verification by hand.
+      - name: Prove security verification precedes compilation, tests, lint and packaging
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          ./gradlew --no-daemon --dry-run \
+            :transport-lan:compileDebugKotlin \
+            :transport-lan:testDebugUnitTest \
+            :transport-lan:lintDebug \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest 2>&1 | tee ci-logs/24-secure-lock-task-order.log
+          plan_status=${PIPESTATUS[0]}
+          if [ "$plan_status" -ne 0 ]; then exit "$plan_status"; fi
+          log=ci-logs/24-secure-lock-task-order.log
+          line_of() { grep -n "$1" "$log" | head -1 | cut -d: -f1; }
+          fail=0
+          for project in transport-lan app; do
+            verify_line=$(line_of "^:${project}:verifySecureDependencyLock ")
+            if [ -z "$verify_line" ]; then
+              echo "::error title=security lock task graph::${project}:verifySecureDependencyLock is not in the task graph at all"
+              fail=1
+              continue
+            fi
+            consumer_line=$(line_of "^:${project}:\(compile\|test\|lint\|dex\|package\|assemble\)")
+            if [ -n "$consumer_line" ] && [ "$verify_line" -gt "$consumer_line" ]; then
+              echo "::error title=security lock task graph::${project} runs a consumer task at line ${consumer_line} before verification at line ${verify_line}"
+              fail=1
+            else
+              echo "::notice title=security lock task graph::${project}:verifySecureDependencyLock planned at line ${verify_line}, first consumer task at line ${consumer_line:-none}"
+            fi
+          done
+          planned=$(grep -c '^:' "$log" || true)
+          echo "::notice title=security lock task graph::${planned} task(s) planned for the five representative invocations, verification included and first"
+          if [ "$fail" -ne 0 ]; then exit 1; fi
 
       - name: Resolve and verify secure dependency graph
         if: ${{ !cancelled() }}

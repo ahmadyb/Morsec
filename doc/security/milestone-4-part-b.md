@@ -289,3 +289,63 @@ cryptography edit was missed; that process deviation is recorded in `doc/AI_HAND
 cannot be retroactively cured by this late audit.
 
 Until exact-SHA CI evidence is green, Part B remains incomplete.
+
+
+## Dependency locking and task-graph enforcement (item D)
+
+Four distinct guarantees are in play here, and they are worth separating because each has a
+different strength and a different failure mode.
+
+| Layer | File | What it proves |
+| --- | --- | --- |
+| Coordinate pinning | `gradle/libs.versions.toml` | The declared versions are exact. No dynamic versions, no ranges. |
+| Exact graph locking | `gradle/security-dependency-lock.json` | The resolved crypto graph is exactly these four components at these versions, per configuration, with role, packaging, file name, byte size and SHA-256. |
+| Binary byte verification | `gradle/secure-artifact-checksums.txt` and the lock's `sha256` fields | The bytes Gradle actually resolved are the bytes that were reviewed. |
+| Task-graph enforcement | `verifySecureDependencyLock` in `build.gradle.kts` | Verification happens before any compiler, test runner, lint analysis, dexer or packager consumes the artifacts, on any invocation, not just in CI step order. |
+| License attribution | third-party license and notice files | Attribution for the pinned versions. |
+
+### Locked graph
+
+| Component | Version | Role | Packaging | Bytes |
+| --- | --- | --- | --- | --- |
+| `org.conscrypt:conscrypt-android` | 2.7.0 | direct | aar | 4,927,898 |
+| `org.bouncycastle:bcpkix-jdk18on` | 1.86 | direct | jar | 1,341,621 |
+| `org.bouncycastle:bcprov-jdk18on` | 1.86 | transitive | jar | 7,224,011 |
+| `org.bouncycastle:bcutil-jdk18on` | 1.86 | transitive | jar | 789,287 |
+
+### Configurations covered
+
+`transport-lan`: `debugCompileClasspath`, `debugRuntimeClasspath`, `releaseCompileClasspath`,
+`releaseRuntimeClasspath`, `debugUnitTestRuntimeClasspath`,
+`releaseUnitTestRuntimeClasspath`, `debugAndroidTestRuntimeClasspath`.
+`app`: `debugRuntimeClasspath`, `debugAndroidTestRuntimeClasspath`.
+
+Reports are resolved per project and compared per project, so a configuration is checked
+against its own project's graph.
+
+### Tasks protected
+
+`verifySecureDependencyLock` is a prerequisite of Kotlin compilation, Java compilation, unit
+tests and Android tests by typed task matching, and of lint, dex, packaging, assembly,
+bundling and connected-test tasks by name prefix, because AGP exposes no stable public type
+for those. It is registered in `transport-lan` and `app`, the projects that consume and
+package the crypto artifacts.
+
+### Residual provenance limitation
+
+Publisher metadata is not byte-verified, and this is unchanged by item D. Gradle keeps POM
+and module metadata in its own binary store and does not materialize `.pom` files under
+`caches/modules-2/files-2.1`; run 37989038083 confirmed that empirically, with every POM
+lookup reporting "not found" while all four binaries matched.
+
+So a metadata change that resolves this exact approved graph and these exact binary bytes
+would not be caught. What cannot happen unnoticed is anything that changes the graph or the
+bytes: an added, removed, re-versioned, substituted, re-packaged or re-named component
+changes the resolved graph or the file identity, and a substituted file changes size or
+SHA-256. `tools/verify/security-dependency-lock.mjs --self-test` carries a deterministic
+mutation fixture for each of those cases.
+
+This mechanism is security-scoped. It is not Gradle's global strict dependency verification,
+and there is no `gradle/verification-metadata.xml`: generating a whole-repository
+verification file and calling it reviewed would be worse than the scoped lock, because the
+review that gives the lock its value would not have happened.
