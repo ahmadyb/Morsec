@@ -1597,6 +1597,112 @@ function verifyPairingCapacityTestSeamStaysTestOnly() {
   );
 }
 
+/**
+ * Group 23 -- hostile secure-session fixtures stay test-only, and approval stays conditional.
+ *
+ * Item C adds a hostile peer that mutates one field of a real MPS2 hello. Two properties make that
+ * safe, and both are pinned here rather than trusted: nothing in a shipped source set can name the
+ * hostile factory, and no test approves a pairing without first comparing the two displayed proofs.
+ * The second one is not hypothetical -- the previous harness called decide(handle, APPROVE) without
+ * ever reading the proof, and asserted equality only afterwards.
+ */
+function verifyHostileSessionEvidenceStaysTestOnly() {
+  const mainRoot = join(ROOT, 'transport-lan', 'src', 'main');
+  const testRoot = join(ROOT, 'transport-lan', 'src', 'androidTest');
+  const collect = (dir, out = []) => {
+    if (!existsSync(dir)) return out;
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) collect(full, out);
+      else if (full.endsWith('.kt')) out.push(full);
+    }
+    return out;
+  };
+  const mainSources = collect(mainRoot);
+  check('hostile fixture scan: transport-lan main sources were read', mainSources.length > 0);
+
+  for (const forbidden of ['HostilePairingCryptoFactory', 'HostileMutation', 'ProofComparisonController']) {
+    const offenders = mainSources.filter((f) => read(f).includes(forbidden)).map((f) => f.replace(ROOT, ''));
+    check(`hostile fixture ${forbidden} is not referenced by any shipped source`, offenders.length === 0,
+      offenders.join(', '));
+  }
+
+  const hostilePath = join(testRoot, 'kotlin', 'app', 'morsecode', 'transport', 'lan', 'security',
+    'HostileSecureSessionApi23Test.kt');
+  check('the hostile peer fixture exists in androidTest only', existsSync(hostilePath));
+  const hostile = existsSync(hostilePath) ? read(hostilePath) : '';
+
+  // The hostile factory must delegate real crypto rather than fake it.
+  check('the hostile factory delegates to the production Conscrypt factory',
+    hostile.includes('ConscryptPairingCryptoFactory(random)'));
+  check('the hostile factory still encodes with the production MPS2 codec',
+    hostile.includes('SecurePairingHelloV2Codec.encodeFrame('));
+  mutation('mutation: a hostile factory that stops delegating real crypto is rejected', hostile,
+    (src) => src.replace('ConscryptPairingCryptoFactory(random)', 'FakeCryptoFactory()'),
+    (src) => src.includes('ConscryptPairingCryptoFactory(random)'));
+  mutation('mutation: a hostile factory that bypasses the production codec is rejected', hostile,
+    (src) => src.replace('SecurePairingHelloV2Codec.encodeFrame(alter(offer))', 'handRolledBytes(offer)'),
+    (src) => src.includes('SecurePairingHelloV2Codec.encodeFrame('));
+
+  // Production must keep its default factory, so it can never select a hostile one.
+  const coordinator = read(join(mainRoot, 'kotlin', 'app', 'morsecode', 'transport', 'lan', 'security',
+    'SecureLanPairingCoordinator.kt'));
+  check('the production coordinator still defaults to the Conscrypt factory',
+    coordinator.includes('ConscryptPairingCryptoFactory(random)'));
+  mutation('mutation: a production default other than the Conscrypt factory is rejected', coordinator,
+    (src) => src.replace('= ConscryptPairingCryptoFactory(random),', '= InsecureFactory(),'),
+    (src) => src.includes('= ConscryptPairingCryptoFactory(random),'));
+
+  // MPS1 must have no encoder call in a shipped source set.
+  const mps1Offenders = mainSources.filter((f) => read(f).includes('SecurePairingHelloCodec'))
+    .map((f) => f.replace(ROOT, ''));
+  check('no shipped source calls the legacy MPS1 encoder', mps1Offenders.length === 0,
+    mps1Offenders.join(', '));
+  check('the coordinator still fails closed on a legacy MPS1 hello',
+    coordinator.includes('LEGACY_MPS1_UNSUPPORTED') &&
+      coordinator.includes('LegacySecurityFormatException'));
+  mutation('mutation: dropping the typed legacy-format refusal is rejected', coordinator,
+    (src) => src.replace('throw LegacySecurityFormatException()', 'throw SecureSessionCryptoException()'),
+    (src) => src.includes('throw LegacySecurityFormatException()'));
+
+  // Approval must be conditional on the proof comparison, in both hostile and honest harnesses.
+  const controllerPath = join(testRoot, 'kotlin', 'app', 'morsecode', 'transport', 'lan', 'security',
+    'ProofComparisonController.kt');
+  check('the proof comparison controller exists in androidTest only', existsSync(controllerPath));
+  const controller = existsSync(controllerPath) ? read(controllerPath) : '';
+  check('approval is gated on the two displayed proofs matching',
+    controller.includes('ownProof == peerProof') &&
+      controller.includes('SecureApprovalDecision.APPROVE') &&
+      controller.includes('SecureApprovalDecision.REJECT'));
+  check('a missing peer proof refuses rather than approving',
+    controller.includes('awaitPeerProof(alias, DECISION_TIMEOUT_SECONDS) ?: return false'));
+  mutation('mutation: an unconditional approval is rejected', controller,
+    (src) => src.replace('if (ownProof == peerProof) {', 'if (true) {'),
+    (src) => src.includes('ownProof == peerProof'));
+  mutation('mutation: approving when the peer proof never arrives is rejected', controller,
+    (src) => src.replace('awaitPeerProof(alias, DECISION_TIMEOUT_SECONDS) ?: return false',
+      'awaitPeerProof(alias, DECISION_TIMEOUT_SECONDS) ?: ownProof'),
+    (src) => src.includes('awaitPeerProof(alias, DECISION_TIMEOUT_SECONDS) ?: return false'));
+
+  // The old unconditional harness must stay deleted.
+  const allTestSources = collect(join(ROOT, 'transport-lan', 'src'));
+  const stale = allTestSources.filter((f) => read(f).includes('TestApprovalInteraction'))
+    .map((f) => f.replace(ROOT, ''));
+  check('the unconditional TestApprovalInteraction harness is gone', stale.length === 0, stale.join(', '));
+
+  // TLS 1.3 and the Conscrypt requirement are untouched by the hostile work.
+  const engine = read(join(mainRoot, 'kotlin', 'app', 'morsecode', 'transport', 'lan', 'security',
+    'ConscryptSecureSessionEngine.kt'));
+  check('Conscrypt is still required and TLS 1.3 still pinned',
+    engine.includes('Conscrypt.newProvider()') && engine.includes('SecurePairingTranscript.TLS_1_3'));
+  check('the hostile fixture never installs a provider globally',
+    !hostile.includes('Security.insertProviderAt') && !hostile.includes('Security.addProvider'));
+  check('the hostile fixture never trusts all certificates',
+    !hostile.includes('X509TrustManager') && !hostile.includes('checkServerTrusted'));
+}
+
+verifyHostileSessionEvidenceStaysTestOnly();
+
 verifyPairingCapacityTestSeamStaysTestOnly();
 
 console.log('\nPart B capability trust boundary verification');

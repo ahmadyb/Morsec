@@ -14,10 +14,8 @@ import app.morsecode.core.transfer.session.NegotiatedSession
 import app.morsecode.core.transfer.session.PeerInstanceId
 import app.morsecode.core.transfer.session.ProtocolRange
 import app.morsecode.core.transfer.session.SecureApprovalDecision
-import app.morsecode.core.transfer.session.SecureApprovalResult
 import app.morsecode.core.transfer.session.SecureControlReceiveResult
 import app.morsecode.core.transfer.session.SecureControlSendResult
-import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
 import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordCodec
 import app.morsecode.core.transfer.session.SecureRecordDirection
@@ -52,8 +50,9 @@ public class SecureLanPairingCoordinatorApi23Test {
         }
         val executor = Executors.newSingleThreadExecutor()
         val clock = MonotonicClock { 100L }
-        val initiatorInteraction = TestApprovalInteraction()
-        val responderInteraction = TestApprovalInteraction()
+        val rendezvous = ProofRendezvous()
+        val initiatorInteraction = ProofComparisonController("initiator", rendezvous)
+        val responderInteraction = ProofComparisonController("responder", rendezvous)
         var clientResult: SecurePairingRunResult? = null
         var serverResult: SecurePairingRunResult? = null
         var clientChannel: SecureLanControlChannel? = null
@@ -110,7 +109,12 @@ public class SecureLanPairingCoordinatorApi23Test {
                     client.negotiatedControlSession,
                 ) is app.morsecode.core.transfer.session.PayloadTransferDecision.Refused,
             )
+            // Approval was already gated on this comparison inside ProofComparisonController, so
+            // reaching here means the two proofs matched before either side approved. The assertion
+            // is retained because it also pins the proof's shape.
             assertEquals(initiatorInteraction.proofAtDisplay, responderInteraction.proofAtDisplay)
+            assertEquals(SecureApprovalDecision.APPROVE, initiatorInteraction.decisionTaken)
+            assertEquals(SecureApprovalDecision.APPROVE, responderInteraction.decisionTaken)
             assertTrue(
                 requireNotNull(initiatorInteraction.proofAtDisplay)
                     .matches(Regex("[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{5}")),
@@ -200,8 +204,9 @@ public class SecureLanPairingCoordinatorApi23Test {
         // Advancing monotonic time. A fixed clock would leave `deadline - now` constant across every
         // read, so a slow peer would never be ended and the test would prove nothing.
         val clock = MonotonicClock { System.nanoTime() / 1_000_000L }
-        val initiatorInteraction = TestApprovalInteraction()
-        val responderInteraction = TestApprovalInteraction()
+        val rendezvous = ProofRendezvous()
+        val initiatorInteraction = ProofComparisonController("initiator", rendezvous)
+        val responderInteraction = ProofComparisonController("responder", rendezvous)
         var clientResult: SecurePairingRunResult? = null
         var serverResult: SecurePairingRunResult? = null
         var clientChannel: SecureLanControlChannel? = null
@@ -333,8 +338,9 @@ public class SecureLanPairingCoordinatorApi23Test {
         }
         val executor = Executors.newSingleThreadExecutor()
         val clock = MonotonicClock { System.nanoTime() / 1_000_000L }
-        val initiatorInteraction = TestApprovalInteraction()
-        val responderInteraction = TestApprovalInteraction()
+        val rendezvous = ProofRendezvous()
+        val initiatorInteraction = ProofComparisonController("initiator", rendezvous)
+        val responderInteraction = ProofComparisonController("responder", rendezvous)
         var clientResult: SecurePairingRunResult? = null
         var serverResult: SecurePairingRunResult? = null
         var clientChannel: SecureLanControlChannel? = null
@@ -474,33 +480,4 @@ public class SecureLanPairingCoordinatorApi23Test {
         capabilities = SessionCapabilities.controlOnly(TransportKind.LAN),
     )
 
-    /** Test-only explicit approval callback; production has no auto-approval implementation. */
-    private class TestApprovalInteraction : PairingInteraction {
-        private var request: SecurePairingApprovalRequest? = null
-        var proofAtDisplay: String? = null
-            private set
-
-        override fun publishApproval(
-            machine: SecureSessionStateMachine,
-            request: SecurePairingApprovalRequest,
-        ): Boolean {
-            this.request = request
-            proofAtDisplay = request.proof.displayText()
-            return machine.state().name == "AWAITING_LOCAL_APPROVAL"
-        }
-
-        override fun awaitApproval(machine: SecureSessionStateMachine): Boolean {
-            val exactRequest = request ?: return false
-            val decision = machine.decide(exactRequest.handle, SecureApprovalDecision.APPROVE)
-            return decision in setOf(SecureApprovalResult.Applied, SecureApprovalResult.AlreadyApplied)
-        }
-
-        override fun isCancelled(): Boolean = false
-
-        fun dispose() {
-            request?.proof?.clearSensitive()
-            request = null
-            proofAtDisplay = null
-        }
-    }
 }
