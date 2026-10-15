@@ -243,6 +243,14 @@ public class ControlEstablishmentCapacityTest {
                 "only ${observer.acquired.get()} of $ACTIVE_LIMIT control permits were acquired",
                 fourAcquired.await(PERMIT_TIMEOUT_SECONDS, TimeUnit.SECONDS),
             )
+            // Acquisition and submission are two separate observer notifications. The latch above
+            // counts acquisitions, so it can release before the fourth submission is observed, and
+            // run 38705203819 read 3 submissions here with all four permits already held. Bound the
+            // submission count on its own terms rather than inferring it from the acquisition latch.
+            assertTrue(
+                "the ${observer.submitted.get()} observed submissions never reached $ACTIVE_LIMIT",
+                awaitTrue(SUBMISSION_TIMEOUT_SECONDS) { observer.submitted.get() >= ACTIVE_LIMIT },
+            )
             assertEquals("four peers produced ${observer.submitted.get()} submissions, " +
                 "expected $ACTIVE_LIMIT", ACTIVE_LIMIT, observer.submitted.get())
             mark("four_permits_acquired",
@@ -465,6 +473,14 @@ public class ControlEstablishmentCapacityTest {
                     "only ${observer.acquired.get() - acquiredBefore} of $ACTIVE_LIMIT " +
                         "establishment permits were acquired",
                     fourHeld.await(PERMIT_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+                )
+                // Same race as the single-lease case: fourHeld bounds acquisitions, not submissions.
+                assertTrue(
+                    "the ${observer.submitted.get() - submittedBefore} observed submissions never " +
+                        "reached $ACTIVE_LIMIT",
+                    awaitTrue(SUBMISSION_TIMEOUT_SECONDS) {
+                        observer.submitted.get() - submittedBefore >= ACTIVE_LIMIT
+                    },
                 )
                 assertEquals(
                     "four establishments produced " +
