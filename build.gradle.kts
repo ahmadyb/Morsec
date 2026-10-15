@@ -202,7 +202,25 @@ subprojects {
         reportFile.set(layout.buildDirectory.file("security/dependency-lock-report.txt"))
         // Captured while configuring. The configuration cache forbids touching Project from a task
         // action, and a FileCollection captured here is a supported cache input.
-        artifacts.from(configurationNames.mapNotNull { configurations.findByName(it) })
+        //
+        // Through an artifact view restricted to module components, not as a raw Configuration. A
+        // raw configuration resolves with no artifact type, and these classpaths contain a project
+        // dependency -- app on transport-lan, and each androidTest classpath on its own main
+        // variant -- which AGP publishes as several artifact-type variants. Gradle then cannot
+        // choose between android-aar-metadata, android-art-profile, android-assets,
+        // android-classes-directory and android-classes-jar, and configuring the task fails. Run
+        // 38699339407 did exactly that. Filtering to external modules removes the ambiguity and is
+        // also the correct scope: the lock covers external crypto artifacts, never project output.
+        artifacts.from(
+            configurationNames.mapNotNull { configurations.findByName(it) }.map { configuration ->
+                configuration.incoming.artifactView { view ->
+                    view.lenient(true)
+                    view.componentFilter { id ->
+                        id is org.gradle.api.artifacts.component.ModuleComponentIdentifier
+                    }
+                }.artifacts.artifactFiles
+            },
+        )
     }
 
     // Typed matching where Gradle exposes a stable type, name prefixes where AGP does not.

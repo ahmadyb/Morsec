@@ -230,21 +230,26 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p ci-logs
-          ./gradlew --no-daemon --stacktrace :transport-lan:dependencies \
-            --configuration debugCompileClasspath \
-            --configuration debugRuntimeClasspath \
-            --configuration releaseCompileClasspath \
-            --configuration releaseRuntimeClasspath \
-            --configuration debugUnitTestRuntimeClasspath \
-            --configuration releaseUnitTestRuntimeClasspath \
-            --configuration debugAndroidTestRuntimeClasspath 2>&1 | tee ci-logs/23-secure-lock-transport-lan.log
-          tl_status=${PIPESTATUS[0]}
-          if [ "$tl_status" -ne 0 ]; then exit "$tl_status"; fi
-          ./gradlew --no-daemon --stacktrace :app:dependencies \
-            --configuration debugRuntimeClasspath \
-            --configuration debugAndroidTestRuntimeClasspath 2>&1 | tee ci-logs/23-secure-lock-app.log
-          app_status=${PIPESTATUS[0]}
-          if [ "$app_status" -ne 0 ]; then exit "$app_status"; fi
+          # One invocation per configuration. `dependencies --configuration` takes a single value;
+          # passing several fails with "Multiple arguments were provided for command-line option".
+          resolve_all() {
+            project="$1"; output="$2"; shift 2
+            : > "$output"
+            for configuration in "$@"; do
+              ./gradlew --no-daemon --stacktrace ":${project}:dependencies" --configuration "$configuration" >> "$output" 2>&1
+              status=$?
+              if [ "$status" -ne 0 ]; then
+                echo "::error title=secure dependency lock::could not resolve :${project}:${configuration} (exit ${status})"
+                return "$status"
+              fi
+            done
+          }
+          resolve_all transport-lan ci-logs/23-secure-lock-transport-lan.log \
+            debugCompileClasspath debugRuntimeClasspath releaseCompileClasspath \
+            releaseRuntimeClasspath debugUnitTestRuntimeClasspath \
+            releaseUnitTestRuntimeClasspath debugAndroidTestRuntimeClasspath || exit $?
+          resolve_all app ci-logs/23-secure-lock-app.log \
+            debugRuntimeClasspath debugAndroidTestRuntimeClasspath || exit $?
           node tools/verify/security-dependency-lock.mjs \
             --resolved transport-lan=ci-logs/23-secure-lock-transport-lan.log \
             --resolved app=ci-logs/23-secure-lock-app.log \
