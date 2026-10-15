@@ -372,24 +372,11 @@ The component is now in the lock with `role: "test-only"`, `optional: true` and
 `allowedIn: ["UnitTest"]`, so it may appear on a unit-test classpath and nowhere else, and its
 absence from `app`'s configurations is not an error.
 
-**It is graph-locked but not digest-locked, and this is a real gap.** Maven Central publishes only
-`.md5` and `.sha1` for `conscrypt-openjdk-uber-2.5.2.jar`; there is no `.sha256`
-(directory listing fetched 2026-10-15, which also shows `conscrypt-openjdk-uber-2.5.2.jar` at
-4,534,256 bytes and a 1,264-byte POM with no Gradle module metadata). The lock records
-`sha256: null` with a `digestAvailability` note rather than a locally computed hash, because a
-locally computed value would be an unreviewed number presented as a reviewed one. Consequences,
-stated plainly:
-
-- Its exact group, artifact, name and version are locked; a version change, a module substitution
-  or its appearance on any production configuration fails verification.
-- Its byte length is still compared, so a substitution of a different size fails.
-- A same-length byte substitution of this one artifact would **not** be detected.
-- It never reaches a shipped APK; it executes only in the unit-test JVM.
-
-The other four components carry SHA-256 values that were compared against resolved artifact bytes
-in CI and matched. The residual limitation section below is therefore wider than it first
-appeared: it covers unpublished POM bytes for all five components, and unpublished SHA-256 for
-one.
+**It was first recorded with `sha256: null` on the grounds that Maven Central publishes no
+`.sha256` for it. That was the wrong conclusion and it has been corrected: the absence of a
+published SHA-256 sidecar does not make an artifact unhashable. Every locked binary now carries a
+digest, and the verifier rejects a null one. See the provenance section below for how this
+digest was established and what it does and does not prove.
 
 
 ### One configuration resolves no crypto at all
@@ -448,3 +435,120 @@ fourth permit is held, which can precede the fourth submission notification. Bot
 the identical shape in the mixed-saturation case now wait on the submission count itself through
 the existing bounded `awaitTrue` with `SUBMISSION_TIMEOUT_SECONDS`. No timeout value changed and
 no production code changed. Run `38708167687` passed API 23 with `cleanup_completed`.
+
+
+## Provenance and verification layers, described separately
+
+These are distinct guarantees with distinct strengths. They are listed separately because
+conflating them is how a null digest survived a review: "the coordinate is pinned" was silently
+doing the work of "the bytes are verified".
+
+**1. Coordinate pinning.** `gradle/libs.versions.toml` pins `conscrypt = "2.7.0"` and
+`bouncyCastle = "1.86"`; `transport-lan/build.gradle.kts` declares
+`org.conscrypt:conscrypt-android` and `org.bouncycastle:bcpkix-jdk18on`. `settings.gradle.kts`
+uses `RepositoriesMode.FAIL_ON_PROJECT_REPOS` with `google()` and `mavenCentral()` only. This
+stops version drift and repository injection. It does not stop a substituted artifact at the
+same coordinate.
+
+**2. Exact graph lock.** `gradle/security-dependency-lock.json` names every component in the
+crypto graph with its group, artifact, version, direct/transitive/test-only role, packaging,
+filename, size and digest, and lists the nine configurations each must resolve. Extra
+components, missing components, version substitution, module substitution, packaging change and
+filename change all fail. Group membership alone is never trusted.
+
+**3. Binary-byte lock.** All five binaries are digest-locked. Measured values from run
+`38766118011`, which hashed the bytes Gradle actually resolved:
+
+| artifact | bytes | SHA-256 |
+| --- | --- | --- |
+| `conscrypt-android-2.7.0.aar` | 4,927,898 | `86072ce711795e188e1e82214d023789d2983fafe342bcae83f046125cf64e7f` |
+| `bcpkix-jdk18on-1.86.jar` | 1,341,621 | `8d8b41a4b149bdae8d331f059a578870954d1e3ff29f8269a9eb3ee19a7e4ef7` |
+| `bcprov-jdk18on-1.86.jar` | 7,224,011 | `2af190b300cbb0b35e248ccf5f4a06b6072030aeb3da7a98ec73abe5b4cb371f` |
+| `bcutil-jdk18on-1.86.jar` | 789,287 | `1c268e15f785aafb1e4670d8d6e5f856f69475e96c162dadcd1ff9b350e9139f` |
+| `conscrypt-openjdk-uber-2.5.2.jar` | 4,534,256 | `eaf537d98e033d0f0451cd1b8cc74e02d7b55ec882da63c88060d806ba89c348` |
+
+The verifier rejects a null or malformed digest on any entry, including test-only ones, and
+`verifySecureDependencyLock` throws if a lock entry has no digest at all. There is no
+escape hatch: the former `digestAvailability` field is now itself a validation failure.
+
+**4. Signing and checksum provenance.** The CI provenance step fetches every checksum sidecar
+Maven Central publishes for each coordinate and compares it against the resolved bytes.
+Measured results:
+
+| artifact | published sidecars | matched |
+| --- | --- | --- |
+| `conscrypt-android-2.7.0.aar` | sha256, sha1, md5 | all three |
+| `bcpkix-jdk18on-1.86.jar` | sha256, sha1, md5 | all three |
+| `bcprov-jdk18on-1.86.jar` | sha256, sha1, md5 | all three |
+| `bcutil-jdk18on-1.86.jar` | sha256, sha1, md5 | all three |
+| `conscrypt-openjdk-uber-2.5.2.jar` | sha1, md5 | both |
+
+A published sidecar that does not match is a hard CI failure. Which algorithms are published is
+discovered at run time, not recorded from memory.
+
+The four production artifacts therefore have **independently published** SHA-256 values, and
+their lock records `digestDerivation: "independently published"`.
+
+`conscrypt-openjdk-uber` has no published SHA-256. Its recorded digest was **computed** over the
+bytes Gradle resolved, after those bytes matched both published SHA-1 and published MD5
+sidecars, and its lock record says `digestDerivation: "computed"`. Two independent published
+algorithms agreeing is real evidence, but it is weaker than a published SHA-256: SHA-1 and MD5
+are both collision-broken, so this establishes that the bytes are the ones Maven Central
+published, not that they are the bytes Conscrypt's authors built. It is not described as
+independently published anywhere.
+
+**No detached signature is verified.** Maven Central publishes `.asc` signatures for these
+coordinates and none of them are checked: there is no keyring, no pinned Conscrypt or Bouncy
+Castle release-signing fingerprint in this repository, and no keyserver reachable from the build
+environment. `signatureVerified: false` is recorded on every component, and the verifier rejects
+a record claiming `signatureVerified: true` without a `signingKeyFingerprint`. Provenance
+therefore rests on transport from `repo1.maven.org` plus published checksum agreement, not on
+cryptographic authorship proof.
+
+**5. Task-graph enforcement.** `verifySecureDependencyLock` is registered in `transport-lan` and
+`app` and is a prerequisite of Kotlin compilation, Java compilation and `Test` tasks by type, and
+of `lint*`, `dex*`, `package*`, `assemble*`, `bundle*` and `connected*` tasks by name prefix,
+because AGP exposes no stable public type for those. Running
+`./gradlew :transport-lan:compileDebugKotlin` or `:app:assembleDebug` directly triggers
+verification without relying on workflow step order. Run `38712120643` proved the ordering from
+a `--dry-run` plan: `transport-lan` verification planned at line 21 with its first consumer at
+22, `app` at 143 and 144, 328 tasks planned. The ordering rule now lives in
+`planOrderProblems` with fixtures, because shell regexes cannot be tested and one of them
+initially mistook `:app:compileDebugNavigationResources` for a compiler.
+
+**6. Tested APK versus instrumentation APK.** `:app` reaches `transport-lan` through
+`implementation` (`app/build.gradle.kts:170`), so `:app:debugRuntimeClasspath` carries all four
+production artifacts and is locked at `expect: "full"`. `:app:debugAndroidTestRuntimeClasspath`
+resolves no crypto at all, and is locked at `expect: "none"`.
+
+That emptiness is the AGP split-APK model rather than a gap. `debugAndroidTestRuntimeClasspath`
+describes only the instrumentation APK, whose test classes are loaded into the tested
+application's process; the production dependencies are packaged into the separately built tested
+APK. Consequences, all enforced rather than assumed:
+
+- `:app:debugRuntimeClasspath` must resolve the full approved graph, or verification fails.
+- `assembleDebugAndroidTest` builds the tested debug APK, recorded by a CI evidence step.
+- The tested APK's packaged native libraries are listed by that step, which is where
+  `libconscrypt_jni.so` appears.
+- The tested APK's compile, dex and package tasks are gated, since `dex*`, `package*` and
+  `assemble*` are all in the protected prefix set.
+- Adding a crypto dependency directly to `androidTest` makes the `expect: "none"` lock fail. This
+  is a fixture, so the emptiness cannot silently become a place to hide an unapproved artifact.
+
+**7. Metadata bytes are not verified.** POM and Gradle module metadata are not hashed. Gradle
+never materialises a `.pom` under `caches/modules-2/files-2.1` (proved in run `37989038083`), so
+there is nothing local to hash. Only `conscrypt-android` publishes Gradle module metadata; the
+three Bouncy Castle modules and `conscrypt-openjdk-uber` are POM-only.
+
+**8. Residual provenance limitation.** A substituted POM or module file that resolves the same
+graph and the same artifact bytes would not be detected, because the metadata is fetched over the
+same transport as the artifacts and is never hashed. Combined with the unverified `.asc`
+signatures, the honest statement is: this repository proves the artifact bytes match values
+Maven Central publishes and that no unapproved component enters the graph. It does **not** prove
+authorship, and it does **not** prove the metadata was untampered.
+
+**9. This is not global Gradle dependency verification.** There is no
+`gradle/verification-metadata.xml` and no `dependencyLocking`. The mechanism is scoped to the
+five crypto components and nine configurations named in the lock. Everything else in the build
+resolves without checksum verification. Describing this as strict Gradle dependency verification
+would be false.

@@ -110,14 +110,14 @@ abstract class VerifySecureDependencyLock : DefaultTask() {
                 ?: throw GradleException("a locked component has no fileName")
             val expectedSize = (component["sizeBytes"] as? Number)?.toLong()
                 ?: throw GradleException("locked component $fileName has no sizeBytes")
-            // A null digest is permitted only for an entry the lock marks optional and explains;
-            // org.conscrypt:conscrypt-openjdk-uber has no published .sha256. Size is still checked,
-            // so a substituted file of a different length is caught even without a digest.
+            // Every locked component describes executable code, so every one is digest-locked. A
+            // missing digest is a configuration error rather than a tolerated case: without it a
+            // substituted file of the same length could not be detected.
             val expectedSha = component["sha256"] as? String
+                ?: throw GradleException("locked component $fileName has no sha256; every locked binary must be digest-locked")
+            // `optional` governs whether absence from a configuration is acceptable -- the OpenJDK
+            // JAR only appears on unit-test classpaths -- never whether its bytes are verified.
             val optional = component["optional"] == true
-            if (expectedSha == null && !optional) {
-                throw GradleException("locked component $fileName has no sha256 and is not optional")
-            }
 
             val file = byName[fileName]
             if (file == null) {
@@ -137,11 +137,9 @@ abstract class VerifySecureDependencyLock : DefaultTask() {
                     digest.update(buffer, 0, read)
                 }
             }
-            if (expectedSha != null) {
-                val actual = digest.digest().joinToString("") { "%02x".format(it) }
-                if (actual != expectedSha) {
-                    problems += "$fileName sha256 $actual does not match the locked $expectedSha"
-                }
+            val actual = digest.digest().joinToString("") { "%02x".format(it) }
+            if (actual != expectedSha) {
+                problems += "$fileName sha256 $actual does not match the locked $expectedSha"
             }
         }
 

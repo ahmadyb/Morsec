@@ -51,11 +51,20 @@
       "publisherMetadata": "Gradle module metadata (.module) and POM are both published; neither is byte-verified here",
       "provenance": {
         "algorithm": "sha256",
+        "publishedSidecars": [
+          "sha256",
+          "sha1",
+          "md5"
+        ],
         "crossCheckedAgainst": [
+          "maven-central .sha256 sidecar, matched",
+          "maven-central .sha1 sidecar, matched",
+          "maven-central .md5 sidecar, matched",
           "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
         ],
         "signatureVerified": false,
-        "note": "Digest pre-existing in gradle/secure-artifact-checksums.txt and re-verified in CI against the bytes Gradle resolved. Which checksum sidecars Maven Central publishes for this coordinate, and whether the resolved bytes match them, is measured and reported by the CI provenance step rather than asserted here."
+        "digestDerivation": "independently published",
+        "note": "Maven Central publishes a .sha256 sidecar for this coordinate and the bytes Gradle resolved match it, along with the .sha1 and .md5 sidecars (measured by the CI provenance step, run 38766118011). The digest is therefore independently published, not merely computed here. The .asc detached signature exists but is NOT verified: no keyring and no pinned signing-key fingerprint in this repository."
       }
     },
     {
@@ -76,11 +85,20 @@
       "publisherMetadata": "POM published; not byte-verified here",
       "provenance": {
         "algorithm": "sha256",
+        "publishedSidecars": [
+          "sha256",
+          "sha1",
+          "md5"
+        ],
         "crossCheckedAgainst": [
+          "maven-central .sha256 sidecar, matched",
+          "maven-central .sha1 sidecar, matched",
+          "maven-central .md5 sidecar, matched",
           "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
         ],
         "signatureVerified": false,
-        "note": "Digest pre-existing in gradle/secure-artifact-checksums.txt and re-verified in CI against the bytes Gradle resolved. Which checksum sidecars Maven Central publishes for this coordinate, and whether the resolved bytes match them, is measured and reported by the CI provenance step rather than asserted here."
+        "digestDerivation": "independently published",
+        "note": "Maven Central publishes a .sha256 sidecar for this coordinate and the bytes Gradle resolved match it, along with the .sha1 and .md5 sidecars (measured by the CI provenance step, run 38766118011). The digest is therefore independently published, not merely computed here. The .asc detached signature exists but is NOT verified: no keyring and no pinned signing-key fingerprint in this repository."
       }
     },
     {
@@ -101,11 +119,20 @@
       "publisherMetadata": "POM published; not byte-verified here",
       "provenance": {
         "algorithm": "sha256",
+        "publishedSidecars": [
+          "sha256",
+          "sha1",
+          "md5"
+        ],
         "crossCheckedAgainst": [
+          "maven-central .sha256 sidecar, matched",
+          "maven-central .sha1 sidecar, matched",
+          "maven-central .md5 sidecar, matched",
           "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
         ],
         "signatureVerified": false,
-        "note": "Digest pre-existing in gradle/secure-artifact-checksums.txt and re-verified in CI against the bytes Gradle resolved. Which checksum sidecars Maven Central publishes for this coordinate, and whether the resolved bytes match them, is measured and reported by the CI provenance step rather than asserted here."
+        "digestDerivation": "independently published",
+        "note": "Maven Central publishes a .sha256 sidecar for this coordinate and the bytes Gradle resolved match it, along with the .sha1 and .md5 sidecars (measured by the CI provenance step, run 38766118011). The digest is therefore independently published, not merely computed here. The .asc detached signature exists but is NOT verified: no keyring and no pinned signing-key fingerprint in this repository."
       }
     },
     {
@@ -126,11 +153,20 @@
       "publisherMetadata": "POM published; not byte-verified here",
       "provenance": {
         "algorithm": "sha256",
+        "publishedSidecars": [
+          "sha256",
+          "sha1",
+          "md5"
+        ],
         "crossCheckedAgainst": [
+          "maven-central .sha256 sidecar, matched",
+          "maven-central .sha1 sidecar, matched",
+          "maven-central .md5 sidecar, matched",
           "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
         ],
         "signatureVerified": false,
-        "note": "Digest pre-existing in gradle/secure-artifact-checksums.txt and re-verified in CI against the bytes Gradle resolved. Which checksum sidecars Maven Central publishes for this coordinate, and whether the resolved bytes match them, is measured and reported by the CI provenance step rather than asserted here."
+        "digestDerivation": "independently published",
+        "note": "Maven Central publishes a .sha256 sidecar for this coordinate and the bytes Gradle resolved match it, along with the .sha1 and .md5 sidecars (measured by the CI provenance step, run 38766118011). The digest is therefore independently published, not merely computed here. The .asc detached signature exists but is NOT verified: no keyring and no pinned signing-key fingerprint in this repository."
       }
     },
     {
@@ -142,8 +178,7 @@
       "packaging": "jar",
       "fileName": "conscrypt-openjdk-uber-2.5.2.jar",
       "sizeBytes": 4534256,
-      "sha256": null,
-      "digestAvailability": "Maven Central publishes only .md5 and .sha1 for this artifact; there is no .sha256. Its bytes are therefore graph-locked but not digest-locked. Recorded as a known gap rather than filled with a locally computed hash, which would be an unreviewed value presented as a reviewed one.",
+      "sha256": "eaf537d98e033d0f0451cd1b8cc74e02d7b55ec882da63c88060d806ba89c348",
       "optional": true,
       "allowedIn": [
         "UnitTest"
@@ -156,16 +191,19 @@
       "reachesProductionArtifact": false,
       "provenance": {
         "algorithm": "sha256",
-        "crossCheckedAgainst": [
-          "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
-        ],
-        "signatureAvailable": true,
-        "signatureVerified": false,
         "publishedSidecars": [
           "md5",
           "sha1"
         ],
-        "note": "Maven Central publishes a .asc detached signature and .md5/.sha1 sidecars for this artifact but no .sha256 (directory listing for 2.5.2 fetched 2026-10-15). The signature is NOT verified: no keyring, no pinned Conscrypt release-signing fingerprint, and no keyserver reachable from this environment. Provenance rests on the bytes Gradle itself resolved and on cross-checks against the published sidecars, which CI performs and reports. A locally calculated digest is recorded as locally calculated and is never described as independently published."
+        "crossCheckedAgainst": [
+          "maven-central .sha1 sidecar, matched",
+          "maven-central .md5 sidecar, matched",
+          "bytes Gradle resolved from Maven Central in CI, hashed by the verification task before any consumer task ran"
+        ],
+        "signatureAvailable": true,
+        "signatureVerified": false,
+        "digestDerivation": "computed",
+        "note": "Maven Central publishes .md5 and .sha1 sidecars for this coordinate but no .sha256 (measured by the CI provenance step, run 38766118011: published=[sha1,md5], matched=[sha1,md5]). The SHA-256 recorded here was computed over the bytes Gradle resolved, after those bytes were confirmed against both published digests. It is a computed digest, not an independently published one, and digestDerivation says so. The .asc detached signature exists but is NOT verified: no keyring, no pinned Conscrypt release-signing fingerprint, and no keyserver reachable here."
       }
     }
   ],
@@ -214,7 +252,7 @@
       "project": "app",
       "name": "debugAndroidTestRuntimeClasspath",
       "expect": "none",
-      "note": "Resolves no crypto component at all. Measured in run 38713963400: the resolved report for this configuration contains zero org.conscrypt or org.bouncycastle modules, even though app reaches transport-lan through implementation (app/build.gradle.kts:170) and app's debugRuntimeClasspath does carry all four. The Gradle verification task resolves this same configuration through its artifact view and passed, so both mechanisms agree. Emptiness is the assertion here, not a skipped check: any crypto component appearing on this configuration fails verification. Why the androidTest report shows none while the runtime classpath shows four is not established and is recorded as an open question rather than explained away."
+      "note": "Resolves no crypto component at all. Measured in run 38713963400: the resolved report for this configuration contains zero org.conscrypt or org.bouncycastle modules, even though app reaches transport-lan through implementation (app/build.gradle.kts:170) and app's debugRuntimeClasspath does carry all four production artifacts. This is the AGP split-APK model: debugAndroidTestRuntimeClasspath describes only the instrumentation APK, whose classes run inside the tested app's process, while the production dependencies live in the separately built tested APK. Emptiness is the assertion here, not a skipped check: any crypto component appearing on this configuration fails verification. The tested APK is covered by app:debugRuntimeClasspath at expect full, and the CI evidence step records both the tested APK's packaged native libraries and that assembleDebugAndroidTest builds the tested APK."
     }
   ],
   "taskGraph": {

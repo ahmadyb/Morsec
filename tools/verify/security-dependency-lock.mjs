@@ -74,24 +74,21 @@ export function validateStructure(lock) {
 
   const seen = new Map();
   for (const c of components) {
-    // sha256 may be explicitly null for a documented optional entry -- Maven Central publishes no
-    // .sha256 for org.conscrypt:conscrypt-openjdk-uber -- and the dedicated block below validates
-    // that case on its own terms. Every other field must still be present.
+    // Every entry describes executable code, so every entry carries a digest. There is no optional
+    // or documented-digest-absent escape hatch: an artifact without a SHA-256 cannot detect
+    // substitution, whatever its role.
     const missing = ['group', 'artifact', 'version', 'role', 'packaging', 'fileName', 'sizeBytes', 'sha256']
-      .filter((field) => c[field] === undefined || c[field] === '' ||
-        (c[field] === null && field !== 'sha256'));
+      .filter((field) => c[field] === undefined || c[field] === null || c[field] === '');
     if (missing.length) problems.push(`${c.artifact ?? '<unknown>'}: missing field(s) ${missing.join(', ')}`);
     if (!/^[0-9]+(\.[0-9]+)*$/.test(String(c.version))) {
       problems.push(`${c.group}:${c.artifact}: version "${c.version}" is not an exact pinned version`);
     }
     if (DYNAMIC.test(String(c.version))) problems.push(`${c.group}:${c.artifact}: version "${c.version}" is dynamic or a range`);
-    if (c.sha256 === null || c.sha256 === undefined) {
-      // A null digest is only acceptable when it is optional, explained, and scoped away from
-      // production. Anything else is a lock entry that cannot detect substitution.
-      if (c.optional !== true) problems.push(`${c.group}:${c.artifact}: sha256 is missing but the entry is not optional`);
-      if (!c.digestAvailability) problems.push(`${c.group}:${c.artifact}: sha256 is missing with no digestAvailability explanation`);
-    } else if (!/^[a-f0-9]{64}$/.test(String(c.sha256))) {
+    if (c.sha256 !== undefined && c.sha256 !== null && !/^[a-f0-9]{64}$/.test(String(c.sha256))) {
       problems.push(`${c.group}:${c.artifact}: sha256 is not 64 lowercase hex chars`);
+    }
+    if (c.digestAvailability !== undefined) {
+      problems.push(`${c.group}:${c.artifact}: digestAvailability is no longer a valid escape hatch; record provenance instead`);
     }
     if (!Number.isInteger(c.sizeBytes) || c.sizeBytes <= 0) problems.push(`${c.group}:${c.artifact}: sizeBytes is not a positive integer`);
     const expectedName = `${c.artifact}-${c.version}.${c.packaging}`;
@@ -254,13 +251,15 @@ export function verifyBytes(components, resolve, digestOf) {
       problems.push(`${c.fileName} is ${located.size} bytes, lock says ${c.sizeBytes}`);
       continue;
     }
-    if (c.sha256) {
-      const digest = digestOf
-        ? digestOf(c)
-        : createHash('sha256').update(readFileSync(located.path)).digest('hex');
-      if (digest !== c.sha256) {
-        problems.push(`${c.fileName} sha256 ${digest} does not match locked ${c.sha256}`);
-      }
+    if (!c.sha256) {
+      problems.push(`${c.fileName} has no locked sha256, so substitution cannot be detected`);
+      continue;
+    }
+    const digest = digestOf
+      ? digestOf(c)
+      : createHash('sha256').update(readFileSync(located.path)).digest('hex');
+    if (digest !== c.sha256) {
+      problems.push(`${c.fileName} sha256 ${digest} does not match locked ${c.sha256}`);
     }
   }
   return problems;
@@ -528,9 +527,29 @@ function runSelfTest() {
     out.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').reachesProductionArtifact = true;
     return out;
   });
-  structureFails('an unexplained null digest is rejected', (l) => {
+  structureFails('a null binary digest is rejected', (l) => {
     const out = JSON.parse(JSON.stringify(l));
-    delete out.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').digestAvailability;
+    out.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').sha256 = null;
+    return out;
+  });
+  structureFails('a missing binary digest is rejected', (l) => {
+    const out = JSON.parse(JSON.stringify(l));
+    delete out.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').sha256;
+    return out;
+  });
+  structureFails('the retired digestAvailability escape hatch is rejected', (l) => {
+    const out = JSON.parse(JSON.stringify(l));
+    out.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').digestAvailability = 'only md5 published';
+    return out;
+  });
+  structureFails('a component with no provenance record is rejected', (l) => {
+    const out = JSON.parse(JSON.stringify(l));
+    delete out.components.find((c) => c.artifact === 'bcprov-jdk18on').provenance;
+    return out;
+  });
+  structureFails('a claimed verified signature with no key fingerprint is rejected', (l) => {
+    const out = JSON.parse(JSON.stringify(l));
+    out.components[0].provenance.signatureVerified = true;
     return out;
   });
   graphFails('a test-only component leaking into a production configuration is rejected',
@@ -541,9 +560,9 @@ function runSelfTest() {
       'org.bouncycastle:bcutil-jdk18on:1.86',
       'org.conscrypt:conscrypt-openjdk-uber:2.5.2',
     ]));
-  // No published digest, so only the size can be checked -- and it still has to be checked.
-  // digestOf returns each component's own recorded hash so no unrelated digest noise is produced.
-  bytesFails('a component without a published digest is still size-checked',
+  // digestOf returns each component's own recorded hash so no unrelated digest noise is produced,
+  // leaving the size comparison as the only thing that can fail.
+  bytesFails('the OpenJDK JAR is size-checked as well as digest-checked',
     (c) => fakeResolve(c, (component, base) =>
       (component.artifact === 'conscrypt-openjdk-uber' ? { ...base, size: base.size - 1 } : base)),
     (c) => c.sha256);
@@ -609,6 +628,14 @@ function runSelfTest() {
       appReports).length === 0,
     verifyGraph({ ...lock, configurations: [{ project: 'app', name: 'debugRuntimeClasspath', expect: 'full' }] },
       appReports).join('; '));
+
+  {
+    const withNull = JSON.parse(JSON.stringify(lock));
+    withNull.components.find((c) => c.artifact === 'conscrypt-openjdk-uber').sha256 = null;
+    check('mutation: a null binary digest fails byte verification too',
+      verifyBytes(withNull.components,
+        (c) => ({ path: LOCK_PATH, size: c.sizeBytes }), (c) => c.sha256).length > 0);
+  }
 
   // --- task-plan fixtures ------------------------------------------------------------------------
   const planFails = (name, plan) => check(`plan mutation: ${name}`, planOrderProblems(plan, ['transport-lan']).length > 0);
