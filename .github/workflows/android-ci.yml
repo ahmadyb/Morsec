@@ -250,10 +250,21 @@ jobs:
             releaseUnitTestRuntimeClasspath debugAndroidTestRuntimeClasspath || exit $?
           resolve_all app ci-logs/23-secure-lock-app.log \
             debugRuntimeClasspath debugAndroidTestRuntimeClasspath || exit $?
+          # Capture and annotate, because the job log is not retrievable afterwards through the API
+          # and an unannotated red step tells the next reader nothing. Run 38705203819 failed here
+          # with no reason recoverable from either endpoint.
           node tools/verify/security-dependency-lock.mjs \
             --resolved transport-lan=ci-logs/23-secure-lock-transport-lan.log \
             --resolved app=ci-logs/23-secure-lock-app.log \
-            --cache
+            --cache 2>&1 | tee ci-logs/24-secure-lock-verify.log
+          lock_status="${PIPESTATUS[0]}"
+          grep -c '^' ci-logs/24-secure-lock-verify.log | sed 's/^/secure lock verify log lines: /'
+          grep -m 12 'FAIL' ci-logs/24-secure-lock-verify.log | while IFS= read -r line; do
+            echo "::error title=secure dependency lock::${line}"
+          done
+          grep -m 1 'checks passed' ci-logs/24-secure-lock-verify.log \
+            | sed 's/^/::notice title=secure dependency lock::/'
+          exit "$lock_status"
 
       # Step order is not enforcement. This proves the task graph itself puts verification first, by
       # asking Gradle to plan representative consumer tasks and never invoking verification by hand.
