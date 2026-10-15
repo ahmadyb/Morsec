@@ -735,7 +735,13 @@ if (args.includes('--emit-digests')) {
 if (args.includes('--plan')) {
   const planPath = args[args.indexOf('--plan') + 1];
   const plan = readFileSync(join(ROOT, planPath), 'utf8');
-  const problems = planOrderProblems(plan, ['transport-lan', 'app']);
+  // --plan-projects scopes the check, because a plan for one requested task does not necessarily
+  // contain every protected project.
+  const projectsArg = args.indexOf('--plan-projects');
+  const projects = projectsArg >= 0 && args[projectsArg + 1]
+    ? args[projectsArg + 1].split(',').filter(Boolean)
+    : ['transport-lan', 'app'];
+  const problems = planOrderProblems(plan, projects);
   for (const problem of problems) console.log(`  FAIL ${problem}`);
   console.log(problems.length === 0
     ? '  ok   the task plan places verification before every consumer task'

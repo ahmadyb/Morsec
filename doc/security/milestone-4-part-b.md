@@ -534,6 +534,11 @@ APK. Consequences, all enforced rather than assumed:
   `assemble*` are all in the protected prefix set.
 - Adding a crypto dependency directly to `androidTest` makes the `expect: "none"` lock fail. This
   is a fixture, so the emptiness cannot silently become a place to hide an unapproved artifact.
+- The tested debug APK must contain `libconscrypt_jni.so`, `assembleDebugAndroidTest` must build
+  `:app:packageDebug`, `:app:compileDebugKotlin`, `:app:verifySecureDependencyLock` and at least
+  one `:app` dex task, and verification must precede every consumer in that plan. Each of these is
+  asserted and fails the run, not merely logged: an earlier version emitted them as notices, and
+  GitHub's annotation cap silently discarded them.
 
 **7. Metadata bytes are not verified.** POM and Gradle module metadata are not hashed. Gradle
 never materialises a `.pom` under `caches/modules-2/files-2.1` (proved in run `37989038083`), so
