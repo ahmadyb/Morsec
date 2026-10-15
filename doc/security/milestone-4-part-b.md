@@ -527,16 +527,22 @@ application's process; the production dependencies are packaged into the separat
 APK. Consequences, all enforced rather than assumed:
 
 - `:app:debugRuntimeClasspath` must resolve the full approved graph, or verification fails.
-- `assembleDebugAndroidTest` builds the tested debug APK, recorded by a CI evidence step.
+- `assembleDebugAndroidTest` builds **only** the instrumentation APK. Measured in run
+  `38770998120`: `:app:packageDebug` is absent from that plan, while `:app:compileDebugKotlin`,
+  four `:app` dex tasks and `:app:verifySecureDependencyLock` are present. The tested APK is built
+  by `assembleDebug` and the two are combined at install time.
 - The tested APK's packaged native libraries are listed by that step, which is where
   `libconscrypt_jni.so` appears.
 - The tested APK's compile, dex and package tasks are gated, since `dex*`, `package*` and
   `assemble*` are all in the protected prefix set.
 - Adding a crypto dependency directly to `androidTest` makes the `expect: "none"` lock fail. This
   is a fixture, so the emptiness cannot silently become a place to hide an unapproved artifact.
-- The tested debug APK must contain `libconscrypt_jni.so`, `assembleDebugAndroidTest` must build
-  `:app:packageDebug`, `:app:compileDebugKotlin`, `:app:verifySecureDependencyLock` and at least
-  one `:app` dex task, and verification must precede every consumer in that plan. Each of these is
+- The tested debug APK must contain `libconscrypt_jni.so` (measured: 4 entries, one per ABI).
+  `:app:assembleDebug` must build `:app:packageDebug`, `:app:compileDebugKotlin`,
+  `:app:verifySecureDependencyLock` and at least one `:app` dex task, with verification planned
+  before every consumer in both `:transport-lan` and `:app`. `:app:assembleDebugAndroidTest` must
+  build `:app:compileDebugKotlin`, `:app:verifySecureDependencyLock` and at least one `:app` dex
+  task, likewise ordered. Each of these is
   asserted and fails the run, not merely logged: an earlier version emitted them as notices, and
   GitHub's annotation cap silently discarded them.
 

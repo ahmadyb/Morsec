@@ -580,12 +580,15 @@ jobs:
           status="${PIPESTATUS[0]}"
           set -e
           if [ "$status" -ne 0 ]; then exit "$status"; fi
-          # androidTest packaging must build the tested APK, and therefore run its gated tasks.
-          for task in packageDebug compileDebugKotlin verifySecureDependencyLock; do
+          # Measured in run 38770998120: assembleDebugAndroidTest does NOT build the tested APK.
+          # AGP builds only the instrumentation APK there; the tested APK is built by assembleDebug
+          # and the two are combined at install time. Asserting packageDebug in this plan was wrong.
+          # What this plan must contain is app's own compilation and dexing, gated by verification.
+          for task in compileDebugKotlin verifySecureDependencyLock; do
             if grep -qE "^:app:${task}( |$)" ci-logs/26-secure-lock-android-test-plan.log; then
               echo "::notice title=android test plan:::app:${task} is built by assembleDebugAndroidTest"
             else
-              echo "::error title=android test plan:::app:${task} is absent, so the tested APK is not gated"
+              echo "::error title=android test plan:::app:${task} is absent from the androidTest plan"
               status=1
             fi
           done
@@ -595,6 +598,38 @@ jobs:
             echo "::error title=android test plan::no :app dex task is in the androidTest plan"
             status=1
           fi
+          # The tested APK, where it is actually built. This is the plan that must package Conscrypt
+          # and Bouncy Castle, so it is the one whose gating matters.
+          set +e
+          ./gradlew --no-daemon --dry-run :app:assembleDebug 2>&1 \
+            | tee ci-logs/27-secure-lock-tested-apk-plan.log
+          tested_status="${PIPESTATUS[0]}"
+          set -e
+          if [ "$tested_status" -ne 0 ]; then exit "$tested_status"; fi
+          for task in packageDebug compileDebugKotlin verifySecureDependencyLock; do
+            if grep -qE "^:app:${task}( |$)" ci-logs/27-secure-lock-tested-apk-plan.log; then
+              echo "::notice title=tested apk plan:::app:${task} is built by assembleDebug"
+            else
+              echo "::error title=tested apk plan:::app:${task} is absent, so the tested APK is not gated"
+              status=1
+            fi
+          done
+          tested_dex=$(grep -cE '^:app:[A-Za-z]*[Dd]ex' ci-logs/27-secure-lock-tested-apk-plan.log || true)
+          echo "::notice title=tested apk plan:::app dex task(s) built by assembleDebug = ${tested_dex}"
+          if [ "$tested_dex" -eq 0 ]; then
+            echo "::error title=tested apk plan::no :app dex task is in the tested APK plan"
+            status=1
+          fi
+          set +e
+          node tools/verify/security-dependency-lock.mjs --plan ci-logs/27-secure-lock-tested-apk-plan.log \
+            --plan-projects transport-lan,app 2>&1 | tee ci-logs/27-secure-lock-tested-apk-order.txt
+          tested_order="${PIPESTATUS[0]}"
+          set -e
+          { grep 'FAIL' ci-logs/27-secure-lock-tested-apk-order.txt || true; } \
+            | sed 's/^/::error title=tested apk plan::/'
+          { grep 'checks passed' ci-logs/27-secure-lock-tested-apk-order.txt || true; } \
+            | sed 's/^/::notice title=tested apk plan::/'
+          if [ "$tested_order" -ne 0 ]; then exit "$tested_order"; fi
           set +e
           node tools/verify/security-dependency-lock.mjs --plan ci-logs/26-secure-lock-android-test-plan.log \
             --plan-projects app 2>&1 | tee ci-logs/26-secure-lock-android-test-order.txt
