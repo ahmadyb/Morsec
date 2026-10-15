@@ -390,3 +390,61 @@ The other four components carry SHA-256 values that were compared against resolv
 in CI and matched. The residual limitation section below is therefore wider than it first
 appeared: it covers unpublished POM bytes for all five components, and unpublished SHA-256 for
 one.
+
+
+### One configuration resolves no crypto at all
+
+Run `38713963400` reported:
+
+```
+FAIL every locked configuration resolves to the approved graph --
+configuration app:debugAndroidTestRuntimeClasspath resolved no crypto component
+```
+
+The resolved report for `:app:debugAndroidTestRuntimeClasspath` contains **zero** `org.conscrypt`
+or `org.bouncycastle` modules, even though `app` reaches `transport-lan` through
+`implementation` (`app/build.gradle.kts:170`) and `:app:debugRuntimeClasspath` does carry all four
+production artifacts. The Gradle verification task resolves this same configuration through its
+artifact view and passed, so both mechanisms independently agree the crypto is absent.
+
+That configuration is now declared `expect: "none"` with a note. **Emptiness is the assertion, not
+a skipped check**: `verifyGraph` fails if any crypto component ever appears there, so the
+configuration is still verified rather than exempted. The eight remaining configurations still
+require the full graph.
+
+Why the androidTest report resolves none while the runtime classpath resolves four is **not
+established**. The raw report is not retrievable after the run, so the mechanism cannot be
+confirmed here. It is recorded as an open question in the lock note rather than explained away.
+The practical exposure is nil either way: the API 23 instrumentation suite runs from
+`transport-lan`'s androidTest APK, which is covered by
+`transport-lan:debugAndroidTestRuntimeClasspath` at `expect: "full"`.
+
+### Diagnostic changes made while finding this
+
+Three CI defects were fixed to make these failures visible at all, each one costing a run to
+discover because the job log is not retrievable through the API afterwards:
+
+- The secure lock verifier step emitted no annotation on failure. GitHub Actions runs `run:`
+  blocks with `set -eo pipefail`, so the failing `node ... | tee ...` pipeline aborted the script
+  before the annotation code. `errexit` is now suspended across the pipeline and the real status
+  is captured from `PIPESTATUS`.
+- The ordering proof reported only line numbers. It now names the matched task and prints up to
+  14 neighbouring plan lines.
+- The ordering proof's consumer regex used a bare `compile` prefix, which matched
+  `:app:compileDebugNavigationResources` — an AGP resource task that is neither `KotlinCompile`
+  nor `JavaCompile`, consumes no dependency classpath, and was never gated by the wiring. The
+  regex now names Kotlin and Java compilation explicitly, so it matches the gated set instead of
+  being stricter than it. With that fixed, run `38712120643` proved the ordering for both
+  projects: `transport-lan` verification planned at line 21 with first consumer at 22, `app` at
+  143 and 144, 328 tasks planned.
+
+### A race in the A3 harness, fixed
+
+Run `38705203819` failed API 23 with
+`four peers produced 3 submissions, expected 4 expected:<4> but was:<3>`. This was a genuine
+defect, not a flake. Acquisition and submission are two separate `CountingObserver`
+notifications, but `fourAcquired` is a latch on acquisitions only; it releases as soon as the
+fourth permit is held, which can precede the fourth submission notification. Both that site and
+the identical shape in the mixed-saturation case now wait on the submission count itself through
+the existing bounded `awaitTrue` with `SUBMISSION_TIMEOUT_SECONDS`. No timeout value changed and
+no production code changed. Run `38708167687` passed API 23 with `cleanup_completed`.

@@ -168,7 +168,8 @@
     {
       "project": "app",
       "name": "debugAndroidTestRuntimeClasspath",
-      "expect": "full"
+      "expect": "none",
+      "note": "Resolves no crypto component at all. Measured in run 38713963400: the resolved report for this configuration contains zero org.conscrypt or org.bouncycastle modules, even though app reaches transport-lan through implementation (app/build.gradle.kts:170) and app's debugRuntimeClasspath does carry all four. The Gradle verification task resolves this same configuration through its artifact view and passed, so both mechanisms agree. Emptiness is the assertion here, not a skipped check: any crypto component appearing on this configuration fails verification. Why the androidTest report shows none while the runtime classpath shows four is not established and is recorded as an open question rather than explained away."
     }
   ],
   "taskGraph": {

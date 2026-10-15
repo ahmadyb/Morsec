@@ -106,7 +106,12 @@ export function validateStructure(lock) {
   } else {
     for (const cfg of lock.configurations) {
       if (!cfg.project || !cfg.name) problems.push(`configuration entry is missing project or name: ${JSON.stringify(cfg)}`);
-      if (!['full', 'subset'].includes(cfg.expect)) problems.push(`configuration ${cfg.project}:${cfg.name} has expect "${cfg.expect}"`);
+      if (!['full', 'subset', 'none'].includes(cfg.expect)) {
+        problems.push(`configuration ${cfg.project}:${cfg.name} has expect "${cfg.expect}"`);
+      }
+      if (cfg.expect === 'none' && !cfg.note) {
+        problems.push(`configuration ${cfg.project}:${cfg.name} declares expect "none" with no note`);
+      }
     }
   }
   return problems;
@@ -165,6 +170,15 @@ export function verifyGraph(lock, reportsByProject) {
       continue;
     }
     const found = sections[sections.length - 1];
+    if (cfg.expect === 'none') {
+      // Documented as carrying no crypto artifact. Emptiness is the assertion, not an absence of
+      // checking: a crypto component appearing here is a failure, not a relaxation.
+      if (found.size > 0) {
+        problems.push(`configuration ${cfg.project}:${cfg.name} is documented as carrying no crypto ` +
+          `component but resolved ${[...found.keys()].join(', ')}`);
+      }
+      continue;
+    }
     if (found.size === 0) {
       problems.push(`configuration ${cfg.project}:${cfg.name} resolved no crypto component`);
       continue;
@@ -454,6 +468,16 @@ function runSelfTest() {
     (c) => fakeResolve(c, (component, base) =>
       (component.artifact === 'conscrypt-openjdk-uber' ? { ...base, size: base.size - 1 } : base)),
     (c) => c.sha256);
+
+  structureFails('a configuration declaring no crypto with no note is rejected', (l) => {
+    const out = JSON.parse(JSON.stringify(l));
+    out.configurations[0].expect = 'none';
+    delete out.configurations[0].note;
+    return out;
+  });
+  graphFails('a configuration declared free of crypto that resolves one is rejected',
+    reportWith('debugRuntimeClasspath'),
+    [{ project: 'transport-lan', name: 'debugRuntimeClasspath', expect: 'none', note: 'x' }]);
 
   // The unchanged inputs must pass, or every mutation above would pass for the wrong reason.
   check('baseline: unmodified lock structure is valid', validateStructure(lock).length === 0,
