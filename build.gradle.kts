@@ -213,9 +213,11 @@ subprojects {
         // also the correct scope: the lock covers external crypto artifacts, never project output.
         artifacts.from(
             configurationNames.mapNotNull { configurations.findByName(it) }.map { configuration ->
-                configuration.incoming.artifactView { view ->
-                    view.lenient(true)
-                    view.componentFilter { id ->
+                // Receiver lambda, not a parameter: artifactView takes an Action, which Kotlin DSL
+                // exposes as ViewConfiguration.() -> Unit. Naming a parameter is a compile error.
+                configuration.incoming.artifactView {
+                    lenient(true)
+                    componentFilter { id ->
                         id is org.gradle.api.artifacts.component.ModuleComponentIdentifier
                     }
                 }.artifacts.artifactFiles
