@@ -43,9 +43,11 @@ adb shell getprop ro.build.version.sdk > ci-logs/60-api23-api-level.log 2>&1
 # One tag only, so no unbounded logcat is collected: fixed phase names and bounded counts, never a
 # peer or session identifier, address, certificate, proof or key.
 A3_TAG="${A3_PHASE_TAG:-MorsecA3Phase}"
+# The J-PAKE feasibility harness reports bounded phase timings under its own tag.
+JPAKE_TAG="${JPAKE_PHASE_TAG:-MorsecJpakePhase}"
 : > ci-logs/62-api23-phases.log
 adb logcat -c > /dev/null 2>&1
-adb logcat -v time -s "$A3_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &
+adb logcat -v time -s "$A3_TAG:I" "$JPAKE_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &
 A3_LOGCAT_PID=$!
 
 timeout --kill-after="${TIMEOUT_GRACE_SECONDS}s" "${TIMEOUT_BOUND_SECONDS}s" \
@@ -71,7 +73,7 @@ tail -n 150 ci-logs/60-api23-connected.log
 # died early -- for example on an ADB disconnect mid-run.
 kill "$A3_LOGCAT_PID" > /dev/null 2>&1
 wait "$A3_LOGCAT_PID" > /dev/null 2>&1
-adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I" >> ci-logs/62-api23-phases.log 2>&1
+adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I" "${JPAKE_PHASE_TAG:-MorsecJpakePhase}:I" >> ci-logs/62-api23-phases.log 2>&1
 
 if [ "$status" -ne 0 ]; then
   adb devices -l > ci-logs/61-api23-device-after.log 2>&1

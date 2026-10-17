@@ -1356,7 +1356,7 @@ function verifyA3PhaseChannelAndTimeoutBounds() {
   // weakness is what made an earlier version of this mutation pass for the wrong reason.
   const failureBranch = wrapper.indexOf('if [ "$status" -ne 0 ]');
   const streamingCapture = wrapper.indexOf(
-    'adb logcat -v time -s "$A3_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &',
+    'adb logcat -v time -s "$A3_TAG:I" "$JPAKE_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &',
   );
   check(
     'the wrapper streams the phase tag from before Gradle starts, on every outcome',
@@ -1370,11 +1370,11 @@ function verifyA3PhaseChannelAndTimeoutBounds() {
     'dropping the streaming phase capture fails this check',
     wrapper,
     (src) => src.replace(
-      'adb logcat -v time -s "$A3_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &',
+      'adb logcat -v time -s "$A3_TAG:I" "$JPAKE_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &',
       '',
     ),
     (src) => {
-      const at = src.indexOf('adb logcat -v time -s "$A3_TAG:I" >> ci-logs/62-api23-phases.log');
+      const at = src.indexOf('adb logcat -v time -s "$A3_TAG:I" "$JPAKE_TAG:I" >> ci-logs/62-api23-phases.log');
       return at >= 0 && at < src.indexOf('timeout --kill-after=') &&
         at < src.indexOf('if [ "$status" -ne 0 ]');
     },
