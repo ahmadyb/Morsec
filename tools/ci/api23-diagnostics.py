@@ -458,8 +458,13 @@ def main() -> int:
                     f"device: {failure['device']} (API {sdk})\n"
                     f"result xml: {failure['source']}\n"
                     f"message: {failure['message']}\n"
-                    f"--- phase trail ---\n" + "\n".join(phase_report()[1]) + "\n"
-                    f"--- stack excerpt ---\n{excerpt}",
+                    # The stack excerpt comes before the phase trail on purpose. The A3
+                    # trail alone runs to ~27 lines, and when it was emitted first it
+                    # consumed the entire annotation budget, so a run of ten J-PAKE
+                    # failures reported ten annotations with no exception in any of them.
+                    # Evidence first, context second.
+                    f"--- stack excerpt ---\n{excerpt}\n"
+                    f"--- phase trail ---\n" + "\n".join(phase_report()[1]),
                     MAX_STACK_LINES + MAX_EVIDENCE_LINES + 12,
                 ),
             )
