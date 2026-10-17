@@ -432,7 +432,9 @@ class EcJpakeFeasibilityApi23Test {
         val round3 = bob.createRound3PayloadToSend(keyB)
 
         val pointBytes = round1.gx1.getEncoded(true).size
-        val scalarBytes = unsignedSize(round1.knowledgeProofForX1.r)
+        // ECSchnorrZKP exposes getr(), and Kotlin only synthesises a property from a getter
+        // whose name has an uppercase letter after `get`, so this one must be called directly.
+        val scalarBytes = unsignedSize(round1.knowledgeProofForX1.getr())
         val round1Bytes = 2 * pointBytes + 2 * (pointBytes + scalarBytes)
         val round2Bytes = pointBytes + pointBytes + scalarBytes
         val round3Bytes = unsignedSize(round3.macTag)
