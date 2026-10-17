@@ -116,8 +116,7 @@ class EcJpakeFeasibilityApi23Test {
     fun aSubstitutedParticipantIdIsRejectedInLaterRounds() {
         val alice = newParticipant(ID_A, CODE)
         val bob = newParticipant(ID_B, CODE)
-        alice.validateRound1PayloadReceived(bob.createRound1PayloadToSend())
-        bob.validateRound1PayloadReceived(alice.createRound1PayloadToSend())
+        exchangeRoundOne(alice, bob)
 
         // Bob's round-two payload, re-attributed to a third identity. The library pins the
         // partner id captured in round one, so a substituted sender is refused.
@@ -159,7 +158,8 @@ class EcJpakeFeasibilityApi23Test {
         // A genuinely valid round-two payload, offered before round one has been validated.
         // Constructing it legitimately first keeps the refusal attributable to the ordering
         // check rather than to the payload being unusable.
-        bob.validateRound1PayloadReceived(alice.createRound1PayloadToSend())
+        val aliceRound1 = alice.createRound1PayloadToSend()
+        bob.validateRound1PayloadReceived(aliceRound1)
         val bobRound2 = bob.createRound2PayloadToSend()
         assertTrue(
             "round two cannot be validated before round one is validated",
@@ -174,13 +174,12 @@ class EcJpakeFeasibilityApi23Test {
     fun duplicatedRoundsAreRefused() {
         val alice = newParticipant(ID_A, CODE)
         val bob = newParticipant(ID_B, CODE)
-        val bobRound1 = bob.createRound1PayloadToSend()
-
-        alice.validateRound1PayloadReceived(bobRound1)
-        assertTrue("a second round-one validation must be refused", illegalState { alice.validateRound1PayloadReceived(bobRound1) })
-
         val aliceRound1 = alice.createRound1PayloadToSend()
         assertTrue("a second round-one creation must be refused", illegalState { alice.createRound1PayloadToSend() })
+
+        val bobRound1 = bob.createRound1PayloadToSend()
+        alice.validateRound1PayloadReceived(bobRound1)
+        assertTrue("a second round-one validation must be refused", illegalState { alice.validateRound1PayloadReceived(bobRound1) })
 
         bob.validateRound1PayloadReceived(aliceRound1)
         val aliceRound2 = alice.createRound2PayloadToSend()
@@ -222,26 +221,27 @@ class EcJpakeFeasibilityApi23Test {
     }
 
     @Test
-    fun replayingAnEarlierRoundTwoCannotCompleteAnExchange() {
+    fun replayingAnEarlierRoundTwoIsRejectedOutright() {
         val alice = newParticipant(ID_A, CODE)
         val bob = newParticipant(ID_B, CODE)
-        alice.validateRound1PayloadReceived(bob.createRound1PayloadToSend())
-        bob.validateRound1PayloadReceived(alice.createRound1PayloadToSend())
+        exchangeRoundOne(alice, bob)
         val staleRound2 = bob.createRound2PayloadToSend()
 
-        // A second, unrelated session, into which the captured round two is replayed.
+        // A second session reusing the same participant ids, so the identity checks alone
+        // would pass. What stops the replay is the zero-knowledge proof: it was produced
+        // against the first session's curve points, so it cannot verify here.
         val alice2 = newParticipant(ID_A, CODE)
         val bob2 = newParticipant(ID_B, CODE)
-        alice2.validateRound1PayloadReceived(bob2.createRound1PayloadToSend())
-        bob2.validateRound1PayloadReceived(alice2.createRound1PayloadToSend())
-        alice2.validateRound2PayloadReceived(staleRound2)
+        exchangeRoundOne(alice2, bob2)
 
-        val keyA2 = alice2.calculateKeyingMaterial()
-        val keyB2 = bob2.calculateKeyingMaterial()
-        assertNotEquals("a replayed round two must not agree on keying material", keyA2, keyB2)
         assertTrue(
-            "a replayed round two must fail confirmation",
-            rejected { alice2.validateRound3PayloadReceived(bob2.createRound3PayloadToSend(keyB2), keyA2) },
+            "a round two replayed from another session must be refused",
+            rejected { alice2.validateRound2PayloadReceived(staleRound2) },
+        )
+        assertEquals(
+            "a refused round two must leave the state at round one validated",
+            ECJPAKEParticipant.STATE_ROUND_1_VALIDATED,
+            alice2.state,
         )
     }
 
@@ -249,13 +249,12 @@ class EcJpakeFeasibilityApi23Test {
     fun aPayloadFromAnotherSessionIsRejected() {
         val alice = newParticipant(ID_A, CODE)
         val bob = newParticipant(ID_B, CODE)
-        alice.validateRound1PayloadReceived(bob.createRound1PayloadToSend())
+        exchangeRoundOne(alice, bob)
 
         // A wholly separate exchange whose round-two payload is offered to the first session.
         val carol = newParticipant(ID_C, CODE)
         val dave = newParticipant(ID_D, CODE)
-        carol.validateRound1PayloadReceived(dave.createRound1PayloadToSend())
-        dave.validateRound1PayloadReceived(carol.createRound1PayloadToSend())
+        exchangeRoundOne(carol, dave)
         val foreign = dave.createRound2PayloadToSend()
 
         assertTrue(
@@ -422,9 +421,10 @@ class EcJpakeFeasibilityApi23Test {
     fun encodedPayloadSizesAreBoundedAndSmall() {
         val alice = newParticipant(ID_A, CODE)
         val bob = newParticipant(ID_B, CODE)
+        val aliceRound1 = alice.createRound1PayloadToSend()
         val round1 = bob.createRound1PayloadToSend()
         alice.validateRound1PayloadReceived(round1)
-        bob.validateRound1PayloadReceived(alice.createRound1PayloadToSend())
+        bob.validateRound1PayloadReceived(aliceRound1)
         val round2 = bob.createRound2PayloadToSend()
         alice.validateRound2PayloadReceived(round2)
         val keyA = alice.calculateKeyingMaterial()
@@ -465,11 +465,27 @@ class EcJpakeFeasibilityApi23Test {
         }
     }
 
+    /**
+     * Both rounds are created before either is validated, on both sides.
+     *
+     * This ordering is forced by the library, not chosen: validating a peer's round one moves
+     * the state to STATE_ROUND_1_VALIDATED (20), and createRound1PayloadToSend throws once the
+     * state has reached STATE_ROUND_1_CREATED (10). A peer that validates an incoming round
+     * before generating its own can never reply. Round two is constrained the same way.
+     */
+    private fun exchangeRoundOne(alice: ECJPAKEParticipant, bob: ECJPAKEParticipant) {
+        val aliceRound1 = alice.createRound1PayloadToSend()
+        val bobRound1 = bob.createRound1PayloadToSend()
+        alice.validateRound1PayloadReceived(bobRound1)
+        bob.validateRound1PayloadReceived(aliceRound1)
+    }
+
     private fun exchangeRoundsOneAndTwo(alice: ECJPAKEParticipant, bob: ECJPAKEParticipant) {
-        alice.validateRound1PayloadReceived(bob.createRound1PayloadToSend())
-        bob.validateRound1PayloadReceived(alice.createRound1PayloadToSend())
-        alice.validateRound2PayloadReceived(bob.createRound2PayloadToSend())
-        bob.validateRound2PayloadReceived(alice.createRound2PayloadToSend())
+        exchangeRoundOne(alice, bob)
+        val aliceRound2 = alice.createRound2PayloadToSend()
+        val bobRound2 = bob.createRound2PayloadToSend()
+        alice.validateRound2PayloadReceived(bobRound2)
+        bob.validateRound2PayloadReceived(aliceRound2)
     }
 
     /** The library reports a BigInteger of unknown width; size it as an unsigned value. */

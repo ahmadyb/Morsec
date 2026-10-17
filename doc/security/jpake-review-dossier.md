@@ -209,6 +209,19 @@ close.**
   x-coordinate actually lies in `[0, q-1]`, and for P-256 `q ≠ n`. Canonical encoding must not
   assume the documented range.
 
+### Round scheduling is constrained by the state machine
+
+`validateRound1PayloadReceived` moves the state to `STATE_ROUND_1_VALIDATED` (20), while
+`createRound1PayloadToSend` throws once the state has reached `STATE_ROUND_1_CREATED` (10).
+A participant therefore **cannot validate an incoming round one before generating its own**;
+round two is constrained identically. Both peers must create before either validates.
+
+This is a scheduling requirement, not a detail. Any framing layer must be able to produce its
+own round payload before it has seen the peer's, so the two round-one messages must be
+exchangeable concurrently rather than strictly request-then-response. It was found by
+measurement: the first feasibility run failed with `IllegalStateException: Round1 payload
+already created` on every test that validated first.
+
 ### Concurrency
 
 `ECJPAKEParticipant` is documented as **stateful and NOT threadsafe**, one instance per
