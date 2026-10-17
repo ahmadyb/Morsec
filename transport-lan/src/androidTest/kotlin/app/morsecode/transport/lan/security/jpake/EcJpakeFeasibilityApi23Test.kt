@@ -408,8 +408,8 @@ class EcJpakeFeasibilityApi23Test {
         // The library copies the code, so the caller can and should zero its own array
         // immediately. This proves that clearing is safe rather than merely assumed.
         val shared = CODE.toCharArray()
-        val alice = ECJPAKEParticipant(ID_A, shared, curve, SHA256Digest.newInstance(), SecureRandom())
-        val bob = ECJPAKEParticipant(ID_B, shared.copyOf(), curve, SHA256Digest.newInstance(), SecureRandom())
+        val alice = ECJPAKEParticipant(ID_A, shared, profile, SHA256Digest.newInstance(), SecureRandom())
+        val bob = ECJPAKEParticipant(ID_B, shared.copyOf(), profile, SHA256Digest.newInstance(), SecureRandom())
         shared.fill('\u0000')
 
         exchangeRoundsOneAndTwo(alice, bob)
