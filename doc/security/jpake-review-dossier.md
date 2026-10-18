@@ -391,9 +391,53 @@ Measured by `EcJpakePerformanceApi23Test` on the API 23 emulator, using monotoni
 three discarded warm-up exchanges separated from seven measured ones, reporting median and 90th
 percentile per phase under the log tag `MorsecJpakePhase`.
 
-The assertion is a deliberately generous ceiling intended only to catch a catastrophic
-regression; the medians are the meaningful output and are transcribed from the phase log of the
-implementing CI run.
+The assertion is a deliberately generous ceiling — 20 s for a single exchange, 40 s for four
+concurrent — intended only to catch a catastrophic regression, not to act as a benchmark. Both
+held with roughly two orders of magnitude of headroom. The medians above are the meaningful
+output.
+
+Measured on the API 23 emulator, run `39083022037` at `6ed9e10ae1998e8f5e4e27528f6a0db4a7e8869e`,
+P-256, SHA-256, 3 discarded warm-up exchanges and 7 measured ones. Each phase figure covers
+**both** participants' work in that phase, so a single peer's share is roughly half.
+
+| Phase | Median (µs) | p90 (µs) |
+| --- | --- | --- |
+| Participant construction | 171 | 180 |
+| Round 1 create | 167,679 | 173,147 |
+| Round 1 validate | 146,454 | 151,561 |
+| Round 2 create | 85,767 | 96,640 |
+| Round 2 validate | 105,127 | 110,814 |
+| Keying-material calculation | 102,203 | 107,894 |
+| Round 3 create | 2,778 | 3,027 |
+| Round 3 validate | 2,480 | 3,143 |
+| **Total honest exchange (both sides)** | **614,873** | 619,634 |
+| Total wrong-code exchange (both sides) | 605,759 | 644,217 |
+| Four concurrent exchanges | 2,519,165 | 2,519,165 |
+
+Reading, not advocacy:
+
+- A full honest exchange costs about **0.61 s** on an API 23 emulator, or roughly 0.31 s per
+  peer. That is comfortable against a human interaction that already requires reading and typing
+  an eight-character code.
+- Cost is dominated by the elliptic-curve scalar multiplications in rounds 1 and 2. Round 3 is
+  cheap because it is an HMAC, not a point multiplication.
+- Four concurrent exchanges take about 2.52 s against 0.61 s for one, so concurrency is close to
+  linear rather than serialised. With 3 samples the median and p90 are the same element, so no
+  percentile claim is made for that row.
+- A wrong-code exchange costs essentially the same as an honest one up to the point of failure.
+  **This is a timing-oracle consideration:** an attacker cannot distinguish a wrong code from a
+  right one by how long the exchange took, but the confirmation failure itself is still an
+  online oracle, which is what the attempt limiter bounds.
+
+Encoded payload sizes, asserted by test rather than estimated:
+
+| Round | Bytes |
+| --- | --- |
+| 1 | **196** |
+| 2 | **98** |
+| 3 | **32** |
+| Compressed P-256 point | 33 |
+| Scalar | 32 |
 
 **Allocation is not measured.** The thread-allocation counters available on API 23 attribute
 all thread activity and cannot be isolated reliably under a concurrent runner.
