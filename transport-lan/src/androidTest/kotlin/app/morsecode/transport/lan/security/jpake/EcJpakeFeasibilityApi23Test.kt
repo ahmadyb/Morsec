@@ -280,16 +280,40 @@ class EcJpakeFeasibilityApi23Test {
     }
 
     @Test
-    fun anOffCurveEncodingIsRejectedBeforeItReachesTheLibrary() {
+    fun malformedAndOffCurvePointEncodingsAreRejectedOnDecode() {
         // The public API cannot construct an off-curve ECPoint, so the library's internal
-        // on-curve check is unreachable from here. This measures where the project framing
-        // layer must intervene instead: decoding a corrupted compressed encoding fails.
+        // on-curve check is unreachable except through decoding. This measures where the
+        // project framing layer must intervene.
         val genuine = newParticipant(ID_B, CODE).createRound1PayloadToSend()
-        val encoded = genuine.gx1.getEncoded(true)
-        encoded[encoded.size - 1] = (encoded[encoded.size - 1].toInt() xor 0x01).toByte()
+        val template = genuine.gx1.getEncoded(true)
+
+        // Structurally invalid encodings fail deterministically.
+        val badPrefix = template.copyOf().also { it[0] = INVALID_POINT_PREFIX }
         assertTrue(
-            "a corrupted compressed point encoding must not decode",
-            rejected { ecCurve.decodePoint(encoded) },
+            "an invalid point-encoding prefix must not decode",
+            rejected { ecCurve.decodePoint(badPrefix) },
+        )
+        assertTrue(
+            "a truncated point encoding must not decode",
+            rejected { ecCurve.decodePoint(template.copyOfRange(0, template.size - 1)) },
+        )
+
+        // A well-formed encoding whose x simply is not a curve x-coordinate. Roughly half of
+        // all field elements are not, so a bounded search always finds one -- which is exactly
+        // why a single fixed corruption cannot be used here: it decodes about half the time,
+        // making the assertion a coin toss.
+        var rejectedCount = 0
+        var attempts = 0
+        while (attempts < MAX_OFF_CURVE_SEARCH && rejectedCount == 0) {
+            val candidate = template.copyOf()
+            candidate[candidate.size - 1] =
+                (candidate[candidate.size - 1].toInt() + attempts + 1).toByte()
+            if (rejected { ecCurve.decodePoint(candidate) }) rejectedCount += 1
+            attempts += 1
+        }
+        assertTrue(
+            "a bounded search over $attempts candidate encodings must find one that is off-curve",
+            rejectedCount > 0,
         )
     }
 
@@ -537,6 +561,13 @@ class EcJpakeFeasibilityApi23Test {
         const val CONCURRENT_TIMEOUT_SECONDS = 120L
 
         const val POINT_BYTES = 33
+
+        // Compressed P-256 encodings carry a 0x02 or 0x03 prefix; anything else is invalid.
+        const val INVALID_POINT_PREFIX: Byte = 0x05
+
+        // About half of all field elements are not curve x-coordinates, so this bound is
+        // reached with probability near 2^-64.
+        const val MAX_OFF_CURVE_SEARCH = 64
         const val MAX_ROUND1_BYTES = 512
         const val MAX_ROUND2_BYTES = 256
         const val MAX_ROUND3_BYTES = 64

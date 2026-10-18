@@ -260,6 +260,14 @@ Rejected: duplicate fields, unknown mandatory fields, trailing data, a payload f
 round, a payload from the wrong session, a reflected payload, a swapped role, a participant-ID
 mismatch.
 
+**Invalid points must be handled at decode, not assumed away.** Measured on the API 23 harness:
+a structurally invalid encoding (bad prefix byte, truncated body) is rejected deterministically
+by `ECCurve.decodePoint`. A *well-formed* encoding whose x is simply not a curve x-coordinate is
+also rejected, but roughly half of all 32-byte field elements are valid curve x-coordinates, so
+no single fixed corruption demonstrates it -- a one-bit flip decodes successfully about half the
+time. The framing layer must therefore reject on decode for every point it reads, and must not
+rely on a downstream check having been reached.
+
 Measured encoded sizes for P-256 (points and scalars only, excluding framing and IDs):
 
 | Round | Contents | Bytes |
