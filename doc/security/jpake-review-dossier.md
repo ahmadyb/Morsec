@@ -214,7 +214,10 @@ close.**
 `validateRound1PayloadReceived` moves the state to `STATE_ROUND_1_VALIDATED` (20), while
 `createRound1PayloadToSend` throws once the state has reached `STATE_ROUND_1_CREATED` (10).
 A participant therefore **cannot validate an incoming round one before generating its own**;
-round two is constrained identically. Both peers must create before either validates.
+round two is constrained identically, and so is round three: validating a round-three tag
+moves the state to `STATE_ROUND_3_VALIDATED` (70) while creating one throws once the state
+has reached `STATE_ROUND_3_CREATED` (60). In every round, both peers must create before
+either validates.
 
 This is a scheduling requirement, not a detail. Any framing layer must be able to produce its
 own round payload before it has seen the peer's, so the two round-one messages must be

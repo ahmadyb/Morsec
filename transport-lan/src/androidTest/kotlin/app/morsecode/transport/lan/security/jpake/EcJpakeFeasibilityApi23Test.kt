@@ -371,8 +371,7 @@ class EcJpakeFeasibilityApi23Test {
                         exchangeRoundsOneAndTwo(alice, bob)
                         val keyA = alice.calculateKeyingMaterial()
                         val keyB = bob.calculateKeyingMaterial()
-                        alice.validateRound3PayloadReceived(bob.createRound3PayloadToSend(keyB), keyA)
-                        bob.validateRound3PayloadReceived(alice.createRound3PayloadToSend(keyA), keyB)
+                        exchangeRoundThree(alice, bob, keyA, keyB)
                         keyA == keyB
                     }
                 },
@@ -425,8 +424,10 @@ class EcJpakeFeasibilityApi23Test {
         val round1 = bob.createRound1PayloadToSend()
         alice.validateRound1PayloadReceived(round1)
         bob.validateRound1PayloadReceived(aliceRound1)
+        val aliceRound2 = alice.createRound2PayloadToSend()
         val round2 = bob.createRound2PayloadToSend()
         alice.validateRound2PayloadReceived(round2)
+        bob.validateRound2PayloadReceived(aliceRound2)
         val keyA = alice.calculateKeyingMaterial()
         val keyB = bob.calculateKeyingMaterial()
         val round3 = bob.createRound3PayloadToSend(keyB)
@@ -478,6 +479,19 @@ class EcJpakeFeasibilityApi23Test {
         val bobRound1 = bob.createRound1PayloadToSend()
         alice.validateRound1PayloadReceived(bobRound1)
         bob.validateRound1PayloadReceived(aliceRound1)
+    }
+
+    /** Round three is constrained like the others: both tags are created before either is checked. */
+    private fun exchangeRoundThree(
+        alice: ECJPAKEParticipant,
+        bob: ECJPAKEParticipant,
+        keyA: BigInteger,
+        keyB: BigInteger,
+    ) {
+        val aliceRound3 = alice.createRound3PayloadToSend(keyA)
+        val bobRound3 = bob.createRound3PayloadToSend(keyB)
+        alice.validateRound3PayloadReceived(bobRound3, keyA)
+        bob.validateRound3PayloadReceived(aliceRound3, keyB)
     }
 
     private fun exchangeRoundsOneAndTwo(alice: ECJPAKEParticipant, bob: ECJPAKEParticipant) {

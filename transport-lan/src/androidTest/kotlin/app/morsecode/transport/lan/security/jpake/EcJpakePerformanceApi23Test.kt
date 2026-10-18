@@ -181,8 +181,10 @@ class EcJpakePerformanceApi23Test {
                         bob.validateRound2PayloadReceived(aliceRound2)
                         val keyA = alice.calculateKeyingMaterial()
                         val keyB = bob.calculateKeyingMaterial()
-                        alice.validateRound3PayloadReceived(bob.createRound3PayloadToSend(keyB), keyA)
-                        bob.validateRound3PayloadReceived(alice.createRound3PayloadToSend(keyA), keyB)
+                        val aliceRound3 = alice.createRound3PayloadToSend(keyA)
+                        val bobRound3 = bob.createRound3PayloadToSend(keyB)
+                        alice.validateRound3PayloadReceived(bobRound3, keyA)
+                        bob.validateRound3PayloadReceived(aliceRound3, keyB)
                         keyA == keyB
                     }
                 },
