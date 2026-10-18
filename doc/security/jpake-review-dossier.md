@@ -491,6 +491,14 @@ Reading, not advocacy:
   right one by how long the exchange took, but the confirmation failure itself is still an
   online oracle, which is what the attempt limiter bounds.
 
+**Run-to-run spread.** A second green run (`39113258488`) on the same code measured a median
+total of **717,664 µs** against 614,873 µs — about 17% slower — with four concurrent at
+2,808,957 µs against 2,519,165 µs. The shape is identical and the ranking of phases is
+unchanged; only the absolute values move. This is exactly why no hard performance claim is made
+from a single run: on a shared CI emulator the spread between two green runs is larger than the
+difference between most design options, so the honest statement is "well under a second per
+exchange", not a precise figure.
+
 Encoded payload sizes, asserted by test rather than estimated:
 
 | Round | Bytes |
