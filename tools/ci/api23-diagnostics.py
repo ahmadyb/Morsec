@@ -212,6 +212,27 @@ def bounded(text: str, max_lines: int, max_chars: int = MAX_CHARS_PER_ANNOTATION
     return redact("\n".join(out)) or "[no message]"
 
 
+JPAKE_PHASE = re.compile(r"(phase=[A-Za-z0-9_]+(?:\s+[a-z0-9_]+=-?[0-9]+)+)")
+MAX_JPAKE_LINES = 16
+
+
+def jpake_phase_lines():
+    """Bounded per-phase J-PAKE timings captured under the feasibility harness tag.
+
+    These are the output the feasibility exercise exists to produce, so they are surfaced
+    on a green run rather than left only in an artifact. Fixed phase names and integers
+    only, exactly as the harness logs them: no code, keying material or MAC tag.
+    """
+    out = []
+    for line in (read_log(PHASE_LOG) + "\n" + read_log(CONSOLE_LOG)).splitlines():
+        if "MorsecJpakePhase" not in line:
+            continue
+        found = JPAKE_PHASE.search(line)
+        if found and found.group(1) not in out:
+            out.append(found.group(1))
+    return out[:MAX_JPAKE_LINES]
+
+
 def phase_report():
     """The last A3PHASE marker and the bounded trail leading to it.
 
@@ -480,7 +501,17 @@ def main() -> int:
         # A green instrumentation step. The summary notice below is enough;
         # claiming a failure here would make the channel cry wolf on every
         # passing run and train the next reader to ignore it.
-        pass
+        #
+        # The J-PAKE feasibility timings are the exception worth a notice: they are the
+        # measured evidence the external review needs, and the phase log they live in is
+        # not retrievable once the run ends.
+        jpake = jpake_phase_lines()
+        if jpake:
+            emit(
+                "notice",
+                "J-PAKE API 23 phase timings (median and p90, microseconds)",
+                bounded("\n".join(jpake), MAX_JPAKE_LINES),
+            )
     elif xmls and not failures:
         # Results exist and every test passed, yet the job may still be red.
         # Say what the logs hold rather than letting the run look explained.
