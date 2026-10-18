@@ -299,6 +299,12 @@ label strings; the decision to feed the TLS exporter into the HKDF IKM alongside
 keying material; the transcript field ordering; and the choice of an application HMAC over the
 library's own round 3.
 
+Note in particular that `CB` above uses the raw RFC 8446 §7.5 exporter with a **project label
+and a non-empty context**. It is *not* the registered RFC 9266 `tls-exporter` binding, which
+mandates the label `EXPORTER-Channel-Binding` and a zero-length context. Candidate A therefore
+proposes a project-defined channel binding built on a standard primitive; see Candidate C1 for
+what adopting the registered binding instead would and would not change.
+
 ### Candidate B — channel-bound participant IDs plus the library's round three
 
 Derive `CB` as above, then set
@@ -311,6 +317,13 @@ participantId(responder) = "morsec-v1|responder|" || hex(CB)
 Because the library hashes `participantId` into **every ZKP** and into the **round-3 MacData**,
 both the proofs and the confirmation transitively bind `CB`, and therefore the TLS channel.
 Length-prefixed hashing removes concatenation ambiguity.
+
+`CB` here may be either the project exporter value of Candidate A or the registered RFC 9266
+`tls-exporter` binding of Candidate C1. The two are not interchangeable: the registered binding
+binds the TLS connection only, so a Candidate B built on it would leave the MPS offers bound
+solely through whatever else is placed in the participant ID. The reviewer is asked to state
+which `CB` definition Candidate B is being assessed against, because the answer changes what the
+construction does and does not cover.
 
 **Mutual confirmation:** yes — see §6; both directions of round three are distinct and
 reflection fails.
@@ -332,16 +345,57 @@ between the peers' ID construction fails closed, which is safe but must be teste
 
 **This construction is submitted for review, not asserted to be secure.**
 
-### Candidate C — RFC 9266 exported authenticator (reference only)
+### Candidate C — standard TLS channel-binding mechanisms
 
-RFC 9266, *"A TLS 1.3 Exported Authenticator"*, is a published mechanism for binding an
-application-level authentication to a TLS channel, and is the only candidate here with a
-Standards Track specification behind it. It is included as a design reference.
+**Correction.** An earlier revision of this dossier described RFC 9266 as an "exported
+authenticator" and gave it a title it does not have. That was wrong. RFC 9266 and RFC 9261 are
+distinct mechanisms published in the same month, and only one of them is a channel binding:
 
-**Feasibility caveat:** it requires TLS 1.3 exported-authenticator support in the provider.
-Support in the bundled Conscrypt on API 23 has **not** been established and should not be
-assumed. If it is unavailable, Candidate C is not implementable and exists only as a comparison
-point.
+| | **RFC 9266** | **RFC 9261** |
+| --- | --- | --- |
+| Title | *Channel Bindings for TLS 1.3* | *Exported Authenticators in TLS* |
+| Status | Proposed Standard, July 2022 | Proposed Standard, July 2022 |
+| What it is | A registered **channel binding type**, `tls-exporter`, per RFC 5056 | Proof of ownership of an **identity (X.509 certificate)**, exported from a TLS connection |
+| Construction | EKM from the RFC 5705 / RFC 8446 §7.5 exporter with label `EXPORTER-Channel-Binding`, **zero-length context**, 32 bytes | Concatenation of TLS 1.3 `Certificate`, `CertificateVerify` and `Finished`, MACed with a Finished key derived from the connection |
+| Effect on other standards | Updates RFCs 5801, 5802, 5929 and 7677; mandatory to implement if any TLS 1.3 channel binding is implemented | Replaces TLS 1.2 renegotiation for post-handshake authentication |
+
+#### C1 — RFC 9266 `tls-exporter` channel binding
+
+**This is the only standard channel-binding mechanism identified here, and it is applicable in
+principle.** Two properties make it attractive. It is a registered, Standards Track binding
+rather than a project invention. And its underlying primitive is the TLS keying-material
+exporter, which the bundled Conscrypt already exposes and which production already calls at five
+sites in `SecureLanPairingCoordinator.kt` — so **the primitive is demonstrably available on
+API 23**, and that part is measured rather than assumed.
+
+The limitation is exact and it matters. RFC 9266 fixes both inputs: the label is the registered
+string `EXPORTER-Channel-Binding` and the context is **zero-length**. The resulting value binds
+the *TLS connection only*. It does not bind the MPS offers, the MST selection, the capabilities
+or the security-format version. Adopting C1 therefore replaces a project-invented exporter label
+with a registered one, but the binding to the MPS/MST transcript still has to be composed by the
+project. C1 removes one project-defined component and leaves the composition question open.
+
+The reviewer is asked specifically whether that trade is worth making, and whether
+`CB_rfc9266 || transcript_digest` is an acceptable composition or an unanalysed one.
+
+RFC 9266 also leaves `tls-exporter` undefined when TLS renegotiation is enabled on the
+connection. TLS 1.3 has no renegotiation and this design pins TLS 1.3, so that condition is
+satisfied.
+
+#### C2 — RFC 9261 Exported Authenticators: considered, not proposed
+
+RFC 9261 is a different mechanism and **is not proposed here**. It proves ownership of a
+certificate using a Handshake Context and Finished MAC key derived from the connection. It binds
+that proof to the connection, but what it authenticates is an *identity*, not possession of a
+shared code, so it is not a substitute for a PAKE-to-channel binding.
+
+It is also a poor fit on the merits. The peer certificates in this design are ephemeral,
+self-signed and carry no trust, so proving ownership of one adds nothing the TLS handshake did
+not already establish. And RFC 9261 states that the creation and validation APIs *SHOULD* live
+inside the TLS library; whether Conscrypt 2.7.0 exposes them on API 23 is **not established**.
+
+C2 is recorded so the reviewer can see it was considered and on what grounds it was set aside.
+It is not a proposal.
 
 ## 10. Key lifecycle
 
