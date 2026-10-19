@@ -152,17 +152,71 @@ public enum class PairingSelectionReject(public val wireReason: String) {
 /**
  * What the peers can prove to each other out of band.
  *
- * Named for what the implementation actually does: a 25-bit short-authentication-string human
- * comparison. This is not a claim that the composition is reviewed -- it is the mechanism the
- * pairing path uses, and the transcript binds which one was selected.
+ * The wire ids are identifiers, not a ranking. Nothing in this file orders them, and the selection
+ * rule compares them for equality only; treating the number as an ordinal is what made the earlier
+ * negotiation prefer the weaker mechanism.
+ *
+ * `SAS_25BIT_COMPARISON` is retained so a peer from the previous format can be *recognised* and
+ * refused with a typed result. It is never selected by the production policy.
+ *
+ * `EC_JPAKE_P256_ENTERED_CODE_V1` is the experimental mechanism this milestone implements: EC
+ * J-PAKE over NIST P-256 with SHA-256, with the code entered by a human and the exchange bound to
+ * the TLS channel through derived participant identifiers.
  */
 public enum class PairingAuthenticationCapability(public val wireId: Int) {
     NONE(0),
-    SAS_25BIT_COMPARISON(1);
+    SAS_25BIT_COMPARISON(1),
+    EC_JPAKE_P256_ENTERED_CODE_V1(2);
 
     public companion object {
         public fun fromWireId(id: Int): PairingAuthenticationCapability? =
             entries.firstOrNull { it.wireId == id }
+    }
+}
+
+/**
+ * The only suite production accepts, and the rule that decides it.
+ *
+ * Two separate guarantees, deliberately kept apart:
+ *
+ *  - [selectRequired] refuses unless the *derived selection* equals [REQUIRED_SUITE]. A peer that
+ *    offers nothing, offers only `NONE`, or offers only the legacy comparison cannot reach an
+ *    authenticated session, and it cannot do so by being negotiated "down" -- there is no "down".
+ *  - [isProductionSuite] is the same test applied to an already-derived selection, for callers
+ *    that build a selection through the generic path.
+ *
+ * Neither function consults wire-id ordering. If a future suite is added with a smaller id than
+ * this one, no behaviour changes.
+ */
+public object PairingAuthenticationPolicy {
+    /** The experimental suite this milestone implements. */
+    public val REQUIRED_SUITE: PairingAuthenticationCapability =
+        PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1
+
+    public fun isProductionSuite(value: PairingAuthenticationCapability): Boolean =
+        value == REQUIRED_SUITE
+
+    /**
+     * Runs the generic selection and then enforces [REQUIRED_SUITE].
+     *
+     * A rejection carries the same typed reason the generic path uses when the peers do not
+     * intersect, so a legacy peer and a peer that offered nothing are indistinguishable to the
+     * remote side. That is intentional: the refusal must not become an oracle for which peer is
+     * out of date.
+     */
+    public fun selectRequired(
+        initiator: PairingOfferV2,
+        responder: PairingOfferV2,
+        required: PairingAuthenticationCapability = REQUIRED_SUITE,
+    ): PairingSelectionResult {
+        val selection = SecurePairingSelectionV2.select(initiator, responder)
+        if (selection !is PairingSelectionResult.Selected) return selection
+        if (selection.selection.selectedAuthentication != required) {
+            return PairingSelectionResult.Rejected(
+                PairingSelectionReject.AUTHENTICATION_NOT_MUTUALLY_SUPPORTED,
+            )
+        }
+        return selection
     }
 }
 
@@ -653,12 +707,23 @@ public object SecurePairingSelectionV2 {
             return reject(PairingSelectionReject.ENCRYPTION_NOT_MUTUALLY_SUPPORTED)
         }
 
-        val authA = initiator.offeredAuthentication?.wireId ?: 0
-        val authB = responder.offeredAuthentication?.wireId ?: 0
-        val authWire = minOf(authA, authB)
-        val authentication = PairingAuthenticationCapability.fromWireId(authWire)
-            ?: return reject(PairingSelectionReject.AUTHENTICATION_NOT_MUTUALLY_SUPPORTED)
-        if (authWire == 0) return reject(PairingSelectionReject.AUTHENTICATION_NOT_MUTUALLY_SUPPORTED)
+        // Explicit equality, not an ordinal minimum. minOf treated the wire id as a ranking, so a
+        // peer offering a stronger suite lost the negotiation to one offering a weaker suite.
+        // Here the rule is: both peers offered the same suite, and it is not NONE. Anything else
+        // is a refusal, including "one offered J-PAKE and the other offered the legacy comparison",
+        // which previously resolved to the legacy comparison.
+        val offeredAuthA = initiator.offeredAuthentication
+        val offeredAuthB = responder.offeredAuthentication
+        if (offeredAuthA == null || offeredAuthB == null) {
+            return reject(PairingSelectionReject.AUTHENTICATION_NOT_MUTUALLY_SUPPORTED)
+        }
+        if (offeredAuthA != offeredAuthB) {
+            return reject(PairingSelectionReject.AUTHENTICATION_NOT_MUTUALLY_SUPPORTED)
+        }
+        if (offeredAuthA == PairingAuthenticationCapability.NONE) {
+            return reject(PairingSelectionReject.AUTHENTICATION_NOT_MUTUALLY_SUPPORTED)
+        }
+        val authentication = offeredAuthA
 
         return PairingSelectionResult.Selected(
             PairingSelectionV2(
