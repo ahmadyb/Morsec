@@ -1,8 +1,13 @@
 # J-PAKE channel binding and mutual confirmation — external review dossier
 
-Status: **awaiting qualified external cryptographic review**. Nothing in this document is
-implemented in production. The J-PAKE code in this repository exists only as an androidTest
-feasibility harness, guarded by `tools/verify/jpake-production-boundary.mjs`.
+Status: **experimental implementation, owner review waiver (2026-10-19).** The owner waived the
+qualified independent cryptographic review for this personal application and authorized the
+implementation; see [`owner-risk-waiver-2026-10-19.md`](owner-risk-waiver-2026-10-19.md). The design
+described here remains project-defined and unreviewed, and every question in §17 is still open. A
+qualified review is still wanted; it is no longer a precondition for the code existing.
+
+The androidTest feasibility harness is retained, and production J-PAKE is confined by
+`tools/verify/jpake-production-boundary.mjs` to an explicit file list.
 
 Five unresolved requirements — authentication-suite negotiation, round-one replay binding,
 fixed-width encodings, erasure limits, and independent conformance evidence — plus a correction to

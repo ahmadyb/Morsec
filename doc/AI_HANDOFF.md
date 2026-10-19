@@ -151,6 +151,42 @@ milestone complete without an explicit waiver of that acceptance condition. Reco
 branch SHA, exact-SHA CI run, test/lint counts, API 23 result, and this unresolved process
 deviation in the final closeout.
 
+### Milestone 4 Part B — experimental J-PAKE implementation (2026-10-19)
+
+The owner waived the external-review gate for this personal experimental application. The permanent
+statement is recorded in [`security/owner-risk-waiver-2026-10-19.md`](security/owner-risk-waiver-2026-10-19.md):
+
+```text
+The EC J-PAKE/TLS composition is experimental, project-defined, and not
+independently cryptographically reviewed. The owner explicitly accepted
+this risk on 2026-10-19.
+```
+
+This permits the code to exist. It does not make the protocol secure, and the dossier's seventeen
+open questions remain unanswered.
+
+Landed in this group so far, all pure JVM in `:core-transfer` and covered by JVM tests:
+
+- **Explicit authentication-suite negotiation.** `SecurePairingSelectionV2.select` no longer uses
+  `minOf` over wire ids; the rule is equality, and a disagreement is a refusal. The production
+  policy (`PairingAuthenticationPolicy`) accepts only `EC_JPAKE_P256_ENTERED_CODE_V1` and refuses a
+  legacy SAS peer with a typed result rather than negotiating down.
+- **MPS3 framing.** `JpakeMessageCodec` carries suite, curve profile, round, role, session ids,
+  participant id and a fixed-width round body. Points are exactly 33 bytes with a 0x02/0x03 prefix;
+  0x00 and 0x04 are refused at decode. Scalars and tags are exactly 32 bytes. Duplicate, unordered,
+  unknown, truncated and trailing fields each have their own refusal.
+- **Channel-bound participant identifiers.** `JpakeBinding` derives one context digest over the
+  RFC 9266 channel binding, the MST2 transcript digest, both offers, both nonces, both certificate
+  fingerprints, the session identifiers, the negotiated TLS parameters, the limits and a code
+  instance id, then derives role-specific identifiers from it.
+- **Entered-code contract.** `EnteredPairingCode` is eight Crockford base32 symbols (40 bits),
+  generated from uniform bytes with no modulo step, normalised on input, redacted in `toString`,
+  clearable; `EnteredCodeAttemptBudget` allows three entries and spends the code on the fourth.
+
+Not yet implemented, and therefore not claimed: the Bouncy Castle round driver, the coordinator
+wiring that replaces the SAS approval with PAKE-then-approval, API 23 hostile-path tests, and the
+removal of the SAS production path. Part B is **incomplete**.
+
 ### Milestone 4 Part B — J-PAKE external review status (2026-10-19)
 
 Part B is **not** complete and no further production work is authorized. The current baseline is

@@ -1,18 +1,26 @@
 #!/usr/bin/env node
 /*
- * Verify that EC J-PAKE stays inside the androidTest feasibility harness.
+ * Verify that experimental EC J-PAKE stays inside its authorized blast radius.
  *
- * The project has chosen an entered-shared-code interaction backed by J-PAKE, but
- * the protocol is NOT approved for production: the PAKE-to-TLS channel binding and
- * the mutual-confirmation construction are project-specific and have not had
- * qualified external cryptographic review. Until that review approves one exact
- * construction, J-PAKE must remain a measurement harness and nothing more.
+ * HISTORY. Until 2026-10-19 this verifier asserted the opposite of what it asserts now: that
+ * J-PAKE appeared in *no* production source set, because the protocol was waiting for a qualified
+ * external cryptographic review. The owner has since waived that review for this personal,
+ * experimental application and authorized implementation. A guard that still said "no J-PAKE in
+ * production" would now fail on correct code, which is worse than useless -- it would be worked
+ * around.
  *
- * This verifier is what fails if that boundary erodes. It is mutation-tested with
- * --self-test, because a guard that has never been seen to fail is not evidence.
+ * So the guard was inverted, not deleted. What it now pins:
  *
- * It makes no claim about protocol security. See
- * doc/security/jpake-review-dossier.md for the open questions.
+ *   1. Production MAY contain J-PAKE, but only in the three files named below. A fourth file is a
+ *      failure, so the surface cannot quietly spread into the app, the UI or the transfer engine.
+ *   2. The MPS3 magic may exist only in the framing file.
+ *   3. None of those files may persist the code or the key material, log it, reach for Room, or
+ *      open a payload path.
+ *   4. The androidTest feasibility harness still exists and still cannot be selected by production.
+ *   5. Milestone 2, the transfer-engine gate, the payload refusal and the manifest are unchanged.
+ *
+ * It makes no claim about protocol security. The construction is experimental and unreviewed; see
+ * doc/security/owner-risk-waiver-2026-10-19.md.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -30,9 +38,22 @@ function check(name, condition, detail) {
 }
 
 /* ------------------------------------------------------------------ *
- * Pure predicates. Each takes text (or a list of {path, text}) and is
- * exercised directly by the self-test, so a mutation proves the guard
- * actually detects the thing it claims to detect.
+ * The authorized surface. Every path is relative to the repository.
+ * ------------------------------------------------------------------ */
+
+const AUTHORIZED_JPAKE_FILES = new Set([
+  'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeBinding.kt',
+  'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeWireFormat.kt',
+  'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/SecurePairingWireV2.kt',
+]);
+
+const AUTHORIZED_MPS3_FILES = new Set([
+  'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeWireFormat.kt',
+]);
+
+/* ------------------------------------------------------------------ *
+ * Pure predicates. Each is exercised by the self-test, so a mutation
+ * proves the guard detects the thing it claims to detect.
  * ------------------------------------------------------------------ */
 
 /** Matches J-PAKE and EC J-PAKE in any casing, with or without the hyphen. */
@@ -42,11 +63,30 @@ function filesMentioningJpake(files) {
   return files.filter((f) => JPAKE_TOKEN.test(f.text)).map((f) => f.path);
 }
 
+/** Every file that mentions J-PAKE must be explicitly authorized. */
+function unauthorizedJpakeFiles(files, allowed) {
+  return filesMentioningJpake(files).filter((path) => !allowed.has(path));
+}
+
 function filesMentioningToken(files, token) {
   return files.filter((f) => f.text.includes(token)).map((f) => f.path);
 }
 
-/** The harness must not become selectable through the production crypto seam. */
+/**
+ * The PAKE surface must not persist, log, or reach the payload path.
+ *
+ * Each pattern targets a concrete mistake rather than a style preference: a Room annotation, a
+ * preferences write, a file write, a log call, or a transfer-engine reference inside a file that
+ * is supposed to do nothing but derive bytes.
+ */
+function pakeSurfaceIsInert(text) {
+  const persistence = /\bRoom\b|\bDao\b|SharedPreferences|putString|openFileOutput|getExternalFilesDir/;
+  const logging = /\bLog\.(d|i|w|e|v)\s*\(|println\s*\(/;
+  const payload = /\bTransferEngine\b|PayloadTransferGate|authenticatedPayload\s*=/;
+  return !persistence.test(text) && !logging.test(text) && !payload.test(text);
+}
+
+/** The androidTest harness must not become selectable through the production crypto seam. */
 function harnessIsNotSelectableByProduction(harnessText) {
   return !/:\s*PairingCryptoFactory\b/.test(harnessText) &&
     !/override\s+fun\s+encodePairingHello/.test(harnessText);
@@ -70,8 +110,6 @@ function harnessPersistsNothing(harnessText) {
 /** Only fixed phase names and bounded integers may be logged. */
 function harnessLogsOnlyBoundedValues(harnessText) {
   if (!harnessText.includes('MorsecJpakePhase')) return false;
-  // A code or keying material reaching a log would appear as an interpolation of a
-  // secret-bearing identifier rather than a bounded integer.
   return !/\$(CODE|WRONG_CODE|code|keyA|keyB|keyingMaterial|macTag)\b/.test(harnessText);
 }
 
@@ -80,23 +118,32 @@ function harnessLogsOnlyBoundedValues(harnessText) {
  * ------------------------------------------------------------------ */
 
 function selfTest() {
-  const cleanProduction = [{ path: 'transport-lan/src/main/kotlin/A.kt', text: 'class A\n' }];
-  const leakedProduction = [
-    { path: 'transport-lan/src/main/kotlin/A.kt', text: 'import org.bouncycastle.crypto.agreement.ecjpake.ECJPAKEParticipant\n' },
-  ];
-  const docLeak = [{ path: 'app/src/main/kotlin/B.kt', text: '// TODO: switch to J-PAKE\n' }];
+  const allowed = new Set(['core-transfer/src/main/kotlin/A.kt']);
+  const clean = [{ path: 'core-transfer/src/main/kotlin/A.kt', text: 'class A\n' }];
+  const authorized = [{ path: 'core-transfer/src/main/kotlin/A.kt', text: 'class A // J-PAKE ok here\n' }];
+  const elsewhere = [{ path: 'app/src/main/kotlin/B.kt', text: 'import x.ECJPAKEParticipant\n' }];
 
-  check('self-test: clean production passes the J-PAKE scan',
-    filesMentioningJpake(cleanProduction).length === 0);
-  check('self-test: an ECJPAKE import in production is caught',
-    filesMentioningJpake(leakedProduction).length === 1);
-  check('self-test: a J-PAKE design note in production is caught',
-    filesMentioningJpake(docLeak).length === 1);
+  check('self-test: a file with no J-PAKE mention is not reported',
+    unauthorizedJpakeFiles(clean, allowed).length === 0);
+  check('self-test: an authorized file is not reported',
+    unauthorizedJpakeFiles(authorized, allowed).length === 0);
+  check('self-test: J-PAKE outside the authorized set is caught',
+    unauthorizedJpakeFiles(elsewhere, allowed).length === 1);
 
-  check('self-test: MPS3 token scan is clean by default',
-    filesMentioningToken(cleanProduction, 'MPS3').length === 0);
-  check('self-test: an MPS3 production token is caught',
+  check('self-test: MPS3 token scan is clean for an unmentioned file',
+    filesMentioningToken(clean, 'MPS3').length === 0);
+  check('self-test: an MPS3 token is caught',
     filesMentioningToken([{ path: 'x.kt', text: 'val MAGIC_MPS3 = 1' }], 'MPS3').length === 1);
+
+  check('self-test: inert PAKE code passes', pakeSurfaceIsInert('val digest = sha(bytes)\n'));
+  check('self-test: Room inside the PAKE surface is caught',
+    !pakeSurfaceIsInert('@Dao interface D {}\n'));
+  check('self-test: a preferences write is caught',
+    !pakeSurfaceIsInert('prefs.edit().putString("code", c)\n'));
+  check('self-test: a log call is caught', !pakeSurfaceIsInert('Log.i("tag", "x")\n'));
+  check('self-test: a println is caught', !pakeSurfaceIsInert('println(code)\n'));
+  check('self-test: a transfer-engine reference is caught',
+    !pakeSurfaceIsInert('val e = TransferEngine\n'));
 
   check('self-test: a harness that does not implement the factory seam passes',
     harnessIsNotSelectableByProduction('class H {\n  fun go() = Unit\n}\n'));
@@ -162,9 +209,6 @@ function verify() {
   const modules = ['app', 'core-data', 'core-design', 'core-model', 'core-storage',
     'core-transfer', 'transport-lan'];
 
-  // 1. No production source in any module may name J-PAKE at all -- not as an import,
-  //    not as a type, not even as a design note. The protocol is unreviewed, so it must
-  //    not be reachable from, or implied by, shipped code.
   const production = [];
   for (const module of modules) {
     production.push(...loadSources(collect(join(ROOT, module, 'src', 'main'))));
@@ -176,40 +220,38 @@ function verify() {
     ...modules.map((m) => join(ROOT, m, 'build.gradle.kts')),
   ]);
 
-  const productionLeaks = filesMentioningJpake(production);
-  check('no production source references J-PAKE', productionLeaks.length === 0,
-    productionLeaks.join(', '));
+  // 1. Production MAY name J-PAKE -- the owner authorized the implementation -- but only in the
+  //    files listed at the top of this script. Anywhere else is a scope breach.
+  const leaks = unauthorizedJpakeFiles(production, AUTHORIZED_JPAKE_FILES);
+  check('J-PAKE appears in production only inside the authorized files', leaks.length === 0,
+    leaks.join(', '));
 
   const gradleLeaks = filesMentioningJpake(gradleFiles);
   check('no Gradle file introduces a J-PAKE-specific dependency', gradleLeaks.length === 0,
     gradleLeaks.join(', '));
 
-  // 2. No MPS3/MST3 production token. The framing is a candidate for review, not an
-  //    agreed wire format, so it must not acquire a magic constant in shipped code.
+  // 2. The MPS3 magic is confined to the framing file.
   const mps3 = filesMentioningToken(production, 'MPS3')
-    .concat(filesMentioningToken(production, 'MST3'));
-  check('no MPS3 or MST3 production token exists', mps3.length === 0, mps3.join(', '));
+    .concat(filesMentioningToken(production, 'MST3'))
+    .filter((path) => !AUTHORIZED_MPS3_FILES.has(path));
+  check('the MPS3 token exists only in the framing file', mps3.length === 0, mps3.join(', '));
 
-  // 3. The harness exists, and only under androidTest.
+  // 3. The authorized files must stay inert: no persistence, no logging, no payload path.
+  const offenders = [];
+  for (const file of production) {
+    if (!AUTHORIZED_JPAKE_FILES.has(file.path)) continue;
+    if (!pakeSurfaceIsInert(file.text)) offenders.push(file.path);
+  }
+  check('the PAKE surface persists nothing, logs nothing and opens no payload path',
+    offenders.length === 0, offenders.join(', '));
+
+  // 4. The androidTest harness still exists and still cannot be reached from production.
   const harnessDir = join(ROOT, 'transport-lan', 'src', 'androidTest', 'kotlin',
     'app', 'morsecode', 'transport', 'lan', 'security', 'jpake');
   const harnessFiles = collect(harnessDir).filter((f) => f.endsWith('.kt'));
   check('the J-PAKE feasibility harness exists', harnessFiles.length >= 2,
     `found ${harnessFiles.length}`);
 
-  const outsideHarness = [];
-  for (const module of modules) {
-    for (const sourceSet of ['main', 'test', 'debug', 'release']) {
-      for (const f of loadSources(collect(join(ROOT, module, 'src', sourceSet)))) {
-        if (JPAKE_TOKEN.test(f.text)) outsideHarness.push(f.path);
-      }
-    }
-  }
-  check('J-PAKE appears in no source set other than androidTest', outsideHarness.length === 0,
-    outsideHarness.join(', '));
-
-  // 4. The harness cannot be selected by production, cannot mint authority, cannot
-  //    persist anything, and cannot widen the shipped surface.
   const harness = harnessFiles.map((f) => readFileSync(f, 'utf8')).join('\n');
   check('the harness is not selectable through the production crypto factory seam',
     harnessIsNotSelectableByProduction(harness));
@@ -219,26 +261,30 @@ function verify() {
   check('the harness logs only fixed phase names and bounded integers',
     harnessLogsOnlyBoundedValues(harness));
 
-  // 5. The shipped manifest is unchanged by this work: no new permission.
+  // 5. The shipped manifest is unchanged: no new permission for this work.
   const manifests = loadSources(collect(join(ROOT, 'app', 'src', 'main')))
     .filter((f) => f.path.endsWith('AndroidManifest.xml'));
   const widened = manifests.filter((m) => /J-?PAKE/i.test(m.text)).map((m) => m.path);
-  check('the shipped manifest is untouched by the feasibility work', widened.length === 0,
+  check('the shipped manifest is untouched by this work', widened.length === 0,
     widened.join(', '));
 
-  // 6. Payload transfer stays disabled and the milestone stays at 2. The feasibility
-  //    harness must not become a back door into Part C.
+  // 6. Milestone and payload gates are untouched by the implementation.
   const allProduction = production.map((f) => f.text).join('\n');
   check('the current milestone is still 2',
     /CURRENT_MILESTONE[^=\n]*=\s*2\b/.test(allProduction));
   check('the transfer engine stays gated', /TRANSFER_ENGINE/.test(allProduction));
+  check('the payload gate still refuses unconditionally',
+    /PayloadTransferDecision\.Refused\(\s*SessionFailure\(\s*SessionFailureCode\.SECURE_SESSION_REQUIRED/.test(
+      allProduction,
+    ));
 
-  // 7. The review dossier exists, so the open questions travel with the code.
-  check('the external review dossier is present',
+  // 7. The owner-risk waiver travels with the code, because the code is unreviewed.
+  check('the owner-risk waiver is present',
+    existsSync(join(ROOT, 'doc', 'security', 'owner-risk-waiver-2026-10-19.md')));
+  check('the external review dossier is still present',
     existsSync(join(ROOT, 'doc', 'security', 'jpake-review-dossier.md')));
 
-  // 8. The phase timings are worthless if the tag stops being captured, so pin the
-  //    capture as well as the logging.
+  // 8. The phase timings are worthless if the tag stops being captured, so pin the capture.
   const wrapper = readFileSync(join(ROOT, 'ci', 'run-api23-instrumentation.sh'), 'utf8');
   check('the J-PAKE phase tag is captured from before Gradle starts',
     wrapper.includes('adb logcat -v time -s "$A3_TAG:I" "$JPAKE_TAG:I"'));
