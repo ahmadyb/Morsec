@@ -1,7 +1,6 @@
 package app.morsecode.core.transfer.session
 
 import app.morsecode.core.model.TransportKind
-import app.morsecode.core.transfer.identity.PeerInstanceId
 import app.morsecode.core.transfer.identity.SessionId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
