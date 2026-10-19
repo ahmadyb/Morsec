@@ -60,8 +60,11 @@ public class EnteredPairingCodeTest {
         assertNull(parseOrNull("0123-45678"))
         assertNull(parseOrNull(""))
         assertNull(parseOrNull("0123_4567"))
-        // Spaces and tabs are ignored anywhere by contract, so an interior space still parses.
-        assertEquals("01234567", parseText("0123-45 7").displayText().replace("-", ""))
+        // Seven symbols, so refused however it is punctuated.
+        assertNull(parseOrNull("0123-45 7"))
+        // Spaces and tabs are ignored anywhere by contract, so an interior space still parses
+        // when the symbol count is right.
+        assertEquals("01234567", parseText("0123-45 67").displayText().replace("-", ""))
         // One symbol too many is still a refusal, even when the extra one is harmless.
         assertNull(parseOrNull("0123-4567 8"))
     }
