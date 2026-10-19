@@ -26,6 +26,7 @@ on:
       - arena/01a10ca1-morsec
       # The currently assigned explicit authenticated LAN pairing session branch.
       - arena/268e777f-morsec
+      - arena/4d4c3195-morsec
 
 permissions:
   # contents: write is needed by the last step, which commits the Gradle wrapper
