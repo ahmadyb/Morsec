@@ -4,6 +4,13 @@ Status: **awaiting qualified external cryptographic review**. Nothing in this do
 implemented in production. The J-PAKE code in this repository exists only as an androidTest
 feasibility harness, guarded by `tools/verify/jpake-production-boundary.mjs`.
 
+Five unresolved requirements — authentication-suite negotiation, round-one replay binding,
+fixed-width encodings, erasure limits, and independent conformance evidence — plus a correction to
+the production pairing-format status are recorded in
+[`jpake-review-errata-2026-10-19.md`](jpake-review-errata-2026-10-19.md). That document is
+AI-generated technical input. It is **not** a review, **not** an approval, and it does not resolve
+any question posed below.
+
 Prepared against Bouncy Castle **1.86** (the version pinned in `gradle/libs.versions.toml` and
 digest-locked in `gradle/security-dependency-lock.json`), read from the `r1rv86` tag of
 `bcgit/bc-java`.
@@ -536,6 +543,9 @@ established while authorship is not.
 5. The channel binding is project-defined under both candidates and is unreviewed.
 6. MAC tags and keying material are returned as `BigInteger` with non-canonical encoding (§6).
 7. API 23 timing is measured on an emulator, not on representative hardware.
+8. Five further requirements raised by a non-authoritative AI analysis on 2026-10-19 are open and
+   are listed in [`jpake-review-errata-2026-10-19.md`](jpake-review-errata-2026-10-19.md) §2. They
+   are additions to this list, not resolutions of it.
 
 ## 17. Questions for the external reviewer
 

@@ -6,6 +6,15 @@ it does not provide file transfer, a user-facing pairing flow, trusted-device st
 product-ready LAN feature. `CURRENT_MILESTONE` stays `2`, `TRANSFER_ENGINE` remains gated,
 and payload/resume capabilities are absent after authentication.
 
+**Status of the proposed J-PAKE replacement (2026-10-19).** No J-PAKE, MPS3 or channel-binding
+code exists in production; the feasibility harness is confined to `androidTest`. Part B remains
+externally blocked pending a qualified independent cryptographic review. The open requirements
+that review must settle — authentication-suite negotiation, round-one replay binding, fixed-width
+encodings, erasure limits, and independent conformance evidence — are recorded in
+[`jpake-review-errata-2026-10-19.md`](jpake-review-errata-2026-10-19.md), which is AI-generated
+technical input and **not** an approval. The protocol-status correction in that document
+supersedes the `MPS1`/`MST1` statements previously carried here.
+
 ## Scope and module placement
 
 - `:core-transfer` contains the transport-neutral state reducer, strict fixed-schema hello
@@ -43,20 +52,27 @@ Apache attribution and complete referenced Apache 2.0 terms.
 
 ## Pairing transcript, proof and approval
 
-The bounded `MPS1` hello is sent only inside the mutually authenticated TLS channel. It has a
-fixed field order and no extensible/optional fields. It binds the secure-session id, existing
-control-attempt id, sender/target peer-instance ids, role, selected protocol and both
-advertised protocol ranges, app version, discovery/control/secure/capability wire versions,
-LAN transport, security-suite id, selected feature mask, record/count/byte/lifetime limits,
-32-byte fresh nonce, and 32-byte TLS certificate fingerprint. Unknown versions, roles,
-message types, suites, feature bits, changed limits, bad lengths, truncation, and trailing
-bytes are rejected. The initiator's secure-session id is echoed exactly by the responder.
+The bounded `MPS2` hello is sent only inside the mutually authenticated TLS channel. It is a
+length-prefixed, canonical tag-value frame with a closed tag space: each peer sends an *offer*
+carrying the secure-session id, existing control-attempt id, sender/target peer-instance ids,
+role, protocol range, app version, wire versions, LAN transport, security-suite id, its
+offered features, chunk size, resume support, encryption mode and authentication mode,
+record/count/byte/lifetime limits, 32-byte fresh nonce, 32-byte TLS certificate fingerprint,
+and extension entries, together with an explicit presence mask that distinguishes "absent"
+from "present and zero". Duplicate tags, unknown mandatory tags, trailing bytes, bad lengths,
+truncation, unknown versions, roles, suites and feature bits are rejected. The initiator's
+secure-session id is echoed exactly by the responder.
 
-Both sides encode the same role-ordered canonical transcript (including both hellos, both
-nonces/fingerprints, versions/ranges/capabilities/limits and negotiated TLS protocol/cipher
-suite) and compute SHA-256. A role-specific TLS exporter label and that transcript digest
-produce the pairing proof and independent client-to-server/server-to-client AES-128-GCM
-keys and 96-bit nonce bases. The SAS is five symbols from the 32-symbol alphabet
+Both sides derive the selection deterministically from the two offers
+(`SecurePairingSelectionV2`), then encode the same role-ordered canonical `MST2` transcript —
+both offers, both presence masks, the derived selection, both nonces and certificate
+fingerprints, versions, capabilities, limits, extensions, and negotiated TLS protocol and
+cipher suite — with fields in ascending tag order, and compute SHA-256. Because both offers
+and both presence masks are bound, a field either peer silently dropped changes the digest.
+An `MPS1` peer is refused with `LEGACY_MPS1_UNSUPPORTED`; there is no downgrade and no
+plaintext retry. A role-specific TLS exporter label and that transcript digest produce the
+pairing proof and independent client-to-server/server-to-client AES-128-GCM keys and 96-bit
+nonce bases. The SAS is five symbols from the 32-symbol alphabet
 `23456789ABCDEFGHJKLMNPQRSTUVWXYZ`, drawn from the first 25 exporter bits; it is for human
 comparison only, never logged, stored, returned as a diagnostic, or accepted automatically.
 
@@ -90,6 +106,13 @@ combination of session state, negotiated features or caller behaviour can enable
 transfer. The pairing reducer is itself `internal` to `:transport-lan`; no other module can
 construct one. `tools/verify/secure-authority-surface.mjs` enforces all of this in CI, and
 was mutation-tested so that re-opening the boundary fails the check.
+
+*Correction (2026-10-19).* Earlier revisions of the section above stated that the live hello
+and transcript were `MPS1`/`MST1`. That was accurate before the M3 remediation and is not
+accurate now; the description above is the MPS2/MST2 pair the code actually implements, as
+confirmed by `SecurePairingHelloV2Codec`, `SecurePairingSelectionV2`, `SecurePairingTranscriptV2`
+and the group-12 guard. See
+[`jpake-review-errata-2026-10-19.md`](jpake-review-errata-2026-10-19.md) §1.
 
 ## Bounded `MSR1` control records
 
@@ -129,7 +152,7 @@ claims, and the difference is the whole point of a security remediation.
 | M1 — 25-bit base-32 SAS | Implemented. Pinned by `HumanVerificationCodeTest` hand-derived vectors and by the governance verifier. |
 | M1 — attempt limiter | Implemented and wired: `LanPeerDiscoveryProvider` owns one `SecurePairingAttemptLimiter` per provider and passes it to every pairing, keyed on the peer instance id and the peer address. |
 | M2 — capability trust boundary | Implemented and enforced in CI by `tools/verify/secure-authority-surface.mjs`. |
-| M3 — canonical transcript v2 | **Not implemented.** The hello is still `MPS1` and the transcript is still `MST1`. |
+| M3 — canonical transcript v2 | **Implemented.** The coordinator encodes with `SecurePairingHelloV2Codec`, decodes the V2 header and body, derives the selection with `SecurePairingSelectionV2`, and hashes the `MST2` transcript with `SecurePairingTranscriptV2`. `tools/verify/secure-authority-surface.mjs` group 12 pins it and is mutation-tested; an `MPS1` frame is refused as `LEGACY_MPS1_UNSUPPORTED`. Test breadth is still incomplete: cross-session substitution, certificate substitution, extension ordering and downgrade are asserted at codec level, and the pre-M3 claim in `doc/AI_HANDOFF.md` is marked superseded there. |
 | M4 — total monotonic deadlines | Implemented and wired into `SecureLanPairingCoordinator`: TLS handshake, pairing hello exchange, mutual key-confirmation exchange and bounded close each run under one total deadline. |
 | L1 — dependency artifact-byte verification | Implemented for the crypto artifacts: reviewed SHA-256 manifest in `gradle/secure-artifact-checksums.txt`, verified in CI over the bytes Gradle resolved. Not a whole-graph lockfile. |
 | Formal external protocol review | **Absent. This is an acceptance blocker.** |

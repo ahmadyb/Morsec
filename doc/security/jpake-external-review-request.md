@@ -9,6 +9,11 @@ transmittal accompanying this request.
 Production implementation is intentionally absent. The only J-PAKE code in the repository is an
 androidTest feasibility harness, guarded by `tools/verify/jpake-production-boundary.mjs`.
 
+Open requirements raised by a non-authoritative AI analysis on 2026-10-19 are listed in
+[`jpake-review-errata-2026-10-19.md`](jpake-review-errata-2026-10-19.md). They extend §17 below and
+must be answered in the report. That errata is AI-generated technical input, not a review and not an
+approval.
+
 ## Scope
 
 Review the proposed use of Bouncy Castle 1.86 EC J-PAKE over NIST P-256 inside an existing
@@ -195,6 +200,27 @@ Review resistance to:
 - Error oracles
 - Process restart
 - Shoulder surfing/code disclosure
+
+### 9. Open requirements carried from the 2026-10-19 errata
+
+Answer each explicitly. Detail is in
+[`jpake-review-errata-2026-10-19.md`](jpake-review-errata-2026-10-19.md) §2; the summary here is not
+a substitute for reading it.
+
+- **R-1 Authentication-suite negotiation.** The current selector resolves the suite with ordinal
+  `minOf` over wire ids and rejects only `NONE`. State the correct rule, and state that a peer which
+  offers only a weaker suite must be refused rather than accommodated.
+- **R-2 Round-one replay.** The pinned library accepts a replayed round one because the participant
+  id travels inside the payload and is what the ZKP hashes. State exactly which fields bind a round
+  to a session and how a replay is rejected at the framing layer.
+- **R-3 Encoding.** MAC tags and keying material are returned as `BigInteger` with variable-length
+  encodings, and the ZKP hash is read as a signed value. State the required wire encodings and say
+  whether depending on the signed-hash behaviour is acceptable.
+- **R-4 Erasure.** `x1`, `x2` and `b` are nulled but not zeroed, and `K_pake` is a `BigInteger` that
+  cannot be wiped. State the achievable erasure boundary and the residual risk a deployment accepts.
+- **R-5 Conformance evidence.** The library ships round-trip tests rather than published vectors and
+  does not claim RFC 8236. Identify acceptable independent vectors, or state explicitly that the risk
+  is accepted and on what terms.
 
 ## Required deliverable
 

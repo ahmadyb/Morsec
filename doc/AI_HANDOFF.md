@@ -151,6 +151,43 @@ milestone complete without an explicit waiver of that acceptance condition. Reco
 branch SHA, exact-SHA CI run, test/lint counts, API 23 result, and this unresolved process
 deviation in the final closeout.
 
+### Milestone 4 Part B — J-PAKE external review status (2026-10-19)
+
+Part B is **not** complete and no further production work is authorized. The current baseline is
+`35cd6ccb00196f0174c1a2dac0bef0c77a463cd6`, whose exact-SHA Android CI run
+[39114270901](https://github.com/ahmadyb/Morsec/actions/runs/39114270901) is green: 2,920 JVM tests
+(0 failed, 0 skipped), 37 API 23 instrumentation tests (0 failures), 0 lint errors with 48 warnings,
+both APKs assembled, Room schemas v1/v2 unchanged.
+
+```text
+J-PAKE FEASIBILITY ESTABLISHED — EXTERNAL CRYPTOGRAPHIC REVIEW REQUIRED
+PART B INCOMPLETE — EXTERNALLY BLOCKED
+```
+
+The proposed replacement interaction (initiator displays an eight-symbol 40-bit code, responder enters
+it, both run EC J-PAKE over NIST P-256 with SHA-256 through Bouncy Castle 1.86, both confirm, both
+approve) exists only as a dossier and an `androidTest` feasibility harness. Production contains no
+J-PAKE, no MPS3 and no channel binding, enforced by `tools/verify/jpake-production-boundary.mjs`.
+
+A non-authoritative, AI-generated technical analysis dated 2026-10-19 raised five unresolved
+requirements and found one documentation contradiction. Both are recorded in
+[`security/jpake-review-errata-2026-10-19.md`](security/jpake-review-errata-2026-10-19.md):
+
+1. Authentication-suite negotiation must not use ordinal `minOf`; a mandatory authenticated suite
+   must be selected explicitly and downgrade must fail closed.
+2. Round-one replay protection must be specified concretely, because the library accepts a replayed
+   round one.
+3. PAKE keying material, scalars and tags require fixed-width unsigned encoding.
+4. Bouncy Castle / JVM secret-erasure limits must be documented honestly — `K_pake` cannot be zeroed.
+5. Independent conformance evidence, or an explicitly accepted substitute, is required.
+6. The MPS1/MPS2 documentation contradiction is corrected in this commit.
+
+**That analysis is not an external review and does not unblock Part B.** It must not be cited as an
+approval. The next authorized step is a qualified independent cryptographic reviewer assessing the
+dossier, the review request and the errata at one exact commit. Until such a report exists with a
+verdict of `APPROVED FOR IMPLEMENTATION SUBJECT TO LISTED CHANGES`, no J-PAKE, MPS3, channel-binding,
+key-derivation, pairing-UI or payload work may begin.
+
 Older session notes below are historical base-state evidence only and do not supersede the
 Part B authorization, scope, or branch instruction.
 
@@ -1746,16 +1783,25 @@ verified; the third is a pointer.
   end-to-end proof that a worker slot freed by a timed-out write is then acquired by a later
   legitimate session. The raw-socket test proves closure releases a blocked write; it does not
   exercise the channel's own deadline wiring.
-- **The pairing path still negotiates MPS1/MST1.** The hello and transcript the coordinator
-  sends and hashes are the MPS1/MST1 versions; MPS2/MST2 exist alongside them, not in place of
-  them. Hello and transcript remain
-  `MPS1`/`MST1`. The existing transcript is thorough about what it does bind — wire versions,
-  transport, suite, both roles, control and secure session IDs, both peer IDs, the selected
-  protocol version and both advertised ranges, the feature mask, all four session limits, both
-  app versions, both nonces, both certificate fingerprints, and the TLS protocol and cipher —
-  but it binds only the *selected* feature mask, never each peer's capability *offer*, it has no
-  explicit presence/zero encoding and no extension section, and it does not bind chunk size,
-  resume support or the encryption mode. Those are the M3 gaps and they are open.
+- **Corrected 2026-10-19 — the pairing path negotiates MPS2/MST2, not MPS1/MST1.** Production
+  now encodes, decodes and hashes the version-2 formats: `SecureLanPairingCoordinator` uses
+  `SecurePairingHelloV2Codec`, `SecurePairingSelectionV2` and `SecurePairingTranscriptV2`, and the
+  MPS1 codec survives only so that a legacy frame is refused as `LEGACY_MPS1_UNSUPPORTED`.
+  `secure-authority-surface.mjs` group 12 pins this and is mutation-tested. The M3 transcript gaps
+  named below — no per-peer offers, no explicit presence/zero encoding, no extension section, no
+  chunk/resume/encryption binding — were closed by that work and are no longer open.
+  *What follows is the original text, retained as a record of what was true before M3 landed. It
+  must not be read as current.*
+  > The pairing path still negotiates MPS1/MST1. The hello and transcript the coordinator sends
+  > and hashes are the MPS1/MST1 versions; MPS2/MST2 exist alongside them, not in place of them.
+  > Hello and transcript remain `MPS1`/`MST1`. The existing transcript is thorough about what it
+  > does bind — wire versions, transport, suite, both roles, control and secure session IDs, both
+  > peer IDs, the selected protocol version and both advertised ranges, the feature mask, all four
+  > session limits, both app versions, both nonces, both certificate fingerprints, and the TLS
+  > protocol and cipher — but it binds only the *selected* feature mask, never each peer's
+  > capability *offer*, it has no explicit presence/zero encoding and no extension section, and it
+  > does not bind chunk size, resume support or the encryption mode. Those are the M3 gaps and they
+  > are open.
 - **No formal external cryptographic or protocol review has taken place.** Hardening the SAS from
   19 to 25 bits does not resolve the principal M1 finding; the protocol remains a
   project-defined composition. This is an acceptance blocker.
