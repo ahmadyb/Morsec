@@ -149,6 +149,19 @@ public sealed interface JpakeRoundBody {
         override fun toString(): String = "RoundTwo([redacted])"
     }
 
+    /**
+     * The explicit-key-confirmation tag, carried as [TAG_BYTES] opaque bytes.
+     *
+     * It is a two's-complement value, not an unsigned integer. The library returns the MAC as
+     * `BigInteger(hmacOutput)` -- the signed reading of a 32-byte HMAC -- so a tag is negative
+     * about half the time, and Bouncy Castle's own `validateMacTag` Javadoc warns that an unsigned
+     * fixed-width encoding does not round-trip it. Measured on the API 23 harness: encoding the tag
+     * unsigned made round three fail while rounds one and two passed.
+     *
+     * The codec therefore stores the bytes and never interprets them. Whoever writes the adapter
+     * must sign-extend to a fixed width and read back with `BigInteger(byte[])`; it must not use an
+     * unsigned fixed-width helper, and it must not treat a tag as an index, a length or a hash.
+     */
     public class RoundThree(tag: ByteArray) : JpakeRoundBody {
         private val tagValue: ByteArray = tag.copyOf()
 

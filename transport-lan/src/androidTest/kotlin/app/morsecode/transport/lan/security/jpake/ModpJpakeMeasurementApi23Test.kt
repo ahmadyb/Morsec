@@ -122,7 +122,7 @@ class ModpJpakeMeasurementApi23Test {
         val round1Bytes = 2 * elementBytes + 2 * (elementBytes + scalarBytes)
         // A, and {g^v, r} for x2*s.
         val round2Bytes = elementBytes + elementBytes + scalarBytes
-        val round3Bytes = signedWidth(bobRound3.macTag)
+        val round3Bytes = TAG_BYTES // HMAC-SHA256 output, carried as opaque signed bytes
 
         Log.i(
             PHASE_TAG,
@@ -135,7 +135,7 @@ class ModpJpakeMeasurementApi23Test {
         assertEquals("a 256-bit subgroup scalar is 32 bytes", 32, scalarBytes)
         assertEquals("round one carries six elements of material", 1_600, round1Bytes)
         assertEquals("round two carries three", 800, round2Bytes)
-        assertEquals("the round-three tag is a 256-bit value", 32, round3Bytes)
+        assertEquals("the round-three tag is a 32-byte HMAC output", 32, round3Bytes)
         assertTrue("keying material must agree", keyA == keyB)
     }
 
@@ -281,6 +281,45 @@ class ModpJpakeMeasurementApi23Test {
         )
     }
 
+    /**
+     * The round-three tag must round-trip through signed two's-complement encoding, and must NOT
+     * round-trip through the unsigned helper.
+     *
+     * Synthetic values are used so the assertion is deterministic rather than depending on the
+     * sign of a generated tag: a tag is negative roughly half the time, so a test built on one
+     * real tag would be a coin toss.
+     */
+    @Test
+    fun theRoundThreeTagRoundTripsSignedAndNotUnsigned() {
+        for (value in listOf(
+            BigInteger.valueOf(-1),
+            BigInteger.valueOf(-123_456_789),
+            BigInteger.valueOf(0),
+            BigInteger.ONE,
+            BigInteger.valueOf(123_456_789),
+        )) {
+            assertEquals(
+                "a MacTag of $value must survive the signed encoding",
+                value,
+                decodeTag(encodeTag(value)),
+            )
+            assertEquals("a MacTag is always $TAG_BYTES bytes", TAG_BYTES, encodeTag(value).size)
+        }
+
+        // The signed encoding of -1 is all 0xFF; the unsigned helper produces all 0x00 but for a
+        // trailing 0xFF, which reads back as 255. That difference is the bug this pins.
+        assertEquals(
+            "the signed encoding sign-extends",
+            BigInteger.valueOf(-1),
+            decodeTag(encodeTag(BigInteger.valueOf(-1))),
+        )
+        assertNotEquals(
+            "the unsigned helper must not be used for the tag",
+            BigInteger.valueOf(-1),
+            BigInteger(1, BigIntegers.asUnsignedByteArray(TAG_BYTES, BigInteger.valueOf(-1))),
+        )
+    }
+
     // --- reconstruction: the operation the EC path cannot perform ------------------------
 
     /** Rebuilds a round-one payload from fixed-width bytes, exactly as an MPS3 decoder would. */
@@ -303,8 +342,33 @@ class ModpJpakeMeasurementApi23Test {
     private fun reconstructRound3(payload: JPAKERound3Payload): JPAKERound3Payload =
         JPAKERound3Payload(
             payload.participantId,
-            decodeScalar(encodeScalar(payload.macTag)),
+            decodeTag(encodeTag(payload.macTag)),
         )
+
+    /**
+     * The round-three tag, as 32 sign-extended two's-complement bytes.
+     *
+     * `JPAKEUtil.calculateMacTag` returns `new BigInteger(hmacOutput)` -- the *signed* reading of
+     * the 32-byte HMAC -- so a tag is negative about half the time. BC's own Javadoc on
+     * `validateMacTag` says so explicitly, and warns that `BigIntegers.asUnsignedByteArray`
+     * zero-pads instead of sign-extending and therefore does not round-trip a negative tag.
+     *
+     * Measured, not assumed: the first version of this harness encoded the tag unsigned and round
+     * three failed on the emulator while rounds one and two passed. The tag must be treated as
+     * opaque two's-complement bytes on the wire; the adapter must never convert it as an unsigned
+     * integer.
+     */
+    private fun encodeTag(value: BigInteger): ByteArray {
+        val minimal = value.toByteArray()
+        require(minimal.size <= TAG_BYTES) { "a MacTag cannot be wider than $TAG_BYTES bytes" }
+        val out = ByteArray(TAG_BYTES)
+        out.fill(if (value.signum() < 0) 0xFF.toByte() else 0x00)
+        System.arraycopy(minimal, 0, out, TAG_BYTES - minimal.size, minimal.size)
+        return out
+    }
+
+    /** Signed, because the library reads the tag with `BigInteger(byte[])`. */
+    private fun decodeTag(bytes: ByteArray): BigInteger = BigInteger(bytes)
 
     /** `{g^v, r}` -- a group element followed by a mod-q scalar, both fixed width. */
     private fun encodeProof(proof: Array<BigInteger>): ByteArray =
@@ -426,8 +490,6 @@ class ModpJpakeMeasurementApi23Test {
         bob.validateRound2PayloadReceived(reconstructRound2(aliceRound2))
     }
 
-    private fun signedWidth(value: BigInteger): Int = (value.bitLength() + BITS_PER_BYTE - 1) / BITS_PER_BYTE
-
     private fun rejected(block: () -> Unit): Boolean = try {
         block()
         false
@@ -457,6 +519,9 @@ class ModpJpakeMeasurementApi23Test {
         val SCALAR_BYTES: Int = (GROUP.q.bitLength() + 7) / 8
 
         const val BITS_PER_BYTE = 8
+
+        /** HMAC-SHA256 output. Two's complement on the wire; see [encodeTag]. */
+        const val TAG_BYTES = 32
 
         const val ID_A = "morsec-modp-a"
         const val ID_B = "morsec-modp-b"
