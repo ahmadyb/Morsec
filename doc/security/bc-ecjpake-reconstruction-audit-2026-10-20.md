@@ -126,12 +126,12 @@ the round-three MAC is 32 bytes whatever the group.
 |---|---|---|
 | Public API only | No | **Yes** |
 | New dependency | No | No |
-| Wire sizes (r1/r2/r3) | 196 / 98 / 32 B (measured) | 2304 / 1152 / 32 B (computed) |
-| `MAX_FRAME_BYTES` | stays 512 | must rise to ~3072 |
+| Wire sizes (r1/r2/r3) | 196 / 98 / 32 B (measured) | 1600 / 800 / 32 B (measured) |
+| `MAX_FRAME_BYTES` | stays 512 | must rise to at least 2048 |
 | Already-merged work | all retained | framing widths and hostility tests rewritten; binding, code and negotiation retained |
 | Failure mode on BC change | **compile error** | none — API is supported |
 | Split package | Yes (illegal under JPMS; irrelevant on Android today) | No |
-| Performance on API 23 | unchanged (~0.9 ms honest run, measured) | unmeasured; 3072-bit modexp, expect tens of ms to a few hundred ms |
+| Performance on API 23 | 682 ms honest run, emulator, measured | measured; see §5a |
 
 Option 3 — a different maintained PAKE — needs its own lock entry, digest, provenance record and
 feasibility phase, and it contradicts the current "no new dependency" constraint. It is the only
@@ -145,12 +145,44 @@ drift unnoticed. The objections that remain are principled rather than mechanica
 building on something BC deliberately withheld, and a split package is a smell a reviewer would
 raise.
 
-**Option 2's real risk is different**, and also worth stating: `JPAKEUtil.validateGa` only rejects
-the value `1` (line 286). Received group elements therefore need range checking by the MPS3 decoder
-— `0 <= value < p`, rejecting `0` and `1` — which is work the EC path got for free from point
-validation. That is a hostile-path test obligation, not a blocker. Fixed-width encoding is clean:
-`BigIntegers.asUnsignedByteArray(int length, BigInteger value)` (line 57) zero-pads to exactly
-`length` bytes and throws on overflow, which is precisely the no-`toByteArray()` rule in errata R-3.
+**Option 2's group validation is better than this audit first claimed.** An earlier draft of this
+document said the MPS3 decoder would have to range-check every received group element because
+`JPAKEUtil.validateGa` (line 286) only rejects the value `1`. That was wrong. `validateGa` is applied
+to the *locally computed* `gA`/`gB`, and the *received* elements get a full check inside
+`validateZeroKnowledgeProof` (line 302): `gx > 0`, `gx < p`, and `gx^q mod p == 1`. Round one checks
+both `gx3` and `gx4` this way; round two checks the received `b` the same way. The EC path's
+advantage here is smaller than stated.
+
+The framing layer's remaining obligation is the one that applies either way: a strict fixed width.
+`BigIntegers.asUnsignedByteArray(int, BigInteger)` (line 57) throws on overflow but does **not**
+reject a negative value — it silently encodes `-1` as `255`. See §5b. So the encoder must range-check
+before it calls that helper, which is a stronger statement than errata R-3 makes.
+
+### 5b. What the measurement found on the first run: the tag is signed
+
+The first MODP harness run failed three tests, all in round three, while rounds one and two passed.
+That was not a test bug.
+
+`JPAKEUtil.calculateMacTag` (line 454) returns `new BigInteger(calculateMacTagEncoded(...))` — the
+**signed** two's-complement reading of a 32-byte HMAC output. A tag is therefore negative about half
+the time. Encoding it with `BigIntegers.asUnsignedByteArray`, which zero-pads, silently turns a
+negative tag into a different positive number, and confirmation then fails.
+
+Bouncy Castle documents the trap in its own `validateMacTag` Javadoc:
+
+> Note calculateMacTag reads the MAC output with the *signed* BigInteger(byte[]) constructor, so a
+> MacTag is negative about half the time and the supplied value has to be encoded two's-complement
+> and sign-extended to match: BigIntegers.asUnsignedByteArray zero-pads instead, which does not
+> round-trip a negative tag.
+
+So the MPS3 round-three field must be specified as **32 sign-extended two's-complement bytes**, and
+the adapter must read it back with `BigInteger(byte[])`. `JpakeRoundBody.RoundThree` now says so, and
+the codec stores the bytes opaquely, which is why no production behaviour had to change.
+
+This is worth recording for a second reason: it is precisely the defect class that the EC in-memory
+harness could never have found. Passing payload objects by reference never crosses a byte boundary,
+so the signedness of a value that is never serialised cannot be wrong. The blocking issue and this
+defect have the same root cause — the harness never proved what it appeared to prove.
 
 On standards: RFC 8236 describes the finite-field MODP construction. That is a fact about the RFC,
 not a claim that this project conforms to it — it does not, and the no-conformance-claim rule stands

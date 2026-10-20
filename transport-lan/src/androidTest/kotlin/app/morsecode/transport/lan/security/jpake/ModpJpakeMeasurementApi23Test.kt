@@ -89,7 +89,6 @@ class ModpJpakeMeasurementApi23Test {
 
         assertEquals(JPAKEParticipant.STATE_ROUND_3_VALIDATED, alice.state)
         assertEquals(JPAKEParticipant.STATE_ROUND_3_VALIDATED, bob.state)
-        Log.i(PHASE_TAG, "phase=reconstruct_round_trip result=ok rounds=3")
     }
 
     /**
@@ -124,41 +123,47 @@ class ModpJpakeMeasurementApi23Test {
         val round2Bytes = elementBytes + elementBytes + scalarBytes
         val round3Bytes = TAG_BYTES // HMAC-SHA256 output, carried as opaque signed bytes
 
-        Log.i(
-            PHASE_TAG,
-            "phase=modp_payload_sizes round1_bytes=$round1Bytes round2_bytes=$round2Bytes " +
-                "round3_bytes=$round3Bytes element_bytes=$elementBytes scalar_bytes=$scalarBytes " +
-                "p_bits=${group.p.bitLength()} q_bits=${group.q.bitLength()}",
-        )
-
         assertEquals("a NIST 3072-bit element is 384 bytes", 384, elementBytes)
         assertEquals("a 256-bit subgroup scalar is 32 bytes", 32, scalarBytes)
-        assertEquals("round one carries six elements of material", 1_600, round1Bytes)
-        assertEquals("round two carries three", 800, round2Bytes)
+        assertEquals("round one carries six elements of material", ROUND1_BYTES, round1Bytes)
+        assertEquals("round two carries three", ROUND2_BYTES, round2Bytes)
         assertEquals("the round-three tag is a 32-byte HMAC output", 32, round3Bytes)
         assertTrue("keying material must agree", keyA == keyB)
     }
 
-    /** Same phases, same names, same tag as the EC measurement, so the two can be compared. */
+    /**
+     * One dense line rather than nine.
+     *
+     * The CI wrapper forwards only a bounded window of the captured phase log into the run
+     * annotations, and the first version of this harness emitted nine lines per phase and had its
+     * later results silently truncated. Fewer, denser lines survive the window intact; the numbers
+     * are still per-phase medians in microseconds.
+     */
     @Test(timeout = TEST_TIMEOUT_MILLIS)
     fun honestExchangePhaseTimings() {
         repeat(WARMUP) { timedExchange() }
         val samples = (0 until ITERATIONS).map { timedExchange() }
 
-        reportPhase("modp_construct", samples.map { it.constructNanos })
-        reportPhase("modp_round1_create", samples.map { it.round1CreateNanos })
-        reportPhase("modp_round1_validate", samples.map { it.round1ValidateNanos })
-        reportPhase("modp_round2_create", samples.map { it.round2CreateNanos })
-        reportPhase("modp_round2_validate", samples.map { it.round2ValidateNanos })
-        reportPhase("modp_keying_material", samples.map { it.keyingMaterialNanos })
-        reportPhase("modp_round3_create", samples.map { it.round3CreateNanos })
-        reportPhase("modp_round3_validate", samples.map { it.round3ValidateNanos })
-        reportPhase("modp_total_honest", samples.map { it.totalNanos })
+        fun medianOf(selector: (PhaseTimings) -> Long): Long =
+            percentile(samples.map(selector).sorted(), 0.5) / NANOS_PER_MICRO
 
-        val medianMicros = percentile(samples.map { it.totalNanos }.sorted(), 0.5) / NANOS_PER_MICRO
+        val totals = samples.map { it.totalNanos }
+        val medianMicros = percentile(totals.sorted(), 0.5) / NANOS_PER_MICRO
+        val highMicros = percentile(totals.sorted(), 0.9) / NANOS_PER_MICRO
+
         Log.i(
             PHASE_TAG,
-            "phase=modp_median_total micros=$medianMicros iterations=$ITERATIONS warmup=$WARMUP",
+            "phase=modp_summary median_us construct=${medianOf { it.constructNanos }}" +
+                " r1c=${medianOf { it.round1CreateNanos }}" +
+                " r1v=${medianOf { it.round1ValidateNanos }}" +
+                " r2c=${medianOf { it.round2CreateNanos }}" +
+                " r2v=${medianOf { it.round2ValidateNanos }}" +
+                " km=${medianOf { it.keyingMaterialNanos }}" +
+                " r3c=${medianOf { it.round3CreateNanos }}" +
+                " r3v=${medianOf { it.round3ValidateNanos }}" +
+                " total=$medianMicros p90=$highMicros samples=$ITERATIONS warmup=$WARMUP" +
+                " wire_r1=${ROUND1_BYTES} wire_r2=${ROUND2_BYTES} wire_r3=${TAG_BYTES}" +
+                " element=$ELEMENT_BYTES scalar=$SCALAR_BYTES",
         )
         assertTrue(
             "median MODP exchange took ${medianMicros}us, above the generous ceiling of " +
@@ -451,16 +456,6 @@ class ModpJpakeMeasurementApi23Test {
         )
     }
 
-    private fun reportPhase(name: String, nanos: List<Long>) {
-        val sorted = nanos.sorted()
-        val medianMicros = percentile(sorted, 0.5) / NANOS_PER_MICRO
-        val highMicros = percentile(sorted, 0.9) / NANOS_PER_MICRO
-        Log.i(
-            PHASE_TAG,
-            "phase=$name median_micros=$medianMicros p90_micros=$highMicros samples=${sorted.size}",
-        )
-    }
-
     private fun percentile(sortedNanos: List<Long>, fraction: Double): Long {
         if (sortedNanos.isEmpty()) return 0L
         val index = ((sortedNanos.size - 1) * fraction).toInt().coerceIn(0, sortedNanos.size - 1)
@@ -522,6 +517,10 @@ class ModpJpakeMeasurementApi23Test {
 
         /** HMAC-SHA256 output. Two's complement on the wire; see [encodeTag]. */
         const val TAG_BYTES = 32
+
+        /** Fixed-width wire sizes, asserted in [encodedPayloadSizesAreMeasuredSoTheFrameBoundCanBeChosen]. */
+        const val ROUND1_BYTES = 1_600
+        const val ROUND2_BYTES = 800
 
         const val ID_A = "morsec-modp-a"
         const val ID_B = "morsec-modp-b"
