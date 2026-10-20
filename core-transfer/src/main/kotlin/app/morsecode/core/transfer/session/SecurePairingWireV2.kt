@@ -159,14 +159,14 @@ public enum class PairingSelectionReject(public val wireReason: String) {
  * `SAS_25BIT_COMPARISON` is retained so a peer from the previous format can be *recognised* and
  * refused with a typed result. It is never selected by the production policy.
  *
- * `EC_JPAKE_P256_ENTERED_CODE_V1` is the experimental mechanism this milestone implements: EC
+ * `JPAKE_MODP3072_ENTERED_CODE_V1` is the experimental mechanism this milestone implements: EC
  * J-PAKE over NIST P-256 with SHA-256, with the code entered by a human and the exchange bound to
  * the TLS channel through derived participant identifiers.
  */
 public enum class PairingAuthenticationCapability(public val wireId: Int) {
     NONE(0),
     SAS_25BIT_COMPARISON(1),
-    EC_JPAKE_P256_ENTERED_CODE_V1(2);
+    JPAKE_MODP3072_ENTERED_CODE_V1(2);
 
     public companion object {
         public fun fromWireId(id: Int): PairingAuthenticationCapability? =
@@ -191,7 +191,7 @@ public enum class PairingAuthenticationCapability(public val wireId: Int) {
 public object PairingAuthenticationPolicy {
     /** The experimental suite this milestone implements. */
     public val REQUIRED_SUITE: PairingAuthenticationCapability =
-        PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1
+        PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1
 
     public fun isProductionSuite(value: PairingAuthenticationCapability): Boolean =
         value == REQUIRED_SUITE

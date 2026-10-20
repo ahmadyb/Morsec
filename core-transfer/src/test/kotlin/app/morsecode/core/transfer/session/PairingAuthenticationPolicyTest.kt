@@ -71,12 +71,12 @@ public class PairingAuthenticationPolicyTest {
     @Test
     public fun `two peers that both offer the required suite select it`() {
         val (initiator, responder) = pair(
-            PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
-            PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+            PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
+            PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
         )
         val result = PairingAuthenticationPolicy.selectRequired(initiator, responder)
         assertEquals(
-            PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+            PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
             selected(result),
         )
     }
@@ -86,7 +86,7 @@ public class PairingAuthenticationPolicyTest {
         // The old rule was minOf(2, 1) = 1, so this combination silently selected the 25-bit
         // comparison. It must now be a refusal, because there is no intersection.
         val (initiator, responder) = pair(
-            PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+            PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
             PairingAuthenticationCapability.SAS_25BIT_COMPARISON,
         )
         val result = PairingAuthenticationPolicy.selectRequired(initiator, responder)
@@ -132,7 +132,7 @@ public class PairingAuthenticationPolicyTest {
         )
 
         val (mixedInitiator, mixedResponder) = pair(
-            PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+            PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
             null,
         )
         assertEquals(
@@ -144,12 +144,12 @@ public class PairingAuthenticationPolicyTest {
     @Test
     public fun `the policy names exactly one production suite`() {
         assertEquals(
-            PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+            PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
             PairingAuthenticationPolicy.REQUIRED_SUITE,
         )
         assertTrue(
             PairingAuthenticationPolicy.isProductionSuite(
-                PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+                PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
             ),
         )
         assertFalse(
@@ -169,11 +169,11 @@ public class PairingAuthenticationPolicyTest {
         // refusal, and this assertion would fail.
         assertTrue(
             PairingAuthenticationCapability.SAS_25BIT_COMPARISON.wireId <
-                PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1.wireId,
+                PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1.wireId,
         )
         val (initiator, responder) = pair(
             PairingAuthenticationCapability.SAS_25BIT_COMPARISON,
-            PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+            PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
         )
         assertEquals(
             PairingSelectionReject.AUTHENTICATION_NOT_MUTUALLY_SUPPORTED,

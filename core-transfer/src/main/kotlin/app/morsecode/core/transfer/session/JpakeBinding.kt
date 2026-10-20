@@ -1,5 +1,5 @@
 /*
- * Experimental EC J-PAKE channel binding (Candidate B, project-selected).
+ * Experimental J-PAKE channel binding (Candidate B, project-selected).
  *
  * WHAT THIS IS
  *   One canonical digest that ties the pairing exchange to the TLS channel and to the negotiated

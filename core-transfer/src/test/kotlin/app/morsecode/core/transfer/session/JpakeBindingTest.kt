@@ -25,7 +25,7 @@ public class JpakeBindingTest {
         role: SecurePeerRole,
         local: PeerInstanceId,
         remote: PeerInstanceId,
-        suite: PairingAuthenticationCapability = PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+        suite: PairingAuthenticationCapability = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
     ): PairingOfferV2 = PairingOfferV2(
         secureSessionId = secureId,
         controlSessionId = controlId,
@@ -58,7 +58,7 @@ public class JpakeBindingTest {
         channelBinding: ByteArray = ByteArray(32) { 0x55 },
         transcriptDigest: ByteArray = ByteArray(32) { 0x66 },
         codeInstance: ByteArray = ByteArray(16) { 0x77 },
-        suite: PairingAuthenticationCapability = PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+        suite: PairingAuthenticationCapability = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
     ): JpakeBindingInputs = JpakeBindingInputs(
         channelBinding = channelBinding,
         transcriptDigest = transcriptDigest,
@@ -152,7 +152,7 @@ public class JpakeBindingTest {
                 transcriptDigest = ByteArray(32),
                 codeInstanceId = ByteArray(16),
                 formatVersion = 1,
-                suite = PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+                suite = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
                 initiatorOffer = offer(SecurePeerRole.INITIATOR, initiatorPeer, responderPeer),
                 responderOffer = offer(SecurePeerRole.RESPONDER, responderPeer, initiatorPeer),
             )

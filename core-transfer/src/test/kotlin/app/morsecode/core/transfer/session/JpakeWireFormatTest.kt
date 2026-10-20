@@ -33,7 +33,8 @@ public class JpakeWireFormatTest {
     private val tagV2 = 0x0014
     private val tagR2 = 0x0015
 
-    private fun point(prefix: Int): ByteArray = byteArrayOf(prefix.toByte()) + ByteArray(32) { 0x22 }
+    /** A 384-byte MODP element. Distinct fills stand in for distinct group elements. */
+    private fun element(fill: Int): ByteArray = ByteArray(384) { fill.toByte() }
     private fun scalar(): ByteArray = ByteArray(32) { 0x33 }
 
     private fun tlv(tag: Int, value: ByteArray): ByteArray = byteArrayOf(
@@ -53,11 +54,11 @@ public class JpakeWireFormatTest {
         participant: ByteArray = "morsec1-i-0123456789abcdef0123456789abcdef".toByteArray(Charsets.UTF_8),
         count: ByteArray = byteArrayOf(6),
         body: List<Pair<Int, ByteArray>> = listOf(
-            tagGx1 to point(0x02),
-            tagGx2 to point(0x03),
-            tagV1 to point(0x02),
+            tagGx1 to element(0x22),
+            tagGx2 to element(0x33),
+            tagV1 to element(0x22),
             tagR1 to scalar(),
-            tagV2 to point(0x03),
+            tagV2 to element(0x33),
             tagR2 to scalar(),
         ),
         tail: ByteArray = ByteArray(0),
@@ -79,14 +80,14 @@ public class JpakeWireFormatTest {
     private fun message(round: JpakeRound = JpakeRound.ROUND_ONE): JpakeMessage {
         val body: JpakeRoundBody = when (round) {
             JpakeRound.ROUND_ONE -> JpakeRoundBody.RoundOne(
-                point(0x02), point(0x03), point(0x02), scalar(), point(0x03), scalar(),
+                element(0x22), element(0x33), element(0x22), scalar(), element(0x33), scalar(),
             )
-            JpakeRound.ROUND_TWO -> JpakeRoundBody.RoundTwo(point(0x02), point(0x03), scalar())
+            JpakeRound.ROUND_TWO -> JpakeRoundBody.RoundTwo(element(0x22), element(0x33), scalar())
             JpakeRound.ROUND_THREE -> JpakeRoundBody.RoundThree(scalar())
         }
         return JpakeMessage(
-            suite = PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
-            profile = JpakeCurveProfile.NIST_P256,
+            suite = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
+            profile = JpakeCurveProfile.MODP_3072,
             round = round,
             role = SecurePeerRole.INITIATOR,
             secureSessionId = SessionId("0123456789abcdef0123456789abcdef"),
@@ -117,7 +118,7 @@ public class JpakeWireFormatTest {
             assertNotNull("round $round must decode: $decoded", success)
             assertEquals(round, success!!.message.round)
             assertEquals(
-                PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
+                PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
                 success.message.suite,
             )
             assertEquals(SecurePeerRole.INITIATOR, success.message.role)
@@ -196,41 +197,45 @@ public class JpakeWireFormatTest {
     }
 
     @Test
-    public fun `an infinity or uncompressed point is refused at decode`() {
-        val infinity = payload(
+    public fun `a zero element or a wrong width element is refused at decode`() {
+        // Zero is not a member of the multiplicative group, and it is the one out-of-range value
+        // the decoder can rule out without the modulus.
+        val zero = payload(
             body = listOf(
-                tagGx1 to point(0x00),
-                tagGx2 to point(0x03),
-                tagV1 to point(0x02),
+                tagGx1 to ByteArray(384),
+                tagGx2 to element(0x33),
+                tagV1 to element(0x22),
                 tagR1 to scalar(),
-                tagV2 to point(0x03),
+                tagV2 to element(0x33),
                 tagR2 to scalar(),
             ),
         )
-        assertEquals(JpakeWireReject.POINT_ENCODING_INVALID, reason(decodePayload(infinity)))
+        assertEquals(JpakeWireReject.ELEMENT_ENCODING_INVALID, reason(decodePayload(zero)))
 
-        val uncompressed = payload(
+        // A 33-byte value is the old EC width. Accepting it would silently reinterpret a
+        // different encoding as an element, so the width is exact.
+        val shortElement = payload(
             body = listOf(
-                tagGx1 to point(0x04),
-                tagGx2 to point(0x03),
-                tagV1 to point(0x02),
+                tagGx1 to ByteArray(33) { 0x22 },
+                tagGx2 to element(0x33),
+                tagV1 to element(0x22),
                 tagR1 to scalar(),
-                tagV2 to point(0x03),
+                tagV2 to element(0x33),
                 tagR2 to scalar(),
             ),
         )
-        assertEquals(JpakeWireReject.POINT_ENCODING_INVALID, reason(decodePayload(uncompressed)))
+        assertEquals(JpakeWireReject.ELEMENT_ENCODING_INVALID, reason(decodePayload(shortElement)))
     }
 
     @Test
     public fun `a short scalar is refused rather than left padded`() {
         val short = payload(
             body = listOf(
-                tagGx1 to point(0x02),
-                tagGx2 to point(0x03),
-                tagV1 to point(0x02),
+                tagGx1 to element(0x22),
+                tagGx2 to element(0x33),
+                tagV1 to element(0x22),
                 tagR1 to ByteArray(31) { 0x33 },
-                tagV2 to point(0x03),
+                tagV2 to element(0x33),
                 tagR2 to scalar(),
             ),
         )
@@ -296,15 +301,15 @@ public class JpakeWireFormatTest {
         var threw = false
         try {
             JpakeMessage(
-                suite = PairingAuthenticationCapability.EC_JPAKE_P256_ENTERED_CODE_V1,
-                profile = JpakeCurveProfile.NIST_P256,
+                suite = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
+                profile = JpakeCurveProfile.MODP_3072,
                 round = JpakeRound.ROUND_THREE,
                 role = SecurePeerRole.INITIATOR,
                 secureSessionId = SessionId("0123456789abcdef0123456789abcdef"),
                 controlSessionId = "ctl",
                 participantId = "morsec1-i-0123456789abcdef0123456789abcdef",
                 body = JpakeRoundBody.RoundOne(
-                    point(0x02), point(0x03), point(0x02), scalar(), point(0x03), scalar(),
+                    element(0x22), element(0x33), element(0x22), scalar(), element(0x33), scalar(),
                 ),
             )
         } catch (_: IllegalArgumentException) {
@@ -314,14 +319,15 @@ public class JpakeWireFormatTest {
     }
 
     @Test
-    public fun `an all zero point is encoding valid and left for the library to reject`() {
-        // The decoder must not pretend to decide curve membership. Half of all 32-byte field
-        // elements are valid x-coordinates, so only arithmetic can settle it.
-        assertTrue(JpakeMessageCodec.isPoint(point(0x02)))
-        assertTrue(JpakeMessageCodec.isPoint(point(0x03)))
-        assertFalse(JpakeMessageCodec.isPoint(point(0x00)))
-        assertFalse(JpakeMessageCodec.isPoint(point(0x04)))
-        assertFalse(JpakeMessageCodec.isPoint(ByteArray(32)))
+    public fun `the decoder decides encoding only and leaves subgroup membership to the library`() {
+        // A well-formed 384-byte value is accepted here even though it might not be a subgroup
+        // member: ruling that out needs the modulus and an exponentiation. The library's
+        // validateZeroKnowledgeProof does that, and the API 23 harness proves it refuses 0, 1, p
+        // and p+1.
+        assertTrue(JpakeMessageCodec.isElement(element(0x22)))
+        assertFalse("the all-zero element is not a group element", JpakeMessageCodec.isElement(ByteArray(384)))
+        assertFalse("a short encoding is refused", JpakeMessageCodec.isElement(ByteArray(383)))
+        assertFalse("a long encoding is refused", JpakeMessageCodec.isElement(ByteArray(385)))
         assertNull((decodePayload(payload()) as? JpakeMessageResult.Rejected)?.reason)
     }
 }

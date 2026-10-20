@@ -169,12 +169,24 @@ Landed in this group so far, all pure JVM in `:core-transfer` and covered by JVM
 
 - **Explicit authentication-suite negotiation.** `SecurePairingSelectionV2.select` no longer uses
   `minOf` over wire ids; the rule is equality, and a disagreement is a refusal. The production
-  policy (`PairingAuthenticationPolicy`) accepts only `EC_JPAKE_P256_ENTERED_CODE_V1` and refuses a
+  policy (`PairingAuthenticationPolicy`) accepts only `JPAKE_MODP3072_ENTERED_CODE_V1` and refuses a
   legacy SAS peer with a typed result rather than negotiating down.
-- **MPS3 framing.** `JpakeMessageCodec` carries suite, curve profile, round, role, session ids,
-  participant id and a fixed-width round body. Points are exactly 33 bytes with a 0x02/0x03 prefix;
-  0x00 and 0x04 are refused at decode. Scalars and tags are exactly 32 bytes. Duplicate, unordered,
-  unknown, truncated and trailing fields each have their own refusal.
+- **MPS3 framing.** `JpakeMessageCodec` carries suite, group profile, round, role, session ids,
+  participant id and a fixed-width round body. Group elements are exactly 384 bytes (3072-bit,
+  zero-padded); the all-zero element is refused at decode and every other range check is the
+  library's. Scalars are exactly 32 bytes, and the round-three tag is 32 bytes of two's
+  complement, not an unsigned integer. Duplicate, unordered, unknown, truncated and trailing
+  fields each have their own refusal. `MAX_FRAME_BYTES` is 2048: the largest legitimate frame
+  measures 1744 bytes.
+
+- **Variant decision: finite-field MODP, not EC.** The EC variant cannot be driven from bytes --
+  `ECSchnorrZKP`'s constructor is package-private, so no public path rebuilds a received payload.
+  BC 1.86 has no decoder, and `master` still does not. The project therefore runs J-PAKE over the
+  3072-bit MODP group, whose payload API is entirely public. Measured on API 23: 1600/800/32-byte
+  payloads against EC's 196/98/32, and 7.6x the cost. Both are irrelevant at LAN scale inside a
+  flow where a human types a code. See `security/bc-ecjpake-reconstruction-audit-2026-10-20.md`.
+  The suite wire id stays 2; its name changed from `EC_JPAKE_P256_ENTERED_CODE_V1` to
+  `JPAKE_MODP3072_ENTERED_CODE_V1` because nothing has ever shipped the old meaning.
 - **Channel-bound participant identifiers.** `JpakeBinding` derives one context digest over the
   RFC 9266 channel binding, the MST2 transcript digest, both offers, both nonces, both certificate
   fingerprints, the session identifiers, the negotiated TLS parameters, the limits and a code

@@ -1,5 +1,5 @@
 /*
- * MPS3 -- the bounded frame format for experimental EC J-PAKE pairing messages.
+ * MPS3 -- the bounded frame format for experimental J-PAKE pairing messages.
  *
  * WHY A THIRD FORMAT
  *   MPS2 carries the pairing hello and MST2 binds the negotiation. Neither is a channel for
@@ -8,15 +8,20 @@
  *   exactly that and nothing else.
  *
  * WHAT THIS FILE DOES NOT DO
- *   It does not perform elliptic-curve arithmetic, does not validate a zero-knowledge proof and
- *   does not know what a valid point is beyond its *encoding*. Curve membership, subgroup and
- *   proof validation remain the library's job, after a safe decode. Keeping the split this way is
- *   deliberate: a decoder that allocates from an attacker-supplied length before checking the
- *   bound is how parsers become the vulnerability.
+ *   It does not perform modular arithmetic, does not validate a zero-knowledge proof and does not
+ *   know whether a value is in the subgroup beyond its *encoding*. Subgroup membership and proof
+ *   validation remain the library's job, after a safe decode. Keeping the split this way is
+ *   deliberate: a decoder that allocates from an attacker-supplied length before checking the bound
+ *   is how parsers become the vulnerability.
  *
  * ENCODING RULES, ALL ENFORCED HERE
- *   - Compressed P-256 points are exactly 33 bytes with a 0x02 or 0x03 prefix. 0x00 (infinity)
- *     and 0x04 (uncompressed) are rejected at decode, not left to a downstream check.
+ *   - Group elements are exactly 384 bytes: a 3072-bit value, big-endian, zero-padded. An
+ *     all-zero element is rejected at decode because it decodes to 0, which is not a member of
+ *     the multiplicative group; every other out-of-range value is left to the library, which
+ *     checks 0 < gx < p and gx^q mod p == 1.
+ *   - The round-three tag is 32 bytes of two's complement, not an unsigned integer. The library
+ *     reads it with the signed BigInteger constructor, so a tag is negative about half the time;
+ *     an unsigned encoding of the same bytes denotes a different number. See RoundThree.
  *   - Scalars, round-three tags and any internal keying material are exactly 32 bytes of
  *     big-endian unsigned data. A short encoding is rejected rather than left-padded by the
  *     reader, so "leading zero was dropped" cannot be expressed on the wire at all.
@@ -46,14 +51,19 @@ public enum class JpakeRound(public val wireId: Int, public val payloadCount: In
 }
 
 /**
- * The curve identifier carried in the frame.
+ * The group identifier carried in the frame.
  *
- * A single value, not a menu. NIST P-256 has prime order and cofactor 1, which is exactly the
- * property the library's subgroup check relies on; offering a choice here would let a peer ask
- * for a curve for which that argument does not hold.
+ * A single value, not a menu. The project runs one group and one profile; offering a choice here
+ * would let a peer ask for a group whose parameters this code has not been written against.
+ *
+ * The identifier keeps its wire id across the change of variant. Wire id 1 previously meant NIST
+ * P-256 and now means the 3072-bit MODP group: no peer has ever shipped the old meaning, because
+ * the EC variant was never reachable from production, so reusing the id cannot be misread by
+ * anything in the field. A peer from an older build cannot authenticate anyway -- the suite
+ * negotiation refuses anything that is not [PairingAuthenticationPolicy.REQUIRED_SUITE].
  */
 public enum class JpakeCurveProfile(public val wireId: Int) {
-    NIST_P256(1);
+    MODP_3072(1);
 
     public companion object {
         public fun fromWireId(id: Int): JpakeCurveProfile? = entries.firstOrNull { it.wireId == id }
@@ -79,7 +89,7 @@ public enum class JpakeWireReject(public val wireReason: String) {
     SUITE_INVALID("suite_invalid"),
     PROFILE_INVALID("profile_invalid"),
     PAYLOAD_COUNT_MISMATCH("payload_count_mismatch"),
-    POINT_ENCODING_INVALID("point_encoding_invalid"),
+    ELEMENT_ENCODING_INVALID("element_encoding_invalid"),
     PARTICIPANT_ID_INVALID("participant_id_invalid"),
     SESSION_ID_INVALID("session_id_invalid"),
 }
@@ -108,9 +118,9 @@ public sealed interface JpakeRoundBody {
 
         public fun gx1Bytes(): ByteArray = gx1Value.copyOf()
         public fun gx2Bytes(): ByteArray = gx2Value.copyOf()
-        public fun proofOnePointBytes(): ByteArray = v1Value.copyOf()
+        public fun proofOneElementBytes(): ByteArray = v1Value.copyOf()
         public fun proofOneScalarBytes(): ByteArray = r1Value.copyOf()
-        public fun proofTwoPointBytes(): ByteArray = v2Value.copyOf()
+        public fun proofTwoElementBytes(): ByteArray = v2Value.copyOf()
         public fun proofTwoScalarBytes(): ByteArray = r2Value.copyOf()
 
         override fun clearSensitive() {
@@ -136,8 +146,8 @@ public sealed interface JpakeRoundBody {
         private val vValue: ByteArray = v.copyOf()
         private val rValue: ByteArray = r.copyOf()
 
-        public fun pointBytes(): ByteArray = aValue.copyOf()
-        public fun proofPointBytes(): ByteArray = vValue.copyOf()
+        public fun elementBytes(): ByteArray = aValue.copyOf()
+        public fun proofElementBytes(): ByteArray = vValue.copyOf()
         public fun proofScalarBytes(): ByteArray = rValue.copyOf()
 
         override fun clearSensitive() {
@@ -231,10 +241,20 @@ public object JpakeMessageCodec {
     /** Fixed 4-byte big-endian payload length prefix; the payload carries the MPS3 magic. */
     public const val HEADER_BYTES: Int = 4
 
-    /** Frame bound. One round-one frame measures 232 bytes plus identifiers. */
-    public const val MAX_FRAME_BYTES: Int = 512
+    /**
+     * Frame bound.
+     *
+     * A round-one frame for the 3072-bit group carries four 384-byte elements and two 32-byte
+     * scalars: 1624 bytes of body, about 113 bytes of header fields, and the length prefix, which
+     * measures 1744 bytes in total. The bound is 2048 so that the largest legitimate frame has
+     * room and no legitimate frame is refused; it is not slack for growth.
+     */
+    public const val MAX_FRAME_BYTES: Int = 2048
 
-    public const val POINT_BYTES: Int = 33
+    /** One 3072-bit group element: the modulus is 384 bytes wide, zero-padded. */
+    public const val ELEMENT_BYTES: Int = 384
+
+    /** One exponent, reduced modulo the 256-bit subgroup order. */
     public const val SCALAR_BYTES: Int = 32
     public const val TAG_BYTES: Int = 32
     public const val SESSION_ID_BYTES: Int = 16
@@ -418,8 +438,8 @@ public object JpakeMessageCodec {
                 val r1 = values[TAG_ROUND1_R1] ?: return reject(JpakeWireReject.MISSING_FIELD)
                 val v2 = values[TAG_ROUND1_V2] ?: return reject(JpakeWireReject.MISSING_FIELD)
                 val r2 = values[TAG_ROUND1_R2] ?: return reject(JpakeWireReject.MISSING_FIELD)
-                if (!isPoint(gx1) || !isPoint(gx2) || !isPoint(v1) || !isPoint(v2)) {
-                    return reject(JpakeWireReject.POINT_ENCODING_INVALID)
+                if (!isElement(gx1) || !isElement(gx2) || !isElement(v1) || !isElement(v2)) {
+                    return reject(JpakeWireReject.ELEMENT_ENCODING_INVALID)
                 }
                 if (!isScalar(r1) || !isScalar(r2)) {
                     return reject(JpakeWireReject.FIELD_LENGTH_OUT_OF_BOUNDS)
@@ -431,7 +451,7 @@ public object JpakeMessageCodec {
                 val a = values[TAG_ROUND2_A] ?: return reject(JpakeWireReject.MISSING_FIELD)
                 val v = values[TAG_ROUND2_V] ?: return reject(JpakeWireReject.MISSING_FIELD)
                 val r = values[TAG_ROUND2_R] ?: return reject(JpakeWireReject.MISSING_FIELD)
-                if (!isPoint(a) || !isPoint(v)) return reject(JpakeWireReject.POINT_ENCODING_INVALID)
+                if (!isElement(a) || !isElement(v)) return reject(JpakeWireReject.ELEMENT_ENCODING_INVALID)
                 if (!isScalar(r)) return reject(JpakeWireReject.FIELD_LENGTH_OUT_OF_BOUNDS)
                 JpakeRoundBody.RoundTwo(a, v, r)
             }
@@ -461,11 +481,11 @@ public object JpakeMessageCodec {
         is JpakeRoundBody.RoundOne -> {
             val gx1 = body.gx1Bytes()
             val gx2 = body.gx2Bytes()
-            val v1 = body.proofOnePointBytes()
+            val v1 = body.proofOneElementBytes()
             val r1 = body.proofOneScalarBytes()
-            val v2 = body.proofTwoPointBytes()
+            val v2 = body.proofTwoElementBytes()
             val r2 = body.proofTwoScalarBytes()
-            if (!isPoint(gx1) || !isPoint(gx2) || !isPoint(v1) || !isPoint(v2)) {
+            if (!isElement(gx1) || !isElement(gx2) || !isElement(v1) || !isElement(v2)) {
                 null
             } else if (!isScalar(r1) || !isScalar(r2)) {
                 null
@@ -482,10 +502,10 @@ public object JpakeMessageCodec {
         }
 
         is JpakeRoundBody.RoundTwo -> {
-            val a = body.pointBytes()
-            val v = body.proofPointBytes()
+            val a = body.elementBytes()
+            val v = body.proofElementBytes()
             val r = body.proofScalarBytes()
-            if (!isPoint(a) || !isPoint(v) || !isScalar(r)) {
+            if (!isElement(a) || !isElement(v) || !isScalar(r)) {
                 null
             } else {
                 listOf(TAG_ROUND2_A to a, TAG_ROUND2_V to v, TAG_ROUND2_R to r)
@@ -499,15 +519,16 @@ public object JpakeMessageCodec {
     }
 
     /**
-     * Encoding check only: a 33-byte compressed point whose prefix is 0x02 or 0x03.
+     * Encoding check only: exactly 384 bytes, and not the all-zero element.
      *
-     * Curve membership is not decided here. Roughly half of all 32-byte field elements are valid
-     * x-coordinates, so a decoder cannot demonstrate membership by inspection; it must hand the
-     * bytes to a validator that does the arithmetic. What it can do -- and does -- is refuse an
-     * encoding that could never be a point.
+     * Subgroup membership is not decided here. Deciding it needs the modulus and an
+     * exponentiation, which belongs to the library; what the decoder can do cheaply -- and does --
+     * is refuse an encoding of the wrong width and refuse zero, which is not a group element at
+     * all. A degenerate value that *is* the right width is left for the library's
+     * `validateZeroKnowledgeProof` to reject, and the API 23 harness proves it does.
      */
-    public fun isPoint(value: ByteArray): Boolean =
-        value.size == POINT_BYTES && (value[0].toInt() == 0x02 || value[0].toInt() == 0x03)
+    public fun isElement(value: ByteArray): Boolean =
+        value.size == ELEMENT_BYTES && value.any { it != 0.toByte() }
 
     public fun isScalar(value: ByteArray): Boolean = value.size == SCALAR_BYTES
 
