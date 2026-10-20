@@ -183,6 +183,13 @@ Landed in this group so far, all pure JVM in `:core-transfer` and covered by JVM
   generated from uniform bytes with no modulo step, normalised on input, redacted in `toString`,
   clearable; `EnteredCodeAttemptBudget` allows three entries and spends the code on the fourth.
 
+**Blocked before the round driver.** BC 1.86 gives no public way to rebuild an
+`ECJPAKERound1Payload` or `ECJPAKERound2Payload` from received bytes: `ECSchnorrZKP`, which both
+constructors require, has a package-private constructor and no decoder, and the package holds no
+codec. The in-memory feasibility harness never crossed that boundary, so it did not prove network
+deserialisation. See `security/bc-ecjpake-reconstruction-audit-2026-10-20.md`. The coordinator must
+not be wired until one of the three documented approaches is chosen and implemented.
+
 Not yet implemented, and therefore not claimed: the Bouncy Castle round driver, the coordinator
 wiring that replaces the SAS approval with PAKE-then-approval, API 23 hostile-path tests, and the
 removal of the SAS production path. Part B is **incomplete**.
