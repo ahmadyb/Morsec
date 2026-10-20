@@ -158,6 +158,45 @@ The framing layer's remaining obligation is the one that applies either way: a s
 reject a negative value — it silently encodes `-1` as `255`. See §5b. So the encoder must range-check
 before it calls that helper, which is a stronger statement than errata R-3 makes.
 
+### 5a. What the measurement actually established
+
+Run on the API 23 emulator by `ModpJpakeMeasurementApi23Test`, with the EC harness measured in the
+same job so the two are comparable. All eight MODP tests pass.
+
+**Reconstruction works.** Every round was encoded to fixed-width bytes, rebuilt through public
+constructors, and validated by a real participant: round one, round two, keying material agreement,
+and round three confirmation. This is the operation the EC path cannot perform at all.
+
+**Wire sizes, measured:** round one 1600 B, round two 800 B, round three 32 B — a 326-byte EC
+exchange becomes 2432 bytes, 7.5× larger. On a LAN this is irrelevant; the MPS3 frame bound would
+need to rise from 512 to at least 2048 bytes.
+
+**Cost, measured on the emulator:**
+
+| | EC P-256 | MODP 3072 |
+|---|---|---|
+| Honest exchange, median | 682 / 889 / 989 ms across three runs | not captured per-phase; see below |
+| Round-one create | ~255 ms | 699 ms |
+| Round-one validate | ~213 ms | 1028 ms |
+| Four concurrent exchanges | 3.69 s | 27.9 s |
+
+The concurrency ratio is the most robust figure available, because both numbers come from the same
+job: **27.9 s / 3.69 s = 7.6×**. Applied to the EC medians, a MODP exchange costs roughly 6.7–7.5 s
+on this emulator.
+
+Two honest caveats about that table. First, the per-phase MODP breakdown could not be captured in
+full: the API 23 logcat ring buffer is small, and which lines survive varies between runs — one run
+kept a single MODP line, another kept none, even though every test passed. The round-one figures and
+the concurrency ratio are real measurements; the total is a scaling estimate, and is labelled as
+one. Second, an emulator is not a phone: the EC baseline here is already ~0.9 s for something that
+should take tens of milliseconds on real hardware. The 7.6× ratio should transfer; the absolute
+figure should not be quoted as a device number.
+
+**What this does to the decision.** It removes the argument that MODP is too slow. On real hardware
+a 7.6× scaling of a tens-of-milliseconds EC exchange is likely a few hundred milliseconds, which is
+invisible inside a flow where a human reads a code from one screen and types it into another. The
+remaining cost of MODP is 2.4 KB instead of 326 B per exchange, and a larger frame bound.
+
 ### 5b. What the measurement found on the first run: the tag is signed
 
 The first MODP harness run failed three tests, all in round three, while rounds one and two passed.
@@ -190,29 +229,46 @@ whichever option is chosen.
 
 ---
 
-## 6. Recommendation
+## 6. Recommendation, after the measurement
 
-**Option 2, preceded by a measurement.** The MODP variant is the only path that stays inside BC's
-supported API without a new dependency. The cost is real but bounded: about 3.4 KB per exchange
-instead of 326 bytes, which is nothing on a LAN, and a pairing flow that takes milliseconds rather
-than microseconds.
+**Option 2 — MODP J-PAKE with `NIST_3072`.** The measurement removed the objection that decided
+against it. It runs on API 23 inside the real APK, every round reconstructs from bytes through
+public constructors, and the cost is 7.5× the bytes and 7.6× the time — which on a LAN and inside a
+human-typed flow is not a cost anyone will notice.
 
-The performance worry is the one thing that cannot be settled from this workspace, so it should be
-settled before committing to the rewrite: the existing androidTest harness already exercises the
-public API on API 23 inside the real APK, and extending it to time `NIST_3072` is a small, throwaway
-change that produces evidence instead of speculation. If it shows an unusable number, the fallback
-is Option 1 with the bridge confined to one clearly named file and a verifier that pins the exact
-constructor signature.
+What the project buys: no split package, no reliance on a constructor BC deliberately withheld, no
+version coupling, and no verifier needed to pin a constructor signature that exists only by
+accident. What it pays: MPS3 element widths change from 33/32 to 384/32, `MAX_FRAME_BYTES` rises
+from 512 to at least 2048, the round-three field becomes signed two's-complement, and the
+BN-adapter layer replaces the EC adapter. The binding derivation, the entered-code contract and the
+suite negotiation from `92ec4fb` are unaffected and stay.
+
+**Option 1 remains a legitimate fallback, and it is less reckless than it first appears.** The
+expression-compile argument in §5 is real: a package-private constructor failing to compile is a
+build break, not a silent runtime defect, and the dependency lock pins the jar byte-for-byte. If
+MODP's cost turns out to matter on real hardware, the bridge is defensible — confined to one named
+file, with a verifier that pins the exact constructor signature and fails the build if BC changes
+it.
+
+**Option 3 is not recommended.** It is the only option that needs a new dependency, a new lock
+entry, a new digest and provenance review, and the measured MODP cost does not justify paying that.
+
+This recommendation is engineering judgement about API stability, message size and measured cost. It
+is not a security opinion, and it does not make either variant reviewed.
 
 ---
 
 ## 7. Status of the implementation
 
-- The coordinator is **not** wired, and will not be until this decision is made and implemented.
-- No source file changed in this audit.
+- The coordinator is **not** wired, and will not be until the chosen variant is implemented.
+- No production source changed for this audit. The only production edit in the whole measurement
+  effort is a KDoc paragraph on `JpakeRoundBody.RoundThree` recording the signedness trap; the
+  codec's behaviour is unchanged.
 - The merged layer from `92ec4fb` remains correct in isolation — framing, binding, code and suite
-  negotiation all pass — but it cannot currently be connected to a live exchange. That was true
-  before this audit and is now documented rather than latent.
+  negotiation all pass — but it cannot currently be connected to a live EC exchange, and its
+  element widths are P-256 widths. Choosing MODP means re-deriving those widths.
+- Measured evidence lives in `ModpJpakeMeasurementApi23Test`, which runs in CI and asserts the
+  sizes and the reconstruction round trip rather than merely logging them.
 - Part B remains **INCOMPLETE**.
 
 The construction remains experimental and not independently cryptographically reviewed; the owner
