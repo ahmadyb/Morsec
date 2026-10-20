@@ -151,20 +151,18 @@ class ModpJpakeMeasurementApi23Test {
         val medianMicros = percentile(totals.sorted(), 0.5) / NANOS_PER_MICRO
         val highMicros = percentile(totals.sorted(), 0.9) / NANOS_PER_MICRO
 
-        Log.i(
-            PHASE_TAG,
-            "phase=modp_summary median_us construct=${medianOf { it.constructNanos }}" +
-                " r1c=${medianOf { it.round1CreateNanos }}" +
-                " r1v=${medianOf { it.round1ValidateNanos }}" +
-                " r2c=${medianOf { it.round2CreateNanos }}" +
-                " r2v=${medianOf { it.round2ValidateNanos }}" +
-                " km=${medianOf { it.keyingMaterialNanos }}" +
-                " r3c=${medianOf { it.round3CreateNanos }}" +
-                " r3v=${medianOf { it.round3ValidateNanos }}" +
-                " total=$medianMicros p90=$highMicros samples=$ITERATIONS warmup=$WARMUP" +
-                " wire_r1=${ROUND1_BYTES} wire_r2=${ROUND2_BYTES} wire_r3=${TAG_BYTES}" +
-                " element=$ELEMENT_BYTES scalar=$SCALAR_BYTES",
-        )
+        phaseSummary = "median_us construct=${medianOf { it.constructNanos }}" +
+            " r1c=${medianOf { it.round1CreateNanos }}" +
+            " r1v=${medianOf { it.round1ValidateNanos }}" +
+            " r2c=${medianOf { it.round2CreateNanos }}" +
+            " r2v=${medianOf { it.round2ValidateNanos }}" +
+            " km=${medianOf { it.keyingMaterialNanos }}" +
+            " r3c=${medianOf { it.round3CreateNanos }}" +
+            " r3v=${medianOf { it.round3ValidateNanos }}" +
+            " total=$medianMicros p90=$highMicros samples=$ITERATIONS warmup=$WARMUP" +
+            " wire_r1=${ROUND1_BYTES} wire_r2=${ROUND2_BYTES} wire_r3=${TAG_BYTES}" +
+            " element=$ELEMENT_BYTES scalar=$SCALAR_BYTES"
+        emitSummary()
         assertTrue(
             "median MODP exchange took ${medianMicros}us, above the generous ceiling of " +
                 "$CEILING_MICROS us",
@@ -214,11 +212,8 @@ class ModpJpakeMeasurementApi23Test {
         } finally {
             executor.shutdownNow()
         }
-        val elapsedMicros = (System.nanoTime() - start) / NANOS_PER_MICRO
-        Log.i(
-            PHASE_TAG,
-            "phase=modp_four_concurrent micros=$elapsedMicros concurrency=$CONCURRENCY",
-        )
+        concurrencyMicros = (System.nanoTime() - start) / NANOS_PER_MICRO
+        emitSummary()
     }
 
     /**
@@ -535,6 +530,26 @@ class ModpJpakeMeasurementApi23Test {
         const val CONCURRENT_TIMEOUT_SECONDS = 120L
 
         const val NANOS_PER_MICRO = 1_000L
+
+        /**
+         * The one line that carries every measurement, emitted by whichever test runs last.
+         *
+         * The CI wrapper forwards only a positional tail of the captured phase log, and JUnit's
+         * method order is not alphabetical: in one run this summary was emitted before the EC
+         * timings and fell outside the window entirely, so the numbers were lost even though the
+         * tests passed. Both tests therefore emit the same complete line, and whichever runs last
+         * is inside the tail. Redundant on purpose; a measurement that cannot be read is worthless.
+         */
+        private var phaseSummary: String? = null
+        private var concurrencyMicros: Long? = null
+
+        fun emitSummary() {
+            val phases = phaseSummary
+            val concurrent = concurrencyMicros
+            if (phases == null && concurrent == null) return
+            val suffix = if (concurrent != null) " concurrent4=$concurrent" else ""
+            Log.i(PHASE_TAG, "phase=modp_summary ${phases ?: "phases=pending"}$suffix")
+        }
 
         // Generous: a catastrophic-regression detector on a loaded emulator, not a target. The
         // MODP variant is expected to be far slower than EC, so this is wider than the EC ceiling
