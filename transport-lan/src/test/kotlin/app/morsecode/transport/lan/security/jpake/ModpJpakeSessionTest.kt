@@ -8,7 +8,6 @@ import app.morsecode.core.transfer.session.JpakeMessageCodec
 import app.morsecode.core.transfer.session.JpakeMessageResult
 import app.morsecode.core.transfer.session.JpakeParticipantIds
 import app.morsecode.core.transfer.session.JpakeRound
-import app.morsecode.core.transfer.session.JpakeRoundBody
 import app.morsecode.core.transfer.session.PairingAuthenticationCapability
 import app.morsecode.core.transfer.session.PairingAuthenticationPolicy
 import app.morsecode.core.transfer.session.SecurePeerRole
@@ -266,7 +265,7 @@ public class ModpJpakeSessionTest {
             assertEquals(
                 "a round-one element of $label must be refused",
                 ModpJpakeSession.Step.Rejected(ModpJpakeSession.Reject.FRAME_INVALID),
-                initiator.acceptRoundOne(rebuild(genuine, replaceElement = value)),
+                initiator.acceptRoundOne(rebuildNumbers(genuine, element = value)),
             )
         }
     }
@@ -276,7 +275,7 @@ public class ModpJpakeSessionTest {
         val (initiator, responder) = newPair()
         val genuine = responder.createRoundOne()
         initiator.createRoundOne()
-        val poisoned = rebuild(genuine, replaceScalar = ModpJpakeFrames.SUBGROUP_ORDER_Q)
+        val poisoned = rebuildNumbers(genuine, scalar = ModpJpakeFrames.SUBGROUP_ORDER_Q)
         assertEquals(
             ModpJpakeSession.Step.Rejected(ModpJpakeSession.Reject.FRAME_INVALID),
             initiator.acceptRoundOne(poisoned),
@@ -293,7 +292,7 @@ public class ModpJpakeSessionTest {
         initiator.createRoundOne()
         assertEquals(
             ModpJpakeSession.Step.Rejected(ModpJpakeSession.Reject.CRYPTO_FAILED),
-            initiator.acceptRoundOne(rebuild(genuine, replaceElement = BigInteger.TWO)),
+            initiator.acceptRoundOne(rebuildNumbers(genuine, element = BigInteger.valueOf(2))),
         )
     }
 
@@ -564,10 +563,10 @@ public class ModpJpakeSessionTest {
     }
 
     /**
-     * Re-emits a frame with fields changed, through the real codec.
+     * Re-emits a frame with header fields changed, through the real codec.
      *
-     * The message is rebuilt rather than byte-patched wherever the change is expressible, so the
-     * hostile vector differs from the honest one only in the field under test.
+     * Header fields are rebuilt rather than patched, so the hostile frame differs from the honest
+     * one only where the test says it does.
      */
     private fun rebuild(
         frame: ByteArray,
@@ -575,26 +574,8 @@ public class ModpJpakeSessionTest {
         secureSessionId: SessionId? = null,
         controlSessionId: String? = null,
         suite: PairingAuthenticationCapability? = null,
-        replaceElement: BigInteger? = null,
-        replaceScalar: BigInteger? = null,
     ): ByteArray {
         val original = decode(frame)
-        val body: JpakeRoundBody = when (val current = original.body) {
-            is JpakeRoundBody.RoundOne -> JpakeRoundBody.RoundOne(
-                replaceElement?.let { elementWidth(it) } ?: current.gx1Bytes(),
-                current.gx2Bytes(),
-                current.proofOneElementBytes(),
-                replaceScalar?.let { scalarWidth(it) } ?: current.proofOneScalarBytes(),
-                current.proofTwoElementBytes(),
-                current.proofTwoScalarBytes(),
-            )
-            is JpakeRoundBody.RoundTwo -> JpakeRoundBody.RoundTwo(
-                replaceElement?.let { elementWidth(it) } ?: current.elementBytes(),
-                current.proofElementBytes(),
-                replaceScalar?.let { scalarWidth(it) } ?: current.proofScalarBytes(),
-            )
-            is JpakeRoundBody.RoundThree -> current
-        }
         val message = JpakeMessage(
             suite = suite ?: original.suite,
             profile = original.profile,
@@ -603,14 +584,36 @@ public class ModpJpakeSessionTest {
             secureSessionId = secureSessionId ?: original.secureSessionId,
             controlSessionId = controlSessionId ?: original.controlSessionId,
             participantId = participantId ?: original.participantId,
-            body = body,
+            body = original.body,
         )
         return requireNotNull(JpakeMessageCodec.encode(message))
     }
 
-    private fun elementWidth(value: BigInteger): ByteArray = writeWidth(value, ModpJpakeFrames.ELEMENT_BYTES)
-
-    private fun scalarWidth(value: BigInteger): ByteArray = writeWidth(value, ModpJpakeFrames.SCALAR_BYTES)
+    /**
+     * Re-emits a frame whose group element or proof scalar is out of range.
+     *
+     * The bytes are patched in place rather than rebuilt through the codec, and that is the point:
+     * the codec refuses to *encode* an all-zero element, so a hostile frame like this cannot be
+     * produced by the project's own writer. It can only arrive from a peer, which is exactly what
+     * this test is modelling. Patching is length-preserving, so the frame stays well formed.
+     */
+    private fun rebuildNumbers(
+        frame: ByteArray,
+        element: BigInteger? = null,
+        scalar: BigInteger? = null,
+    ): ByteArray {
+        val round = decode(frame).round
+        var out = frame
+        if (element != null) {
+            val tag = if (round == JpakeRound.ROUND_ONE) TAG_ROUND1_GX1 else TAG_ROUND2_A
+            out = patchField(out, tag, writeWidth(element, ModpJpakeFrames.ELEMENT_BYTES))
+        }
+        if (scalar != null) {
+            val tag = if (round == JpakeRound.ROUND_ONE) TAG_ROUND1_R1 else TAG_ROUND2_R
+            out = patchField(out, tag, writeWidth(scalar, ModpJpakeFrames.SCALAR_BYTES))
+        }
+        return out
+    }
 
     private fun writeWidth(value: BigInteger, width: Int): ByteArray {
         val out = ByteArray(width)
@@ -628,23 +631,33 @@ public class ModpJpakeSessionTest {
      * Changes the profile byte to a value no profile uses.
      *
      * The profile is not selectable through any public constructor -- the enum has one member --
-     * so this is the one hostile vector that has to be byte-patched. The TLV is located by walking
-     * the frame, not by hard-coding an offset.
+     * so this is the one hostile header vector that has to be byte-patched.
      */
-    private fun tamperProfileByte(frame: ByteArray, newValue: Int): ByteArray {
+    private fun tamperProfileByte(frame: ByteArray, newValue: Int): ByteArray =
+        patchField(frame, PROFILE_TAG, byteArrayOf(newValue.toByte()))
+
+    /**
+     * Overwrites one TLV value in place, requiring the replacement to be the same width.
+     *
+     * The TLV is located by walking the frame, not by hard-coding an offset, so a layout change
+     * fails this loudly instead of silently patching the wrong bytes.
+     */
+    private fun patchField(frame: ByteArray, wantedTag: Int, value: ByteArray): ByteArray {
         val copy = frame.copyOf()
         var position = JpakeMessageCodec.HEADER_BYTES + 5 // length prefix + magic + version
         while (position + 4 <= copy.size) {
             val tag = ((copy[position].toInt() and 0xFF) shl 8) or (copy[position + 1].toInt() and 0xFF)
             val length = ((copy[position + 2].toInt() and 0xFF) shl 8) or (copy[position + 3].toInt() and 0xFF)
-            if (tag == PROFILE_TAG) {
-                require(length == 1) { "profile field is not one byte" }
-                copy[position + 4] = newValue.toByte()
+            if (tag == wantedTag) {
+                require(length == value.size) {
+                    "field 0x${wantedTag.toString(16)} is $length bytes, not ${value.size}"
+                }
+                System.arraycopy(value, 0, copy, position + 4, value.size)
                 return copy
             }
             position += 4 + length
         }
-        throw IllegalStateException("profile field not found")
+        throw IllegalStateException("field 0x${wantedTag.toString(16)} not found")
     }
 
     private fun assertRound(frame: ByteArray, round: JpakeRound, role: SecurePeerRole) {
@@ -664,5 +677,9 @@ public class ModpJpakeSessionTest {
 
     private companion object {
         const val PROFILE_TAG = 0x0002
+        const val TAG_ROUND1_GX1 = 0x0010
+        const val TAG_ROUND1_R1 = 0x0013
+        const val TAG_ROUND2_A = 0x0020
+        const val TAG_ROUND2_R = 0x0022
     }
 }

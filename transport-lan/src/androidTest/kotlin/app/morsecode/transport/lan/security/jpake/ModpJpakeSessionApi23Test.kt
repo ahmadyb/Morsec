@@ -7,7 +7,7 @@ import app.morsecode.core.transfer.session.JpakeMessage
 import app.morsecode.core.transfer.session.JpakeMessageCodec
 import app.morsecode.core.transfer.session.JpakeMessageResult
 import app.morsecode.core.transfer.session.JpakeParticipantIds
-import app.morsecode.core.transfer.session.JpakeRoundBody
+import app.morsecode.core.transfer.session.JpakeRound
 import app.morsecode.core.transfer.session.SecurePeerRole
 import java.math.BigInteger
 import java.util.concurrent.Callable
@@ -108,7 +108,7 @@ public class ModpJpakeSessionApi23Test {
             initiator.createRoundOne()
             assertEquals(
                 ModpJpakeSession.Step.Rejected(ModpJpakeSession.Reject.FRAME_INVALID),
-                initiator.acceptRoundOne(rebuild(genuine, replaceElement = value)),
+                initiator.acceptRoundOne(rebuildNumbers(genuine, element = value)),
             )
         }
     }
@@ -120,7 +120,7 @@ public class ModpJpakeSessionApi23Test {
         initiator.createRoundOne()
         assertEquals(
             ModpJpakeSession.Step.Rejected(ModpJpakeSession.Reject.FRAME_INVALID),
-            initiator.acceptRoundOne(rebuild(genuine, replaceScalar = ModpJpakeFrames.SUBGROUP_ORDER_Q)),
+            initiator.acceptRoundOne(rebuildNumbers(genuine, scalar = ModpJpakeFrames.SUBGROUP_ORDER_Q)),
         )
     }
 
@@ -131,7 +131,7 @@ public class ModpJpakeSessionApi23Test {
         initiator.createRoundOne()
         assertEquals(
             ModpJpakeSession.Step.Rejected(ModpJpakeSession.Reject.CRYPTO_FAILED),
-            initiator.acceptRoundOne(rebuild(genuine, replaceElement = BigInteger.TWO)),
+            initiator.acceptRoundOne(rebuildNumbers(genuine, element = BigInteger.valueOf(2))),
         )
     }
 
@@ -257,29 +257,8 @@ public class ModpJpakeSessionApi23Test {
         return (result as JpakeMessageResult.Success).message
     }
 
-    private fun rebuild(
-        frame: ByteArray,
-        participantId: String? = null,
-        replaceElement: BigInteger? = null,
-        replaceScalar: BigInteger? = null,
-    ): ByteArray {
+    private fun rebuild(frame: ByteArray, participantId: String? = null): ByteArray {
         val original = decode(frame)
-        val body: JpakeRoundBody = when (val current = original.body) {
-            is JpakeRoundBody.RoundOne -> JpakeRoundBody.RoundOne(
-                replaceElement?.let { writeWidth(it, ModpJpakeFrames.ELEMENT_BYTES) } ?: current.gx1Bytes(),
-                current.gx2Bytes(),
-                current.proofOneElementBytes(),
-                replaceScalar?.let { writeWidth(it, ModpJpakeFrames.SCALAR_BYTES) } ?: current.proofOneScalarBytes(),
-                current.proofTwoElementBytes(),
-                current.proofTwoScalarBytes(),
-            )
-            is JpakeRoundBody.RoundTwo -> JpakeRoundBody.RoundTwo(
-                replaceElement?.let { writeWidth(it, ModpJpakeFrames.ELEMENT_BYTES) } ?: current.elementBytes(),
-                current.proofElementBytes(),
-                replaceScalar?.let { writeWidth(it, ModpJpakeFrames.SCALAR_BYTES) } ?: current.proofScalarBytes(),
-            )
-            is JpakeRoundBody.RoundThree -> current
-        }
         val message = JpakeMessage(
             suite = original.suite,
             profile = original.profile,
@@ -288,9 +267,53 @@ public class ModpJpakeSessionApi23Test {
             secureSessionId = original.secureSessionId,
             controlSessionId = original.controlSessionId,
             participantId = participantId ?: original.participantId,
-            body = body,
+            body = original.body,
         )
         return requireNotNull(JpakeMessageCodec.encode(message))
+    }
+
+    /**
+     * Patches an out-of-range element or scalar into an otherwise honest frame.
+     *
+     * Byte patching, not re-encoding: the codec refuses to write an all-zero element, so a frame
+     * like this can only arrive from a peer. Length-preserving, so the frame stays well formed and
+     * the only difference under test is the integer.
+     */
+    private fun rebuildNumbers(
+        frame: ByteArray,
+        element: BigInteger? = null,
+        scalar: BigInteger? = null,
+    ): ByteArray {
+        val round = decode(frame).round
+        var out = frame
+        if (element != null) {
+            val tag = if (round == JpakeRound.ROUND_ONE) TAG_ROUND1_GX1 else TAG_ROUND2_A
+            out = patchField(out, tag, writeWidth(element, ModpJpakeFrames.ELEMENT_BYTES))
+        }
+        if (scalar != null) {
+            val tag = if (round == JpakeRound.ROUND_ONE) TAG_ROUND1_R1 else TAG_ROUND2_R
+            out = patchField(out, tag, writeWidth(scalar, ModpJpakeFrames.SCALAR_BYTES))
+        }
+        return out
+    }
+
+    /** Overwrites one TLV value in place, locating it by walking the frame. */
+    private fun patchField(frame: ByteArray, wantedTag: Int, value: ByteArray): ByteArray {
+        val copy = frame.copyOf()
+        var position = JpakeMessageCodec.HEADER_BYTES + 5 // length prefix + magic + version
+        while (position + 4 <= copy.size) {
+            val tag = ((copy[position].toInt() and 0xFF) shl 8) or (copy[position + 1].toInt() and 0xFF)
+            val length = ((copy[position + 2].toInt() and 0xFF) shl 8) or (copy[position + 3].toInt() and 0xFF)
+            if (tag == wantedTag) {
+                require(length == value.size) {
+                    "field 0x${wantedTag.toString(16)} is $length bytes, not ${value.size}"
+                }
+                System.arraycopy(value, 0, copy, position + 4, value.size)
+                return copy
+            }
+            position += 4 + length
+        }
+        throw IllegalStateException("field 0x${wantedTag.toString(16)} not found")
     }
 
     private fun writeWidth(value: BigInteger, width: Int): ByteArray {
@@ -306,6 +329,10 @@ public class ModpJpakeSessionApi23Test {
     }
 
     private companion object {
+        const val TAG_ROUND1_GX1 = 0x0010
+        const val TAG_ROUND1_R1 = 0x0013
+        const val TAG_ROUND2_A = 0x0020
+        const val TAG_ROUND2_R = 0x0022
         const val CONCURRENCY = 4
         const val CONCURRENT_TIMEOUT_SECONDS = 180L
         const val TEST_TIMEOUT_MILLIS = 300_000L
