@@ -8,6 +8,10 @@ import app.morsecode.core.transfer.session.JpakeMessageCodec
 import app.morsecode.core.transfer.session.JpakeMessageResult
 import app.morsecode.core.transfer.session.JpakeParticipantIds
 import app.morsecode.core.transfer.session.JpakeRound
+import app.morsecode.core.transfer.session.PakeAttempt
+import app.morsecode.core.transfer.session.PakeAttemptId
+import app.morsecode.core.transfer.session.PakeAttemptLedger
+import app.morsecode.core.transfer.session.SecureEntropy
 import app.morsecode.core.transfer.session.SecurePeerRole
 import java.math.BigInteger
 import java.util.concurrent.Callable
@@ -45,8 +49,9 @@ public class ModpJpakeSessionApi23Test {
     @Test(timeout = TEST_TIMEOUT_MILLIS)
     public fun aWrongCodeFailsAtTheLastRound() {
         val ids = idsFor(0x31)
-        val initiator = session(SecurePeerRole.INITIATOR, ids, "7KQF2XPD")
-        val responder = session(SecurePeerRole.RESPONDER, ids, "9MTR4WBN")
+        val attempt = attemptFor(0x31)
+        val initiator = session(SecurePeerRole.INITIATOR, ids, attempt, "7KQF2XPD")
+        val responder = session(SecurePeerRole.RESPONDER, ids, attempt, "9MTR4WBN")
         advanceToConfirmation(initiator, responder)
         val initiatorTag = initiator.createConfirmation()
         val responderTag = responder.createConfirmation()
@@ -216,19 +221,26 @@ public class ModpJpakeSessionApi23Test {
     private fun session(
         role: SecurePeerRole,
         ids: JpakeParticipantIds,
+        attempt: PakeAttempt = attemptFor(0x30),
         code: String = "7KQF2XPD",
     ): ModpJpakeSession {
         val chars = code.toCharArray()
         try {
-            return ModpJpakeSession(role, ids, secureSessionId, controlSessionId, chars)
+            return ModpJpakeSession(role, attempt, ids, secureSessionId, controlSessionId, chars)
         } finally {
             chars.fill('\u0000')
         }
     }
 
+    private fun attemptFor(seed: Int): PakeAttempt {
+        val ledger = PakeAttemptLedger(ByteArray(16) { seed.toByte() })
+        return requireNotNull(ledger.beginAttempt(SecureEntropy { destination -> destination.fill(seed.toByte()) }))
+    }
+
     private fun newPair(seed: Int = 0x30): Pair<ModpJpakeSession, ModpJpakeSession> {
         val ids = idsFor(seed)
-        return session(SecurePeerRole.INITIATOR, ids) to session(SecurePeerRole.RESPONDER, ids)
+        val attempt = attemptFor(seed)
+        return session(SecurePeerRole.INITIATOR, ids, attempt) to session(SecurePeerRole.RESPONDER, ids, attempt)
     }
 
     private fun advanceToConfirmation(initiator: ModpJpakeSession, responder: ModpJpakeSession) {
@@ -257,7 +269,13 @@ public class ModpJpakeSessionApi23Test {
         return (result as JpakeMessageResult.Success).message
     }
 
-    private fun rebuild(frame: ByteArray, participantId: String? = null): ByteArray {
+    private fun rebuild(
+        frame: ByteArray,
+        participantId: String? = null,
+        attemptId: PakeAttemptId? = null,
+        attemptOrdinal: Int? = null,
+        codeInstance: ByteArray? = null,
+    ): ByteArray {
         val original = decode(frame)
         val message = JpakeMessage(
             suite = original.suite,
@@ -267,6 +285,9 @@ public class ModpJpakeSessionApi23Test {
             secureSessionId = original.secureSessionId,
             controlSessionId = original.controlSessionId,
             participantId = participantId ?: original.participantId,
+            attemptId = attemptId ?: original.attemptId,
+            attemptOrdinal = attemptOrdinal ?: original.attemptOrdinal,
+            codeInstanceId = codeInstance ?: original.codeInstanceBytes(),
             body = original.body,
         )
         return requireNotNull(JpakeMessageCodec.encode(message))

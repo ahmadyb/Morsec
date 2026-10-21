@@ -54,15 +54,24 @@ public class JpakeBindingTest {
         extensions = emptyList(),
     )
 
+    private fun attempt(id: Byte = 0x11, ordinal: Int = 1): PakeAttemptId =
+        requireNotNull(PakeAttemptId.fromBytes(ByteArray(16) { id }))
+
     private fun inputs(
         channelBinding: ByteArray = ByteArray(32) { 0x55 },
         transcriptDigest: ByteArray = ByteArray(32) { 0x66 },
         codeInstance: ByteArray = ByteArray(16) { 0x77 },
+        attemptId: PakeAttemptId = attempt(),
+        attemptOrdinal: Int = 1,
+        attemptStartDigest: ByteArray = ByteArray(32) { 0x88 },
         suite: PairingAuthenticationCapability = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
     ): JpakeBindingInputs = JpakeBindingInputs(
         channelBinding = channelBinding,
         transcriptDigest = transcriptDigest,
         codeInstanceId = codeInstance,
+        attemptId = attemptId,
+        attemptOrdinal = attemptOrdinal,
+        attemptStartDigest = attemptStartDigest,
         formatVersion = 1,
         suite = suite,
         initiatorOffer = offer(SecurePeerRole.INITIATOR, initiatorPeer, responderPeer, suite),
@@ -151,6 +160,9 @@ public class JpakeBindingTest {
                 channelBinding = ByteArray(31),
                 transcriptDigest = ByteArray(32),
                 codeInstanceId = ByteArray(16),
+                attemptId = attempt(),
+                attemptOrdinal = 1,
+                attemptStartDigest = ByteArray(32),
                 formatVersion = 1,
                 suite = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
                 initiatorOffer = offer(SecurePeerRole.INITIATOR, initiatorPeer, responderPeer),
@@ -160,6 +172,49 @@ public class JpakeBindingTest {
             threw = true
         }
         assertTrue("a 31-byte channel binding must be refused", threw)
+    }
+
+    @Test
+    public fun `a fresh attempt id changes both participant identifiers`() {
+        val first = JpakeBinding.participantIds(JpakeBinding.authenticationContext(inputs(attemptId = attempt(0x11))))
+        val second = JpakeBinding.participantIds(
+            JpakeBinding.authenticationContext(inputs(attemptId = attempt(0x22))),
+        )
+        assertNotEquals(
+            "a new attempt must not reuse the initiator identifier",
+            first.initiator,
+            second.initiator,
+        )
+        assertNotEquals(
+            "a new attempt must not reuse the responder identifier",
+            first.responder,
+            second.responder,
+        )
+    }
+
+    @Test
+    public fun `the ordinal and the attempt-start digest each change the identifiers`() {
+        val base = JpakeBinding.participantIds(JpakeBinding.authenticationContext(inputs(attemptOrdinal = 1)))
+        val otherOrdinal = JpakeBinding.participantIds(JpakeBinding.authenticationContext(inputs(attemptOrdinal = 2)))
+        assertNotEquals(base.initiator, otherOrdinal.initiator)
+
+        val otherStart = JpakeBinding.participantIds(
+            JpakeBinding.authenticationContext(inputs(attemptStartDigest = ByteArray(32) { 0x99 })),
+        )
+        assertNotEquals(base.initiator, otherStart.initiator)
+    }
+
+    @Test
+    public fun `an attempt ordinal outside the permitted range is refused`() {
+        for (ordinal in listOf(0, 4)) {
+            var threw = false
+            try {
+                inputs(attemptOrdinal = ordinal)
+            } catch (_: IllegalArgumentException) {
+                threw = true
+            }
+            assertTrue("ordinal $ordinal must be refused", threw)
+        }
     }
 
     @Test

@@ -93,9 +93,15 @@ public class JpakeWireFormatTest {
             secureSessionId = SessionId("0123456789abcdef0123456789abcdef"),
             controlSessionId = "ctl-session",
             participantId = "morsec1-i-0123456789abcdef0123456789abcdef",
+            attemptId = attemptId(),
+            attemptOrdinal = 1,
+            codeInstanceId = ByteArray(16) { 0x42 },
             body = body,
         )
     }
+
+    private fun attemptId(seed: Byte = 0x11): PakeAttemptId =
+        requireNotNull(PakeAttemptId.fromBytes(ByteArray(16) { seed }))
 
     private fun decodePayload(frame: ByteArray): JpakeMessageResult =
         JpakeMessageCodec.decode(frame)
@@ -308,6 +314,9 @@ public class JpakeWireFormatTest {
                 secureSessionId = SessionId("0123456789abcdef0123456789abcdef"),
                 controlSessionId = "ctl",
                 participantId = "morsec1-i-0123456789abcdef0123456789abcdef",
+                attemptId = attemptId(),
+                attemptOrdinal = 1,
+                codeInstanceId = ByteArray(16) { 0x42 },
                 body = JpakeRoundBody.RoundOne(
                     element(0x22), element(0x33), element(0x22), scalar(), element(0x33), scalar(),
                 ),

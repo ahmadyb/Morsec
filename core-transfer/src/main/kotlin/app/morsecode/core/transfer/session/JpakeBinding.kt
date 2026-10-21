@@ -26,6 +26,14 @@
  *   The owner accepted that risk explicitly for this personal, experimental application; see
  *   doc/security/owner-risk-waiver-2026-10-19.md.
  *
+ * WHY THE ATTEMPT IS INCLUDED
+ *   The code instance is deliberately stable across the three attempts one displayed code permits.
+ *   If the context bound only the code instance, every attempt against that code would derive the
+ *   same participant ids, and a round-one frame from attempt one would validate inside attempt two.
+ *   The fresh attempt id, its ordinal and the digest of the attempt-start record are therefore part
+ *   of the context. Since the identifiers derive from the context, a replayed attempt names the
+ *   wrong participant at the receiver and is refused before any proof is checked.
+ *
  * WHY THE TRANSCRIPT DIGEST IS INCLUDED
  *   MST2 already binds both offers, both nonces, both certificate fingerprints, the control and
  *   secure session identifiers, the negotiated TLS protocol and cipher, the limits, the selected
@@ -72,6 +80,9 @@ public class JpakeBindingInputs(
     channelBinding: ByteArray,
     transcriptDigest: ByteArray,
     codeInstanceId: ByteArray,
+    attemptId: PakeAttemptId,
+    attemptOrdinal: Int,
+    attemptStartDigest: ByteArray,
     public val formatVersion: Int,
     public val suite: PairingAuthenticationCapability,
     public val initiatorOffer: PairingOfferV2,
@@ -80,10 +91,14 @@ public class JpakeBindingInputs(
     private val channelBindingValue: ByteArray = requireExact(channelBinding, 32, "channel binding")
     private val transcriptDigestValue: ByteArray = requireExact(transcriptDigest, 32, "transcript digest")
     private val codeInstanceValue: ByteArray = requireExact(codeInstanceId, 16, "code instance id")
+    private val attemptIdValue: PakeAttemptId = attemptId
+    private val attemptOrdinalValue: Int = attemptOrdinal
+    private val attemptStartValue: ByteArray = requireExact(attemptStartDigest, 32, "attempt-start digest")
 
     init {
         require(formatVersion in 1..0xFF) { "format version out of range" }
         require(suite != PairingAuthenticationCapability.NONE) { "binding requires a real suite" }
+        require(attemptOrdinal in 1..PakeAttemptLedger.MAX_PAKE_ATTEMPTS) { "attempt ordinal out of range" }
         require(initiatorOffer.role == SecurePeerRole.INITIATOR) { "first offer must be the initiator" }
         require(responderOffer.role == SecurePeerRole.RESPONDER) { "second offer must be the responder" }
     }
@@ -92,10 +107,17 @@ public class JpakeBindingInputs(
     internal fun transcriptDigestBytes(): ByteArray = transcriptDigestValue.copyOf()
     internal fun codeInstanceBytes(): ByteArray = codeInstanceValue.copyOf()
 
+    internal fun attemptIdValue(): PakeAttemptId = attemptIdValue
+
+    internal fun attemptOrdinalValue(): Int = attemptOrdinalValue
+
+    internal fun attemptStartBytes(): ByteArray = attemptStartValue.copyOf()
+
     public fun clearSensitive() {
         channelBindingValue.fill(0)
         transcriptDigestValue.fill(0)
         codeInstanceValue.fill(0)
+        attemptStartValue.fill(0)
     }
 
     override fun toString(): String = "JpakeBindingInputs([redacted])"
@@ -146,6 +168,9 @@ public object JpakeBinding {
         fields.add(0x0013 to u32(initiator.maxBytesPerDirection))
         fields.add(0x0014 to u32(initiator.sessionLifetimeMillis))
         fields.add(0x0015 to inputs.codeInstanceBytes())
+        fields.add(0x0016 to inputs.attemptIdValue().bytes())
+        fields.add(0x0017 to byteArrayOf(inputs.attemptOrdinalValue().toByte()))
+        fields.add(0x0018 to inputs.attemptStartBytes())
 
         var size = CONTEXT_LABEL.length + 1
         for ((_, value) in fields) size += 4 + value.size

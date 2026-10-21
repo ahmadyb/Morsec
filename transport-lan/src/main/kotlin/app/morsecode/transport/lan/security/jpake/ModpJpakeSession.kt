@@ -47,6 +47,7 @@ import app.morsecode.core.transfer.session.JpakeMessageCodec
 import app.morsecode.core.transfer.session.JpakeMessageResult
 import app.morsecode.core.transfer.session.JpakeParticipantIds
 import app.morsecode.core.transfer.session.JpakeRound
+import app.morsecode.core.transfer.session.PakeAttempt
 import app.morsecode.core.transfer.session.JpakeRoundBody
 import app.morsecode.core.transfer.session.PairingAuthenticationPolicy
 import app.morsecode.core.transfer.session.SecurePeerRole
@@ -68,6 +69,9 @@ import org.bouncycastle.crypto.digests.SHA256Digest
  * expected partner without trusting anything in the frame itself.
  *
  * @param role this side's role. The partner must be [SecurePeerRole.opposite].
+ * @param attempt the ledger-issued attempt this session belongs to. Its identifier, ordinal and
+ *        code-instance id are carried in every frame and compared before any integer is decoded, so
+ *        a frame from a previous attempt against the same code cannot reach the library.
  * @param participantIds both identifiers, derived from the authentication context.
  * @param secureSessionId the 128-bit session identifier bound into every frame.
  * @param controlSessionId the control-session identifier bound into every frame.
@@ -76,6 +80,7 @@ import org.bouncycastle.crypto.digests.SHA256Digest
  */
 public class ModpJpakeSession(
     public val role: SecurePeerRole,
+    public val attempt: PakeAttempt,
     participantIds: JpakeParticipantIds,
     private val secureSessionId: SessionId,
     private val controlSessionId: String,
@@ -375,6 +380,18 @@ public class ModpJpakeSession(
         if (message.participantId != partnerParticipantId) {
             return Decoded.Refused(Reject.CONTEXT_MISMATCH)
         }
+        // The attempt identity is checked unconditionally, not only when an ordinal happens to
+        // differ. A frame from an earlier attempt against the same displayed code carries a stale
+        // identifier and is refused here, before an integer is decoded.
+        if (message.attemptId != attempt.id) return Decoded.Refused(Reject.CONTEXT_MISMATCH)
+        if (message.attemptOrdinal != attempt.ordinal) return Decoded.Refused(Reject.CONTEXT_MISMATCH)
+        val receivedCodeInstance = message.codeInstanceBytes()
+        val codeInstanceMatches = try {
+            receivedCodeInstance.contentEquals(attempt.codeInstanceBytes())
+        } finally {
+            receivedCodeInstance.fill(0)
+        }
+        if (!codeInstanceMatches) return Decoded.Refused(Reject.CONTEXT_MISMATCH)
         return Decoded.Message(message)
     }
 
@@ -387,6 +404,9 @@ public class ModpJpakeSession(
             secureSessionId = secureSessionId,
             controlSessionId = controlSessionId,
             participantId = ownParticipantId,
+            attemptId = attempt.id,
+            attemptOrdinal = attempt.ordinal,
+            codeInstanceId = attempt.codeInstanceBytes(),
             body = body,
         )
         return JpakeMessageCodec.encode(message) ?: internalFailure("frame exceeds the bound")

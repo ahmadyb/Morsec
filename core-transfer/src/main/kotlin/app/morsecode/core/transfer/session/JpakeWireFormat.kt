@@ -29,6 +29,11 @@
  *     encoding canonical rather than merely parseable.
  *   - A repeated tag is rejected. This is representable in TLV and therefore actually tested.
  *   - An unknown tag is rejected. There is no skip-what-you-do-not-understand path.
+ *   - Every frame names the attempt it belongs to: a 16-byte attempt id, the attempt ordinal and the
+ *     16-byte code-instance id, in that order after the payload count. The receiver compares all
+ *     three against its own attempt before decoding an integer, so a frame replayed from an earlier
+ *     attempt against the same code is a framing refusal rather than a cryptographic one. The schema
+ *     version is 2: version 1 never shipped and is refused outright.
  *   - The declared payload count must equal the number of body fields the round defines.
  *   - The END tag must terminate the run and no byte may follow it.
  */
@@ -82,6 +87,7 @@ public enum class JpakeWireReject(public val wireReason: String) {
     UNKNOWN_FIELD("unknown_field"),
     MISSING_FIELD("missing_field"),
     FIELD_LENGTH_OUT_OF_BOUNDS("field_length_out_of_bounds"),
+    FIELD_VALUE_OUT_OF_BOUNDS("field_value_out_of_bounds"),
     TRAILING_BYTES("trailing_bytes"),
     MALFORMED_END_TAG("malformed_end_tag"),
     ROUND_INVALID("round_invalid"),
@@ -200,8 +206,15 @@ public class JpakeMessage(
     public val secureSessionId: SessionId,
     public val controlSessionId: String,
     public val participantId: String,
+    public val attemptId: PakeAttemptId,
+    public val attemptOrdinal: Int,
+    codeInstanceId: ByteArray,
     public val body: JpakeRoundBody,
 ) {
+    private val codeInstanceValue: ByteArray = codeInstanceId.copyOf()
+
+    public fun codeInstanceBytes(): ByteArray = codeInstanceValue.copyOf()
+
     init {
         require(suite != PairingAuthenticationCapability.NONE) { "MPS3 requires a real suite" }
         require(secureSessionId.value.matches(Regex("[0-9a-f]{32}"))) {
@@ -215,6 +228,10 @@ public class JpakeMessage(
             JpakeRound.ROUND_THREE -> JpakeRoundBody.RoundThree::class
         }
         require(body::class == expectedBody) { "body shape does not match the round" }
+        require(attemptOrdinal in 1..PakeAttemptLedger.MAX_PAKE_ATTEMPTS) { "attempt ordinal out of range" }
+        require(codeInstanceValue.size == PakeAttemptLedger.CODE_INSTANCE_BYTES) {
+            "code instance id must be ${PakeAttemptLedger.CODE_INSTANCE_BYTES} bytes"
+        }
     }
 
     override fun toString(): String = "JpakeMessage(round=${round.name}, role=${role.name}, ids=[redacted])"
@@ -264,7 +281,7 @@ public object JpakeMessageCodec {
     private val MAGIC_MPS3 = byteArrayOf(0x4D, 0x50, 0x53, 0x33) // "MPS3"
     private val MAGIC_MPS2 = byteArrayOf(0x4D, 0x50, 0x53, 0x32) // "MPS2"
 
-    private const val SCHEMA_VERSION: Int = 1
+    private const val SCHEMA_VERSION: Int = 2
     private const val TAG_END: Int = 0x0000
     private const val TAG_SUITE: Int = 0x0001
     private const val TAG_PROFILE: Int = 0x0002
@@ -274,6 +291,9 @@ public object JpakeMessageCodec {
     private const val TAG_CONTROL_SESSION_ID: Int = 0x0006
     private const val TAG_PARTICIPANT_ID: Int = 0x0007
     private const val TAG_PAYLOAD_COUNT: Int = 0x0008
+    private const val TAG_ATTEMPT_ID: Int = 0x0009
+    private const val TAG_ATTEMPT_ORDINAL: Int = 0x000A
+    private const val TAG_CODE_INSTANCE_ID: Int = 0x000B
     private const val TAG_ROUND1_GX1: Int = 0x0010
     private const val TAG_ROUND1_GX2: Int = 0x0011
     private const val TAG_ROUND1_V1: Int = 0x0012
@@ -312,6 +332,9 @@ public object JpakeMessageCodec {
         size += TLV_OVERHEAD + control.size
         size += TLV_OVERHEAD + participant.size
         size += TLV_OVERHEAD + 1 // payload count
+        size += TLV_OVERHEAD + PakeAttemptId.BYTE_COUNT // attempt id
+        size += TLV_OVERHEAD + 1 // attempt ordinal
+        size += TLV_OVERHEAD + PakeAttemptLedger.CODE_INSTANCE_BYTES // code instance id
         for ((_, value) in body) size += TLV_OVERHEAD + value.size
         size += TLV_OVERHEAD // END
         if (size > MAX_FRAME_BYTES) return null
@@ -328,6 +351,9 @@ public object JpakeMessageCodec {
         putField(buffer, TAG_CONTROL_SESSION_ID, control)
         putField(buffer, TAG_PARTICIPANT_ID, participant)
         putField(buffer, TAG_PAYLOAD_COUNT, byteArrayOf(message.round.payloadCount.toByte()))
+        putField(buffer, TAG_ATTEMPT_ID, message.attemptId.bytes())
+        putField(buffer, TAG_ATTEMPT_ORDINAL, byteArrayOf(message.attemptOrdinal.toByte()))
+        putField(buffer, TAG_CODE_INSTANCE_ID, message.codeInstanceBytes())
         for ((tag, value) in body) putField(buffer, tag, value)
         putField(buffer, TAG_END, ByteArray(0))
         control.fill(0)
@@ -430,6 +456,20 @@ public object JpakeMessageCodec {
             return reject(JpakeWireReject.PAYLOAD_COUNT_MISMATCH)
         }
 
+        val attemptIdBytes = values[TAG_ATTEMPT_ID] ?: return reject(JpakeWireReject.MISSING_FIELD)
+        val attemptId = PakeAttemptId.fromBytes(attemptIdBytes)
+            ?: return reject(JpakeWireReject.FIELD_LENGTH_OUT_OF_BOUNDS)
+        val ordinalBytes = values[TAG_ATTEMPT_ORDINAL] ?: return reject(JpakeWireReject.MISSING_FIELD)
+        if (ordinalBytes.size != 1) return reject(JpakeWireReject.FIELD_LENGTH_OUT_OF_BOUNDS)
+        val attemptOrdinal = ordinalBytes[0].toInt() and 0xFF
+        if (attemptOrdinal !in 1..PakeAttemptLedger.MAX_PAKE_ATTEMPTS) {
+            return reject(JpakeWireReject.FIELD_VALUE_OUT_OF_BOUNDS)
+        }
+        val codeInstance = values[TAG_CODE_INSTANCE_ID] ?: return reject(JpakeWireReject.MISSING_FIELD)
+        if (codeInstance.size != PakeAttemptLedger.CODE_INSTANCE_BYTES) {
+            return reject(JpakeWireReject.FIELD_LENGTH_OUT_OF_BOUNDS)
+        }
+
         val body = when (round) {
             JpakeRound.ROUND_ONE -> {
                 val gx1 = values[TAG_ROUND1_GX1] ?: return reject(JpakeWireReject.MISSING_FIELD)
@@ -472,6 +512,9 @@ public object JpakeMessageCodec {
                 secureSessionId = SessionId(hexOf(sessionBytes)),
                 controlSessionId = control,
                 participantId = participant,
+                attemptId = attemptId,
+                attemptOrdinal = attemptOrdinal,
+                codeInstanceId = codeInstance,
                 body = body,
             ),
         )

@@ -41,10 +41,25 @@ function check(name, condition, detail) {
  * The authorized surface. Every path is relative to the repository.
  * ------------------------------------------------------------------ */
 
+/**
+ * Every file that may implement, describe or drive J-PAKE in production.
+ *
+ * Membership is NOT a trust statement. It is the opposite: these are the files the checks below
+ * scan for persistence, logging, payload access and network use. A file outside this set may not
+ * mention the protocol at all, which is what keeps it out of the UI, the discovery provider, the
+ * coordinator and every other module by construction.
+ *
+ * The list grows as the implementation grows. What must never happen is a *new kind* of file
+ * appearing here -- a Composable, a Room entity, a service, a discovery path -- because that would
+ * mean the boundary moved rather than the implementation.
+ */
 const AUTHORIZED_JPAKE_FILES = new Set([
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeBinding.kt',
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeWireFormat.kt',
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/SecurePairingWireV2.kt',
+  'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/PakeAttempt.kt',
+  'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/PakeRecords.kt',
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/AuthenticatedControlAuthority.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeFrames.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeSession.kt',
 ]);
@@ -57,6 +72,8 @@ const AUTHORIZED_JPAKE_FILES = new Set([
  */
 const AUTHORIZED_MPS3_FILES = new Set([
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeWireFormat.kt',
+  'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/PakeAttempt.kt',
+  'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/PakeRecords.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeFrames.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeSession.kt',
 ]);

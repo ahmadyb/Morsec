@@ -10,6 +10,10 @@ import app.morsecode.core.transfer.session.JpakeParticipantIds
 import app.morsecode.core.transfer.session.JpakeRound
 import app.morsecode.core.transfer.session.PairingAuthenticationCapability
 import app.morsecode.core.transfer.session.PairingAuthenticationPolicy
+import app.morsecode.core.transfer.session.PakeAttempt
+import app.morsecode.core.transfer.session.PakeAttemptId
+import app.morsecode.core.transfer.session.PakeAttemptLedger
+import app.morsecode.core.transfer.session.SecureEntropy
 import app.morsecode.core.transfer.session.SecurePeerRole
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
@@ -116,8 +120,9 @@ public class ModpJpakeSessionTest {
     @Test
     public fun `a wrong code fails confirmation and closes both sessions`() {
         val ids = idsFor(0x11)
-        val initiator = session(SecurePeerRole.INITIATOR, ids, code = "7KQF2XPD")
-        val responder = session(SecurePeerRole.RESPONDER, ids, code = "9MTR4WBN")
+        val attempt = attemptFor(0x11)
+        val initiator = session(SecurePeerRole.INITIATOR, ids, attempt, code = "7KQF2XPD")
+        val responder = session(SecurePeerRole.RESPONDER, ids, attempt, code = "9MTR4WBN")
 
         advanceToConfirmation(initiator, responder)
         val initiatorTag = initiator.createConfirmation()
@@ -529,19 +534,30 @@ public class ModpJpakeSessionTest {
     private fun session(
         role: SecurePeerRole,
         ids: JpakeParticipantIds,
+        attempt: PakeAttempt = attemptFor(0x11),
         code: String = "7KQF2XPD",
     ): ModpJpakeSession {
         val chars = code.toCharArray()
         try {
-            return ModpJpakeSession(role, ids, secureSessionId, controlSessionId, chars)
+            return ModpJpakeSession(role, attempt, ids, secureSessionId, controlSessionId, chars)
         } finally {
             chars.fill('\u0000')
         }
     }
 
+    /**
+     * One ledger attempt. Both sessions of a pair share it, because in production the responder
+     * learns the identifier from the initiator's attempt-start record rather than inventing one.
+     */
+    private fun attemptFor(seed: Int): PakeAttempt {
+        val ledger = PakeAttemptLedger(ByteArray(16) { seed.toByte() })
+        return requireNotNull(ledger.beginAttempt(SecureEntropy { destination -> destination.fill(seed.toByte()) }))
+    }
+
     private fun newPair(contextByte: Int = 0x11): Pair<ModpJpakeSession, ModpJpakeSession> {
         val ids = idsFor(contextByte)
-        return session(SecurePeerRole.INITIATOR, ids) to session(SecurePeerRole.RESPONDER, ids)
+        val attempt = attemptFor(contextByte)
+        return session(SecurePeerRole.INITIATOR, ids, attempt) to session(SecurePeerRole.RESPONDER, ids, attempt)
     }
 
     private fun advanceToConfirmation(initiator: ModpJpakeSession, responder: ModpJpakeSession) {
@@ -574,6 +590,9 @@ public class ModpJpakeSessionTest {
         secureSessionId: SessionId? = null,
         controlSessionId: String? = null,
         suite: PairingAuthenticationCapability? = null,
+        attemptId: PakeAttemptId? = null,
+        attemptOrdinal: Int? = null,
+        codeInstance: ByteArray? = null,
     ): ByteArray {
         val original = decode(frame)
         val message = JpakeMessage(
@@ -584,6 +603,9 @@ public class ModpJpakeSessionTest {
             secureSessionId = secureSessionId ?: original.secureSessionId,
             controlSessionId = controlSessionId ?: original.controlSessionId,
             participantId = participantId ?: original.participantId,
+            attemptId = attemptId ?: original.attemptId,
+            attemptOrdinal = attemptOrdinal ?: original.attemptOrdinal,
+            codeInstanceId = codeInstance ?: original.codeInstanceBytes(),
             body = original.body,
         )
         return requireNotNull(JpakeMessageCodec.encode(message))
