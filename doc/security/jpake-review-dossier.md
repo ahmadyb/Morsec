@@ -686,3 +686,7 @@ describes what is built; it is not a security claim and it is not an approval.
 
 Part B is incomplete. The composition is experimental, project-defined and not independently
 cryptographically reviewed; the owner accepted that risk on 2026-10-19.
+
+The rows above describe commit `54d118b`, whose Android CI run `39552371341` is green: 3,015 JVM
+tests and 57 API 23 instrumentation tests, 0 failures and 0 skips, 0 lint errors. Passing tests
+describe what the code does; they are not evidence that the construction is secure.

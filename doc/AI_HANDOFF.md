@@ -235,6 +235,14 @@ concurrent exchanges).
 files may name MPS3, and nothing else outside the codec may. It still asserts that no coordinator,
 state machine, approval path or UI references J-PAKE.
 
+Exact-SHA evidence for this slice: `54d118b` / run `39552371341`, green — 3,015 JVM tests
+(0 failed, 0 skipped, 187 reports; `:transport-lan` 272), 57 API 23 instrumentation tests
+(0 failures), 0 lint errors with 48 warnings, Room exports v1/v2 unchanged, `app-debug.apk`
+32.28 MiB. The preceding run on `b969024` failed with two defects that were in the *tests*, not
+the adapter: the hostile-vector helper encoded an all-zero element that the codec correctly
+refuses to write, and `BigInteger.TWO` (a Java 9 addition) threw `NoSuchFieldError` on API 23.
+Both are fixed; out-of-range integers are now byte-patched into an honest frame instead.
+
 Not yet implemented, and therefore not claimed: coordinator wiring, the coordinator-level attempt
 limiter, the state-machine evidence that would let a validated exchange become approval, the
 removal of the SAS production path, and any payload activation. Part B is **incomplete**.
