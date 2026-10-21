@@ -2075,3 +2075,28 @@ The single generic send/receive path is intact and is the right shape: there is 
 `getOutputStream()`, one `getInputStream()`, one `send` and one `receive`, and
 `CONTROL_RECORD_TYPES = {PING, PONG, SESSION_CLOSE}` is checked before the deadline is armed. No
 per-type stream implementation exists to duplicate.
+
+## J-PAKE attempt identity slice: implemented and green, coordinator not yet wired
+
+Run `39680845579` on `622ecaacc8fe81e243a0af2ed849bfc943ed7dd2` is green: 3,061 JVM tests, 0
+failed, 0 skipped; 57 API 23 instrumentation tests, 0 failures; 0 lint errors; `app-debug.apk`
+32.29 MiB. Full record, including the two defects that execution found and the six commits that
+produced the slice, is in `doc/security/jpake-attempt-slice-evidence.md`.
+
+What exists now: `PakeAttemptId`/`PakeAttempt`/`PakeAttemptLedger` (three full exchanges per code,
+charged only for failures attributable to received input), the MPS4 attempt-start and MPA1
+approval records, MPS3 schema 2 with attempt id, ordinal and code instance in every frame, and
+`AuthenticatedControlAuthority` with its nested control channel.
+
+What does not exist yet, and is the next slice: the coordinator still offers SAS and still calls
+`select` rather than `selectRequired`; `SecurePairingRunResult.Authenticated` does not carry an
+authority; no end-to-end hostile test runs at the coordinator level or on API 23. The SAS removal
+must land atomically with the PAKE path becoming mandatory — no intermediate commit where SAS is
+gone but the PAKE path cannot complete, and none where the PAKE path is wired with an SAS fallback.
+
+Two hazards this slice proved by executing, both invisible to reading:
+
+- A codec must size a payload from what it writes, never from a header constant that already counts
+  the length prefix. `PakeRecordFormat.encode` left four zero bytes after every END tag.
+- A type that wipes a buffer in `finally` must copy first. `PakeAttemptId` stored the caller's
+  array, so `generate` returned sixteen zero bytes and every attempt shared one identity.
