@@ -31,7 +31,16 @@ package app.morsecode.core.transfer.session
 import java.security.MessageDigest
 
 /** A single-use identifier for one full PAKE exchange. */
-public class PakeAttemptId private constructor(private val value: ByteArray) {
+public class PakeAttemptId private constructor(value: ByteArray) {
+
+    /**
+     * A private copy, taken before anything else can touch the caller's buffer.
+     *
+     * Storing the caller's array directly made [generate]'s wipe erase the identifier it had just
+     * produced: every attempt then carried sixteen zero bytes, which is the same identifier for
+     * every attempt and an authentication context that no longer changes between them.
+     */
+    private val value: ByteArray = value.copyOf()
 
     init {
         require(value.size == BYTE_COUNT) { "an attempt id is exactly $BYTE_COUNT bytes" }
@@ -69,7 +78,7 @@ public class PakeAttemptId private constructor(private val value: ByteArray) {
             return try {
                 PakeAttemptId(bytes)
             } finally {
-                // The constructor copies; the local array must not outlive this call.
+                // The constructor copies first; the local array must not outlive this call.
                 bytes.fill(0)
             }
         }

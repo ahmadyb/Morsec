@@ -123,6 +123,8 @@ public class PakeAttemptLedgerTest {
         val id = PakeAttemptId.generate(entropy())
         assertEquals(PakeAttemptId.BYTE_COUNT, id.bytes().size)
         assertEquals(PakeAttemptId.BYTE_COUNT * 2, id.hex().length)
+        // Generation wipes its scratch buffer; the identifier must not be what that wipe left behind.
+        assertNotEquals("a generated identifier must carry entropy", "0".repeat(32), id.hex())
         assertNull("a short identifier must be refused", PakeAttemptId.fromBytes(ByteArray(15)))
         assertNull(PakeAttemptId.fromBytes(ByteArray(17)))
         assertEquals("PakeAttemptId([redacted])", id.toString())
