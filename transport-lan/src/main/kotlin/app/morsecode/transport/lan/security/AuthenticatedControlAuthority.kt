@@ -103,7 +103,7 @@ internal class AuthenticatedControlAuthority private constructor(
     fun claim(): AuthenticatedControlChannel? {
         if (closed.get()) return null
         if (!claimed.compareAndSet(false, true)) return null
-        return AuthenticatedControlChannel(
+        return AuthenticatedControlChannel.create(
             channel = channel,
             recordLayer = recordLayer,
             controlSession = controlSession,
@@ -136,6 +136,11 @@ internal class AuthenticatedControlAuthority private constructor(
      * Nested inside the authority, with a private constructor, so the only way to hold one is to have
      * claimed an [AuthenticatedControlAuthority]. The type is deliberately narrow -- it carries what
      * the control-record exchange needs and names no payload capability.
+     *
+     * Kotlin does not let an outer class reach a nested class's private constructor, so construction
+     * goes through [create], which is confined to this module. That is the same reachability an
+     * `internal` constructor would have, with the constructor itself left private -- which is what the
+     * unit test asserts by reflection, and what a reader checking "can anyone mint this?" looks for.
      */
     internal class AuthenticatedControlChannel private constructor(
         val channel: Closeable,
@@ -144,6 +149,20 @@ internal class AuthenticatedControlAuthority private constructor(
         val expiresAtElapsedMillis: Long,
     ) {
         override fun toString(): String = "AuthenticatedControlChannel(ids=[redacted])"
+
+        internal companion object {
+            fun create(
+                channel: Closeable,
+                recordLayer: SecureRecordLayer,
+                controlSession: NegotiatedSession,
+                expiresAtElapsedMillis: Long,
+            ): AuthenticatedControlChannel = AuthenticatedControlChannel(
+                channel = channel,
+                recordLayer = recordLayer,
+                controlSession = controlSession,
+                expiresAtElapsedMillis = expiresAtElapsedMillis,
+            )
+        }
     }
 
     companion object {

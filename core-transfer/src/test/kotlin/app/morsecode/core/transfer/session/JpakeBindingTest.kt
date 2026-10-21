@@ -63,7 +63,7 @@ public class JpakeBindingTest {
         codeInstance: ByteArray = ByteArray(16) { 0x77 },
         attemptId: PakeAttemptId = attempt(),
         attemptOrdinal: Int = 1,
-        attemptStartDigest: ByteArray = ByteArray(32) { 0x88 },
+        attemptStartDigest: ByteArray = ByteArray(32) { 0x88.toByte() },
         suite: PairingAuthenticationCapability = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
     ): JpakeBindingInputs = JpakeBindingInputs(
         channelBinding = channelBinding,
@@ -199,7 +199,7 @@ public class JpakeBindingTest {
         assertNotEquals(base.initiator, otherOrdinal.initiator)
 
         val otherStart = JpakeBinding.participantIds(
-            JpakeBinding.authenticationContext(inputs(attemptStartDigest = ByteArray(32) { 0x99 })),
+            JpakeBinding.authenticationContext(inputs(attemptStartDigest = ByteArray(32) { 0x99.toByte() })),
         )
         assertNotEquals(base.initiator, otherStart.initiator)
     }
