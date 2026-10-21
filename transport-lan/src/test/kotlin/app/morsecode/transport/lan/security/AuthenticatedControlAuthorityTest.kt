@@ -232,6 +232,9 @@ internal class AuthenticatedControlAuthorityTest {
 
     private fun fixture(): Fixture = buildFixture()
 
+    /** A fixture nobody shares, for the one test that settles the attempt. */
+    private fun isolatedFixture(): Fixture = buildFixture()
+
     private fun buildFixture(): Fixture {
         val ids = JpakeBinding.participantIds(ByteArray(32) { 0x11 })
         val attempt = requireNotNull(
