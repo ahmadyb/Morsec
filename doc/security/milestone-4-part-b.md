@@ -6,14 +6,21 @@ it does not provide file transfer, a user-facing pairing flow, trusted-device st
 product-ready LAN feature. `CURRENT_MILESTONE` stays `2`, `TRANSFER_ENGINE` remains gated,
 and payload/resume capabilities are absent after authentication.
 
-**Status of the proposed J-PAKE replacement (2026-10-19).** No J-PAKE, MPS3 or channel-binding
-code exists in production; the feasibility harness is confined to `androidTest`. Part B remains
-externally blocked pending a qualified independent cryptographic review. The open requirements
-that review must settle — authentication-suite negotiation, round-one replay binding, fixed-width
-encodings, erasure limits, and independent conformance evidence — are recorded in
-[`jpake-review-errata-2026-10-19.md`](jpake-review-errata-2026-10-19.md), which is AI-generated
-technical input and **not** an approval. The protocol-status correction in that document
-supersedes the `MPS1`/`MST1` statements previously carried here.
+**Status of the J-PAKE replacement (2026-10-21).** Experimental J-PAKE/MPS3 code now exists in
+production source: suite negotiation (`PairingAuthenticationPolicy`), the MPS3 codec
+(`JpakeMessageCodec`), channel-bound identifiers (`JpakeBinding`) and the entered-code contract in
+`:core-transfer`, plus a MODP round adapter (`ModpJpakeSession`, `ModpJpakeFrames`) in
+`:transport-lan`. **None of it is wired.** No coordinator, state machine, approval or payload path
+can reach it, the SAS production path is still in place, and the payload gate still refuses
+unconditionally.
+
+The owner waived the external-review gate for this personal experimental application on 2026-10-19
+([`owner-risk-waiver-2026-10-19.md`](owner-risk-waiver-2026-10-19.md)). The composition is
+experimental, project-defined and **not independently cryptographically reviewed**; the waiver
+permits implementation and establishes no security. The open requirements recorded in
+[`jpake-review-errata-2026-10-19.md`](jpake-review-errata-2026-10-19.md) remain AI-generated
+technical input and **not** an approval. That document's protocol-status correction supersedes the
+`MPS1`/`MST1` statements previously carried here. Part B is **incomplete**.
 
 ## Scope and module placement
 

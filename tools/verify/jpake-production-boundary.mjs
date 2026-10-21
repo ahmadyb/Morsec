@@ -45,10 +45,20 @@ const AUTHORIZED_JPAKE_FILES = new Set([
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeBinding.kt',
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeWireFormat.kt',
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/SecurePairingWireV2.kt',
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeFrames.kt',
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeSession.kt',
 ]);
 
+/**
+ * Files inside the J-PAKE implementation that may name the MPS3 format.
+ *
+ * Only the codec defines the magic; the adapter names the format because it produces and consumes
+ * it. Nothing outside these files may mention it, which is what the check below enforces.
+ */
 const AUTHORIZED_MPS3_FILES = new Set([
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/JpakeWireFormat.kt',
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeFrames.kt',
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeSession.kt',
 ]);
 
 /* ------------------------------------------------------------------ *
@@ -234,7 +244,7 @@ function verify() {
   const mps3 = filesMentioningToken(production, 'MPS3')
     .concat(filesMentioningToken(production, 'MST3'))
     .filter((path) => !AUTHORIZED_MPS3_FILES.has(path));
-  check('the MPS3 token exists only in the framing file', mps3.length === 0, mps3.join(', '));
+  check('the MPS3 format is named only inside the J-PAKE implementation', mps3.length === 0, mps3.join(', '));
 
   // 3. The authorized files must stay inert: no persistence, no logging, no payload path.
   const offenders = [];

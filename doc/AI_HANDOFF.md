@@ -195,16 +195,49 @@ Landed in this group so far, all pure JVM in `:core-transfer` and covered by JVM
   generated from uniform bytes with no modulo step, normalised on input, redacted in `toString`,
   clearable; `EnteredCodeAttemptBudget` allows three entries and spends the code on the fourth.
 
-**Blocked before the round driver.** BC 1.86 gives no public way to rebuild an
+**The EC blocker, and how it was resolved.** BC 1.86 gives no public way to rebuild an
 `ECJPAKERound1Payload` or `ECJPAKERound2Payload` from received bytes: `ECSchnorrZKP`, which both
 constructors require, has a package-private constructor and no decoder, and the package holds no
-codec. The in-memory feasibility harness never crossed that boundary, so it did not prove network
-deserialisation. See `security/bc-ecjpake-reconstruction-audit-2026-10-20.md`. The coordinator must
-not be wired until one of the three documented approaches is chosen and implemented.
+codec. That finding stands and still rules out an EC round driver built on public API. It was
+measured before any driver existed, in `security/bc-ecjpake-reconstruction-audit-2026-10-20.md`.
 
-Not yet implemented, and therefore not claimed: the Bouncy Castle round driver, the coordinator
-wiring that replaces the SAS approval with PAKE-then-approval, API 23 hostile-path tests, and the
-removal of the SAS production path. Part B is **incomplete**.
+The resolution was a variant change, not a workaround: the owner selected **MODP J-PAKE over
+`JPAKEPrimeOrderGroups.NIST_3072`**, whose round payloads are plain public constructors over
+`BigInteger`, so every round can be rebuilt from received bytes. The EC variant is not built.
+
+**MODP round adapter (landed, deliberately unwired).** Two files in
+`transport-lan/.../security/jpake/`:
+
+- `ModpJpakeFrames` — the only place library integers become wire bytes and back. Elements are
+  exactly 384 bytes in `[2, p)`, scalars exactly 32 bytes in `[0, q)`, and the round-three tag is
+  exactly 32 bytes of two's complement. Encoders refuse what the decoders refuse, so the project
+  cannot emit a value its own peer must reject. Negative and oversize values are refusals, never
+  truncations.
+- `ModpJpakeSession` — one participant per session, three rounds, serialized MPS3 frames only.
+  Every received frame is checked for framing, suite, profile, round, role, session ids and
+  **expected partner participant id before a single integer is decoded or handed to the library**.
+  Refusals are coarse (`CONTEXT_MISMATCH`, `FRAME_INVALID`, `CRYPTO_FAILED`, `STATE_INVALID`,
+  `CLOSED`), every refusal closes the session, and `validate {}` collapses every library refusal to
+  one value so a remote peer cannot distinguish a wrong identifier from a bad proof. The library's
+  internal state is asserted after each call, so a dependency change that alters the state machine
+  fails closed rather than silently proceeding. Keying material is private, never returned, never
+  logged, and dropped on `close()`; nothing derives payload keys and nothing mints authority.
+
+Covered by 27 JVM tests in `transport-lan/.../security/jpake/ModpJpakeSessionTest.kt` (honest
+exchange both roles, wrong code, reflection, cross-session, cross-channel, participant-id
+substitution, legacy suite, unknown profile, element `0/1/p/p+1`, scalar `q`, in-range substituted
+element reaching the library, truncated/oversized/trailing frames, out-of-order and replayed rounds
+1/2/3, idempotent close, redaction, no key accessor, and the fixed-width conversions) and by
+`ModpJpakeSessionApi23Test` in `androidTest` (the same hostile paths against the real APK, plus four
+concurrent exchanges).
+
+`tools/verify/jpake-production-boundary.mjs` was extended from three files to five: the two adapter
+files may name MPS3, and nothing else outside the codec may. It still asserts that no coordinator,
+state machine, approval path or UI references J-PAKE.
+
+Not yet implemented, and therefore not claimed: coordinator wiring, the coordinator-level attempt
+limiter, the state-machine evidence that would let a validated exchange become approval, the
+removal of the SAS production path, and any payload activation. Part B is **incomplete**.
 
 ### Milestone 4 Part B — J-PAKE external review status (2026-10-19)
 

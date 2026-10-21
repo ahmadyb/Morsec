@@ -71,6 +71,13 @@ selected-peer control session. `:transport-nearby`, `:webshare-server` and `:med
 configured modules without production sources, so CI reports `NO-SOURCE` for their compile
 tasks.
 
+The experimental MODP J-PAKE round driver lives in
+`transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/`. It consumes and
+produces serialized MPS3 frames only, refuses a frame whose suite, profile, round, role, session
+identifiers or expected participant identifier do not match, and mints no authority. It is
+**not referenced by any coordinator, state machine, approval path or UI**: nothing in the running
+application can reach it. See [`security/milestone-4-part-b.md`](security/milestone-4-part-b.md).
+
 ### Milestone 4 Part B acceptance boundary
 
 The Part B foundation adds canonical transcript/SAS code, a deterministic exact-session

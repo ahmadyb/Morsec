@@ -113,6 +113,13 @@ single use.
 
 ## 6. Bouncy Castle 1.86 implementation details (read from source)
 
+!!! note "Variant selected: MODP, 2026-10-20"
+    The owner selected the **MODP** family (`JPAKEParticipant` over `NIST_3072`) after the audit in
+    [`bc-ecjpake-reconstruction-audit-2026-10-20.md`](bc-ecjpake-reconstruction-audit-2026-10-20.md)
+    showed the EC payloads cannot be rebuilt from received bytes through public API. The table
+    below is retained because the comparison is still the useful part; the EC column is **not**
+    what the code implements. Nothing here is a claim that either variant is secure.
+
 Two independent J-PAKE families ship in bc-java's `core` module, i.e. in **bcprov**, which is
 already locked and packaged. **No new artifact is required.**
 
@@ -659,3 +666,23 @@ established while authorship is not.
     | fresh discovery required; new code generated; attempt counter reset only by
     | a new pairing, never by re-displaying the same code
 ```
+
+## 18. Implementation status at 2026-10-21
+
+Recorded so a reviewer reads the code that exists rather than the proposal alone. This section
+describes what is built; it is not a security claim and it is not an approval.
+
+| Component | State | Notes |
+| --- | --- | --- |
+| Suite negotiation (`SecurePairingSelectionV2`, `PairingAuthenticationPolicy`) | built, tested | Equality, not ordinal minimum. `JPAKE_MODP3072_ENTERED_CODE_V1` (wire id 2) is the only accepted suite. |
+| MPS3 framing (`JpakeMessageCodec`) | built, tested | 2048-byte bound; fixed widths; 384-byte elements, 32-byte scalars, 32-byte two's-complement tag. |
+| Channel-bound identifiers (`JpakeBinding`) | built, tested | Context digest over the binding inputs; role-specific ids. |
+| Entered-code contract (`EnteredPairingCode`, `EnteredCodeAttemptBudget`) | built, tested | Eight Crockford base32 symbols, three attempts. |
+| MODP round adapter (`ModpJpakeSession`, `ModpJpakeFrames`) | built, tested on JVM and API 23 | **Not wired to anything.** Refuses before the library on identity, suite, profile, round, role, session ids and integer range. |
+| Coordinator / state machine / approval integration | **not built** | No path from a validated exchange to authority exists. |
+| SAS production path removal | **not done** | The legacy path is still present. |
+| Payload and key derivation from PAKE material | **not built** | The adapter derives no payload keys. |
+| Attempt limiter wiring at the secure-session level | **not built** | Only the pure budget type exists. |
+
+Part B is incomplete. The composition is experimental, project-defined and not independently
+cryptographically reviewed; the owner accepted that risk on 2026-10-19.
