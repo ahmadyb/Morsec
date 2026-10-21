@@ -29,6 +29,7 @@ import app.morsecode.core.transfer.session.SessionPeerProfile
 import app.morsecode.core.transfer.session.SessionSecurityState
 import app.morsecode.transport.lan.security.jpake.ModpJpakeSession
 import java.io.Closeable
+import java.lang.reflect.Constructor
 import java.lang.reflect.Modifier
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -170,17 +171,37 @@ internal class AuthenticatedControlAuthorityTest {
 
     @Test
     fun theAuthorityHasNoPublicConstructor() {
-        val constructors = AuthenticatedControlAuthority::class.java.declaredConstructors
-        assertTrue("the type must declare a constructor", constructors.isNotEmpty())
-        assertTrue(
-            "every constructor must be private, or a caller can mint authority",
-            constructors.all { Modifier.isPrivate(it.modifiers) },
+        assertPrivateOrCompilerBridge(
+            AuthenticatedControlAuthority::class.java.declaredConstructors,
+            "the authority",
         )
-        val channelConstructors =
-            AuthenticatedControlAuthority.AuthenticatedControlChannel::class.java.declaredConstructors
+        assertPrivateOrCompilerBridge(
+            AuthenticatedControlAuthority.AuthenticatedControlChannel::class.java.declaredConstructors,
+            "the claimed channel",
+        )
+    }
+
+    /**
+     * Pins construction to the private constructor and the compiler's access bridge.
+     *
+     * Kotlin reaches a `private` constructor from a companion object across class files through a
+     * generated bridge, because class files without nestmates cannot `invokespecial` into another
+     * class. That bridge is synthetic, carries a compiler marker parameter, and cannot be named from
+     * Kotlin source -- so the only source-level way to hold either type stays [AuthenticatedControlAuthority.issue].
+     * Anything else -- a public constructor, or a synthetic one without the marker -- would be a
+     * caller-shaped mint and fails here.
+     */
+    private fun assertPrivateOrCompilerBridge(constructors: Array<Constructor<*>>, what: String) {
+        assertTrue("$what must declare a constructor", constructors.isNotEmpty())
+        val exposed = constructors.filterNot { Modifier.isPrivate(it.modifiers) }
+        val described = exposed.joinToString { ctor ->
+            "synthetic=${ctor.isSynthetic} " +
+                "params=${ctor.parameterTypes.joinToString(",") { it.simpleName }}"
+        }
+        assertTrue("$what exposes a non-synthetic constructor: $described", exposed.all { it.isSynthetic })
         assertTrue(
-            "the claimed channel must not be constructible by a caller",
-            channelConstructors.isNotEmpty() && channelConstructors.all { Modifier.isPrivate(it.modifiers) },
+            "$what exposes a synthetic constructor without the compiler marker: $described",
+            exposed.all { ctor -> ctor.parameterTypes.any { it.simpleName.endsWith("ConstructorMarker") } },
         )
     }
 

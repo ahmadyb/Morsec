@@ -74,7 +74,7 @@ public class PakeRecordsTest {
             controlSessionId: String = record.controlSessionId,
             suite: PairingAuthenticationCapability = record.suite,
             profile: JpakeCurveProfile = record.profile,
-            peerRole: SecurePeerRole = SecurePeerRole.INITIATOR,
+            peerRole: SecurePeerRole = record.role,
         ): Boolean = record.bindsTo(
             expectedAttemptId = attemptId,
             expectedOrdinal = ordinal,
@@ -103,7 +103,7 @@ public class PakeRecordsTest {
         )
         assertFalse(
             "wrong peer role: a reflected record names our own role",
-            binds(peerRole = SecurePeerRole.RESPONDER),
+            binds(peerRole = record.role.opposite),
         )
     }
 
@@ -131,8 +131,10 @@ public class PakeRecordsTest {
         lying[3] = 0x7F
         assertEquals(PakeRecordReject.FRAME_TOO_SHORT, rejection(PakeApprovalCodec.decode(lying)))
 
+        // 257 > the 256-byte record bound, so this is refused on the declared length itself.
         val oversized = frame.copyOf()
-        oversized[3] = 0xFF.toByte()
+        oversized[2] = 0x01
+        oversized[3] = 0x01
         assertEquals(PakeRecordReject.FRAME_TOO_LARGE, rejection(PakeApprovalCodec.decode(oversized)))
     }
 
@@ -299,12 +301,14 @@ public class PakeRecordsTest {
         fields: List<Pair<Int, ByteArray>>,
         terminate: Boolean = true,
     ): ByteArray {
-        var size = 4 + 4 + 1
+        // Magic and version only: the 4-byte length prefix is prepended afterwards and is not part
+        // of its own count.
+        var size = 4 + 1
         for ((_, value) in fields) size += 4 + value.size
         if (terminate) size += 4
         val payload = java.nio.ByteBuffer.allocate(size).order(java.nio.ByteOrder.BIG_ENDIAN)
         payload.put(magic)
-        payload.put(1)
+        payload.put(1.toByte())
         for ((tag, value) in fields) {
             payload.putShort(tag.toShort())
             payload.putShort(value.size.toShort())

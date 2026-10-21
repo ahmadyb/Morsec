@@ -145,7 +145,15 @@ public class PakeAttemptLedgerTest {
 
     private fun newLedger(): PakeAttemptLedger = PakeAttemptLedger(ByteArray(16) { 0x5A })
 
+    /**
+     * A stand-in entropy source that yields a different block on every draw, the way a real one
+     * does. A source that repeated itself would make the distinctness assertions look meaningful
+     * while proving nothing: two draws would be equal no matter what the ledger did with them.
+     */
     private fun entropy(): SecureEntropy = SecureEntropy { destination ->
-        destination.indices.forEach { destination[it] = (it * 7 + 1).toByte() }
+        val draw = draws++
+        destination.indices.forEach { destination[it] = (it * 7 + 1 + draw * 31).toByte() }
     }
+
+    private var draws = 0
 }

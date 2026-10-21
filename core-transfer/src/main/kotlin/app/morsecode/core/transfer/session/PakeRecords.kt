@@ -334,7 +334,11 @@ private object PakeRecordFormat {
     }
 
     fun encode(magic: ByteArray, fields: List<Pair<Int, ByteArray>>): ByteArray {
-        var size = HEADER_BYTES + TLV_OVERHEAD // END tag
+        // The declared length covers the payload only: magic, version, fields and the END tag. The
+        // 4-byte prefix that carries it is not part of its own count. Sizing this from HEADER_BYTES
+        // (which includes the prefix) used to leave four zero bytes after the END tag, and a decoder
+        // that stops at END then saw a well-formed frame with trailing garbage.
+        var size = magic.size + 1 + TLV_OVERHEAD
         for ((_, value) in fields) size += TLV_OVERHEAD + value.size
         require(size <= MAX_RECORD_BYTES) { "PAKE control record exceeds its bound" }
         val body = ByteBuffer.allocate(size).order(ByteOrder.BIG_ENDIAN)
