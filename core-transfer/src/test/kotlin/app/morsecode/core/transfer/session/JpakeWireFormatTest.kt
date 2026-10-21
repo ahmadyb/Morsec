@@ -26,6 +26,9 @@ public class JpakeWireFormatTest {
     private val tagControl = 0x0006
     private val tagParticipant = 0x0007
     private val tagCount = 0x0008
+    private val tagAttempt = 0x0009
+    private val tagOrdinal = 0x000A
+    private val tagCodeInstance = 0x000B
     private val tagGx1 = 0x0010
     private val tagGx2 = 0x0011
     private val tagV1 = 0x0012
@@ -53,6 +56,9 @@ public class JpakeWireFormatTest {
         control: ByteArray = "ctl-session".toByteArray(Charsets.UTF_8),
         participant: ByteArray = "morsec1-i-0123456789abcdef0123456789abcdef".toByteArray(Charsets.UTF_8),
         count: ByteArray = byteArrayOf(6),
+        attempt: ByteArray = ByteArray(16) { 0x11 },
+        ordinal: ByteArray = byteArrayOf(1),
+        codeInstance: ByteArray = ByteArray(16) { 0x42 },
         body: List<Pair<Int, ByteArray>> = listOf(
             tagGx1 to element(0x22),
             tagGx2 to element(0x33),
@@ -63,7 +69,8 @@ public class JpakeWireFormatTest {
         ),
         tail: ByteArray = ByteArray(0),
     ): ByteArray {
-        var frame = byteArrayOf(0x4D, 0x50, 0x53, 0x33, 0x01)
+        // Schema version 2: every frame names the attempt it belongs to.
+        var frame = byteArrayOf(0x4D, 0x50, 0x53, 0x33, 0x02)
         frame += tlv(tagSuite, suite)
         frame += tlv(tagProfile, profile)
         frame += tlv(tagRound, round)
@@ -72,6 +79,9 @@ public class JpakeWireFormatTest {
         frame += tlv(tagControl, control)
         frame += tlv(tagParticipant, participant)
         frame += tlv(tagCount, count)
+        frame += tlv(tagAttempt, attempt)
+        frame += tlv(tagOrdinal, ordinal)
+        frame += tlv(tagCodeInstance, codeInstance)
         for ((tag, value) in body) frame += tlv(tag, value)
         frame += tlv(tagEnd, ByteArray(0))
         return frame + tail
@@ -163,7 +173,7 @@ public class JpakeWireFormatTest {
         badMagic[0] = 0x00
         assertEquals(JpakeWireReject.BAD_MAGIC, reason(decodePayload(badMagic)))
         val badVersion = payload()
-        badVersion[4] = 0x02
+        badVersion[4] = 0x03 // schema 3 does not exist yet
         assertEquals(JpakeWireReject.BAD_VERSION, reason(decodePayload(badVersion)))
     }
 
@@ -175,9 +185,18 @@ public class JpakeWireFormatTest {
         val duplicate = frame.copyOfRange(0, 11) + frame.copyOfRange(5, 11) + frame.copyOfRange(11, frame.size)
         assertEquals(JpakeWireReject.DUPLICATE_FIELD, reason(decodePayload(duplicate)))
 
-        val unordered = frame.copyOf()
-        unordered[5] = 0x00
-        unordered[6] = 0x09 // becomes tag 0x0009, which precedes nothing and is followed by 0x0002
+        // Round-one elements sent as gx1, v1, gx2: every tag is defined once, but the third steps
+        // backwards past the second.
+        val unordered = payload(
+            body = listOf(
+                tagGx1 to element(0x22),
+                tagV1 to element(0x22),
+                tagGx2 to element(0x33),
+                tagR1 to scalar(),
+                tagV2 to element(0x33),
+                tagR2 to scalar(),
+            ),
+        )
         assertEquals(JpakeWireReject.FIELD_ORDER_NOT_CANONICAL, reason(decodePayload(unordered)))
     }
 
