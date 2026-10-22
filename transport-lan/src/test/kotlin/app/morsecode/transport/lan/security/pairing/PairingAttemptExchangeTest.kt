@@ -255,27 +255,30 @@ public class PairingAttemptExchangeTest {
         val interaction = TestInteraction(fixture.board)
         interaction.onPublish = {
             val canceller = Thread {
-                Thread.sleep(400L)
+                Thread.sleep(300L)
                 interaction.cancelled = true
             }
             canceller.isDaemon = true
             canceller.start()
         }
+        // The peer goes quiet after round one, so the exchange is certainly parked in a read when
+        // the cancellation lands. Timing against a peer that might finish first would make this
+        // test measure how fast the machine is.
+        val peer = ScriptedResponder(fixture.responderIo, fixture, ScriptedBehaviour.SilentAtRound(2))
 
-        val (fromInitiator, fromResponder) = runPair(
-            fixture.initiator(interaction, ExchangeFixture.SHORT),
-            fixture.responder(TestInteraction(fixture.board), ExchangeFixture.SHORT),
+        val result = failed(
+            runAgainstScripted(
+                exchange = fixture.initiator(interaction, ExchangeFixture.SHORT),
+                scripted = { peer.run() },
+            ),
         )
 
-        val initiatorResult = failed(fromInitiator)
-        assertEquals(PairingExchangeFailure.CANCELLED, initiatorResult.reason)
-        assertEquals("a local stop never spends the budget", 0, initiatorResult.attemptsCharged)
-        val responderResult = failed(fromResponder)
         assertEquals(
-            "the peer sees a stalled exchange, never a cancellation it can attribute",
-            0,
-            responderResult.attemptsCharged,
+            "a cancellation is a typed outcome, not a deadline",
+            PairingExchangeFailure.CANCELLED,
+            result.reason,
         )
+        assertEquals("a local stop never spends the budget", 0, result.attemptsCharged)
     }
 
     @Test
