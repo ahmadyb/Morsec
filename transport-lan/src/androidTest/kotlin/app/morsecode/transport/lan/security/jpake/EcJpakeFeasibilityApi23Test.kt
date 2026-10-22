@@ -21,7 +21,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Isolated EC J-PAKE feasibility harness for API 23.
+ * Isolated EC J-PAKE feasibility harness for API 23 -- **historical, not the implemented profile**.
+ *
+ * The implemented profile is MODP J-PAKE over `JPAKEPrimeOrderGroups.NIST_3072`; no production
+ * code calls the `ecjpake` package. This harness is kept because it is the measured evidence that
+ * led to rejecting the EC variant, and because a future reader should not have to rediscover why.
  *
  * This test touches Bouncy Castle's `org.bouncycastle.crypto.agreement.ecjpake` classes and
  * nothing else. It deliberately does NOT construct a project pairing coordinator, does not

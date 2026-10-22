@@ -162,6 +162,12 @@ independently cryptographically reviewed. The owner explicitly accepted
 this risk on 2026-10-19.
 ```
 
+That is the owner's 2026-10-19 wording, quoted verbatim and never reworded. It names the
+*composition*, which is what the waiver accepts; the group family changed afterwards. The
+implemented profile is **BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072`** (owner decision,
+2026-10-20). EC P-256 is not implemented anywhere in this repository; the dossier, the external
+review request and the reconstruction audit retain EC material explicitly labelled historical.
+
 This permits the code to exist. It does not make the protocol secure, and the dossier's seventeen
 open questions remain unanswered.
 
@@ -261,9 +267,12 @@ PART B INCOMPLETE — EXTERNALLY BLOCKED
 ```
 
 The proposed replacement interaction (initiator displays an eight-symbol 40-bit code, responder enters
-it, both run EC J-PAKE over NIST P-256 with SHA-256 through Bouncy Castle 1.86, both confirm, both
-approve) exists only as a dossier and an `androidTest` feasibility harness. Production contains no
-J-PAKE, no MPS3 and no channel binding, enforced by `tools/verify/jpake-production-boundary.mjs`.
+it, both run J-PAKE through Bouncy Castle 1.86, both confirm, both approve) exists only as a dossier
+and an `androidTest` feasibility harness. Production contains no J-PAKE, no MPS3 and no channel
+binding, enforced by `tools/verify/jpake-production-boundary.mjs`.
+
+This section is a dated snapshot of 2026-10-19 and is kept as such. It named EC P-256 because that
+was the proposal that day; the implemented profile is MODP over `JPAKEPrimeOrderGroups.NIST_3072`.
 
 A non-authoritative, AI-generated technical analysis dated 2026-10-19 raised five unresolved
 requirements and found one documentation contradiction. Both are recorded in

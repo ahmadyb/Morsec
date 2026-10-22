@@ -1,4 +1,11 @@
-# BC 1.86 EC J-PAKE payload reconstruction audit
+# BC 1.86 EC J-PAKE payload reconstruction audit — historical, rejected variant
+
+> **Historical, and about a variant that is not implemented.** This audit explains why the EC
+> P-256 variant was rejected: its round payloads cannot be rebuilt from received bytes through
+> Bouncy Castle's public API. The implemented profile is **BC J-PAKE with
+> `JPAKEPrimeOrderGroups.NIST_3072`**, whose payload classes and `BigInteger[]` proof getters are
+> public. Nothing in this document describes shipped code, and nothing in it is a security claim
+> about either family.
 
 **Date:** 2026-10-20
 **Scope:** `org.bouncycastle:crypto` EC J-PAKE (`org.bouncycastle.crypto.agreement.ecjpake`)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Verify that experimental EC J-PAKE stays inside its authorized blast radius.
+ * Verify that experimental MODP J-PAKE stays inside its authorized blast radius.
  *
  * HISTORY. Until 2026-10-19 this verifier asserted the opposite of what it asserts now: that
  * J-PAKE appeared in *no* production source set, because the protocol was waiting for a qualified
@@ -83,7 +83,13 @@ const AUTHORIZED_MPS3_FILES = new Set([
  * proves the guard detects the thing it claims to detect.
  * ------------------------------------------------------------------ */
 
-/** Matches J-PAKE and EC J-PAKE in any casing, with or without the hyphen. */
+/**
+ * Matches J-PAKE in any casing, with or without the hyphen and with or without an `ec` prefix.
+ *
+ * The prefix is still matched on purpose. The implemented profile is MODP over
+ * `JPAKEPrimeOrderGroups.NIST_3072`, but a file that reintroduced `ECJPAKEParticipant` would be a
+ * new cryptographic surface, and this guard must see it rather than let it pass unmentioned.
+ */
 const JPAKE_TOKEN = /(?:ec)?j-?pake/i;
 
 function filesMentioningJpake(files) {

@@ -1,15 +1,16 @@
-# Owner risk waiver — experimental EC J-PAKE pairing
+# Owner risk waiver — experimental J-PAKE pairing
 
 **Date:** 2026-10-19
 **Applies to:** the experimental Part B pairing implementation on `arena/4d4c3195-morsec`
 **Supersedes:** the external-review acceptance gate for this feature only
+**Profile of record:** BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072` (selected 2026-10-20)
 
 ---
 
 ## The decision
 
 The owner of this repository waived the requirement for a qualified independent cryptographic
-review of the EC J-PAKE pairing design, for this personal experimental application. Implementation
+review of the J-PAKE pairing design, for this personal experimental application. Implementation
 is authorized on that basis.
 
 This waiver permits the code to exist. It does **not** establish that the code is secure, and it
@@ -23,8 +24,15 @@ independently cryptographically reviewed. The owner explicitly accepted
 this risk on 2026-10-19.
 ```
 
-This sentence is the accurate description of the LAN security feature and should be repeated
-wherever the feature is described to a user.
+This sentence is the owner's wording of 2026-10-19, preserved verbatim and quoted unchanged
+wherever the feature is described. Two things about it need stating so the quote is not misread:
+
+- It names the *composition* (a J-PAKE exchange bound to a TLS 1.3 channel), which is what the
+  waiver accepts. The risk accepted did not change when the group family did.
+- On 2026-10-19 the proposed group family was EC P-256. On 2026-10-20 the owner selected **MODP**
+  instead, and the implemented profile is BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072`.
+  EC P-256 is not the implemented profile; the dossier keeps that material as history and as the
+  rejected alternative.
 
 ## What is being accepted
 
@@ -44,10 +52,11 @@ wherever the feature is described to a user.
 4. **There is no security warranty.** The software is provided as-is. The owner accepts the
    consequences of running it, including the possibility that a peer on the same network obtains
    files or session authority it should not have.
-5. **No claim of formal conformance to RFC 8236.** The pinned Bouncy Castle implementation cites
-   Hao (eprint 2010/190) and NIST SP 800-56A Rev 3 §5.9.1. It does not claim RFC 8236, and this
-   project does not claim it either. Its behaviour is what it is; the name of a standard is not
-   being borrowed for it.
+5. **No claim of formal conformance to RFC 8236 or RFC 9261.** The pinned Bouncy Castle
+   implementation cites Hao (eprint 2010/190) and NIST SP 800-56A. It does not claim RFC 8236,
+   and this project does not claim it either. RFC 9266 (`tls-exporter`) and RFC 9261 Exported
+   Authenticators are separate mechanisms; naming one is not a claim about the other. Its
+   behaviour is what it is; the name of a standard is not being borrowed for it.
 6. **File payload remains disabled.** Pairing establishes a control session. It does not enable
    file transfer, chunks, resume, a transfer UI, a service, or any background execution. Those stay
    gated behind the existing milestone and feature flags, and enabling them requires their own

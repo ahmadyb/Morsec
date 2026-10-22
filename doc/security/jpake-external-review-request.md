@@ -1,4 +1,10 @@
-# Morsecode EC J-PAKE / TLS channel-binding security review
+# Morsecode J-PAKE / TLS channel-binding security review — EC-variant request (historical)
+
+> **Historical, superseded 2026-10-20.** This request was written when the proposed group family
+> was EC P-256. The implemented profile is **BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072`**.
+> The EC payloads cannot be rebuilt from received bytes through Bouncy Castle's public API, which
+> is why the variant changed; see `bc-ecjpake-reconstruction-audit-2026-10-20.md`. The questions
+> below remain useful reading, and none of them is answered or waived by this note.
 
 Repository: <https://github.com/ahmadyb/Morsec>
 
@@ -16,14 +22,16 @@ approval.
 
 ## Scope
 
-Review the proposed use of Bouncy Castle 1.86 EC J-PAKE over NIST P-256 inside an existing
-mutual-ephemeral TLS 1.3 channel on Android API 23+.
+Review the proposed use of Bouncy Castle 1.86 J-PAKE inside an existing mutual-ephemeral TLS 1.3
+channel on Android API 23+. This request as written specifies the EC P-256 variant; the
+implemented profile is MODP over `JPAKEPrimeOrderGroups.NIST_3072`, and the difference in group
+arithmetic does not change the interaction, the channel binding or any question below.
 
 The interaction is:
 
 1. Initiator generates and displays a random eight-symbol, 40-bit Crockford-style code.
 2. Responder enters that code.
-3. Both peers run EC J-PAKE.
+3. Both peers run the J-PAKE exchange (EC P-256 in this request; MODP NIST-3072 in the code).
 4. Both peers perform round-three confirmation.
 5. Both users explicitly confirm the intended peer/session.
 6. File payload remains unavailable until authentication completes.
@@ -47,15 +55,15 @@ or logged.
 Pinned dependency: `org.bouncycastle:bcprov-jdk18on:1.86`
 
 - API: `org.bouncycastle.crypto.agreement.ecjpake`
-- Curve: `ECJPAKECurves.NIST_P256`
+- Group: `ECJPAKECurves.NIST_P256` in this request; `JPAKEPrimeOrderGroups.NIST_3072` in the code.
 - Digest: SHA-256
 - Round-three confirmation is sent and validated in both directions.
 
 ## Required review decisions
 
-### 1. EC J-PAKE profile
+### 1. J-PAKE profile (EC P-256 in this request; MODP NIST-3072 in the code)
 
-Determine whether the pinned BC EC J-PAKE implementation and P-256 profile are suitable for this
+Determine whether the pinned BC J-PAKE implementation and the selected group are suitable for this
 use. Review:
 
 - Point validation

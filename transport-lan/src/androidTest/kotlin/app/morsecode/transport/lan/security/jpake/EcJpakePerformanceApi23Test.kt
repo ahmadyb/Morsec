@@ -16,6 +16,10 @@ import java.util.concurrent.TimeUnit
 /**
  * Bounded API 23 timing measurement for the pinned Bouncy Castle EC J-PAKE implementation.
  *
+ * **Historical, not the implemented profile.** The shipped exchange is MODP over
+ * `JPAKEPrimeOrderGroups.NIST_3072`, measured separately by `ModpJpakeMeasurementApi23Test`. These
+ * EC numbers are retained as the comparison that informed the variant choice.
+ *
  * This is a feasibility measurement, not a benchmark. The assertion is a deliberately
  * generous ceiling that would only trip on a catastrophic regression, so that the result is
  * reproducible on a loaded CI emulator. The interesting numbers are the logged medians and

@@ -159,9 +159,11 @@ public enum class PairingSelectionReject(public val wireReason: String) {
  * `SAS_25BIT_COMPARISON` is retained so a peer from the previous format can be *recognised* and
  * refused with a typed result. It is never selected by the production policy.
  *
- * `JPAKE_MODP3072_ENTERED_CODE_V1` is the experimental mechanism this milestone implements: EC
- * J-PAKE over NIST P-256 with SHA-256, with the code entered by a human and the exchange bound to
- * the TLS channel through derived participant identifiers.
+ * `JPAKE_MODP3072_ENTERED_CODE_V1` is the experimental mechanism this milestone implements:
+ * Bouncy Castle J-PAKE over `JPAKEPrimeOrderGroups.NIST_3072` with SHA-256, with the code entered by
+ * a human and the exchange bound to the TLS channel through derived participant identifiers. The
+ * EC P-256 variant explored in the review dossier is **not** the implemented profile; it is retained
+ * there as history and as a rejected alternative.
  */
 public enum class PairingAuthenticationCapability(public val wireId: Int) {
     NONE(0),

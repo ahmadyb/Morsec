@@ -6,6 +6,13 @@ implementation; see [`owner-risk-waiver-2026-10-19.md`](owner-risk-waiver-2026-1
 described here remains project-defined and unreviewed, and every question in §17 is still open. A
 qualified review is still wanted; it is no longer a precondition for the code existing.
 
+!!! warning "Profile of record: MODP, not EC"
+    The implemented profile is **BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072`**, selected by
+    the owner on 2026-10-20 and shipped in `ModpJpakeSession`. The EC P-256 variant appears
+    throughout this dossier because that is what was proposed first and measured first. Where EC
+    material appears it is **historical and comparative**: it is not the implemented profile and
+    must not be read as one. §6, §7, §14 and question 1 of §17 carry extra notes to that effect.
+
 The androidTest feasibility harness is retained, and production J-PAKE is confined by
 `tools/verify/jpake-production-boundary.mjs` to an explicit file list.
 
@@ -259,7 +266,12 @@ not a fixed constant. **No independent conformance vector source has been identi
 the implementation does not claim RFC 8236 conformance, RFC 8236's vectors are not applicable
 to it either.
 
-## 7. Proposed framing (candidate, not agreed)
+## 7. Proposed framing (candidate, not agreed) — EC variant, historical
+
+> **Historical.** This section proposed the framing around the EC P-256 variant. The implemented
+> format is MPS3 schema 2: fixed-width 384-byte group elements and 32-byte scalars, group
+> identifier `modp_3072`, and attempt id, ordinal and code instance in every frame. Read the width
+> table below as the EC proposal, not as the wire format that ships.
 
 Recommend **MPS3** as a new security format rather than a sub-protocol, reusing the proven MPS2
 header discipline: fixed length prefix, magic-identified payload, canonical TLV, and rejection
@@ -466,7 +478,15 @@ invalidated on exhaustion or expiry, fresh discovery required for a new code. Th
 persistence across restarts would be needed against a determined attacker. That is deferred and
 **requires no Room v2 change**.
 
-## 14. API 23 measurements
+## 14. API 23 measurements — EC variant, historical
+
+> **Historical.** The measurements below are for the EC P-256 variant, which is not the
+> implemented profile. They are kept because the shape of the cost -- dominated by group
+> arithmetic in rounds one and two, cheap round three -- is the same for both families, and
+> because a reviewer should see the numbers that drove the choice.
+>
+> The MODP figures, measured by `ModpJpakeMeasurementApi23Test` on the same emulator, are in the
+> summary at the end of this section.
 
 Measured by `EcJpakePerformanceApi23Test` on the API 23 emulator, using monotonic time, with
 three discarded warm-up exchanges separated from seven measured ones, reporting median and 90th
@@ -534,6 +554,23 @@ all thread activity and cannot be isolated reliably under a concurrent runner.
 Emulator limitations apply: shared CI host, variable CPU allocation, no hardware crypto
 acceleration guarantee. A single run supports no hard performance claim.
 
+**MODP, the implemented profile.** Measured by `ModpJpakeMeasurementApi23Test` in the same
+`androidTest` source set, with real serialized MPS3 frames:
+
+| Quantity | EC P-256 (historical) | MODP NIST-3072 (implemented) |
+| --- | --- | --- |
+| Round-one payload | 196 B | **1,600 B** |
+| Round-two payload | 98 B | **800 B** |
+| Round-three tag | 32 B | **32 B** |
+| Payload per exchange | 326 B | **2,432 B** |
+| Four concurrent exchanges | 3.69 s | **27.9 s** |
+
+The MODP exchange is roughly seven times the bytes and roughly eight times the wall clock on a
+software-only emulator. That is the price of a variant whose payloads can be rebuilt from
+received bytes through the library's public API, which the EC variant cannot. It remains inside
+the pairing deadlines and inside a human interaction that already requires typing a code; it is
+not a claim that the exchange is fast, and it says nothing about whether it is secure.
+
 ## 15. Dependency provenance
 
 `bcprov-jdk18on:1.86` is already digest-locked (SHA-256 recorded in
@@ -561,8 +598,9 @@ established while authorship is not.
 
 ## 17. Questions for the external reviewer
 
-1. Is the Bouncy Castle EC J-PAKE profile (`ECJPAKEParticipant`, NIST P-256, SHA-256) suitable
-   for this use?
+1. Is the Bouncy Castle J-PAKE profile (`JPAKEParticipant` over `JPAKEPrimeOrderGroups.NIST_3072`,
+   SHA-256) suitable for this use? The EC P-256 variant this question originally named is not
+   implemented; where the answer differs between the two families, both should be stated.
 2. Are 40 bits of entered-code entropy and 3 online attempts per code sufficient for this threat
    model?
 3. Which channel-binding candidate is acceptable — A, B, or neither?
