@@ -235,20 +235,29 @@ public enum class PakeAttemptVerdict(public val wireId: Int) {
 /**
  * A bounded, deliberately uninformative failure signal.
  *
- * The type has exactly one field. That is the security property, not a simplification: a wrong
- * code, an invalid zero-knowledge proof, an invalid round-three tag, an attempt-context mismatch, a
- * replay from a previous attempt and structurally hostile input are all indistinguishable here,
- * because there is no place to put the difference. A peer that receives one of these learns that
- * this attempt did not complete and whether a retry is still allowed -- nothing about why.
+ * It carries exactly two things, and neither is a cause:
+ *   - the attempt it refers to, so a verdict replayed from an earlier attempt or arriving for some
+ *     other exchange is refused instead of being taken as an answer to this one. The identifier is
+ *     already public: it names the attempt in the attempt-start record and in every round frame.
+ *   - the retry policy, one of two values.
+ *
+ * Everything a peer must not learn is absent by construction: a wrong code, an invalid
+ * zero-knowledge proof, an invalid round-three tag, a context mismatch and structurally hostile
+ * input produce the same bytes, because there is no field in which to distinguish them. A peer
+ * that receives one of these learns that this attempt did not complete and whether a retry is still
+ * allowed -- nothing about why.
  *
  * This is what the interaction contract calls "never expose the specific cryptographic cause to the
  * peer", expressed as a type rather than as a review convention. Adding a reason code, a counter, a
  * round number or a digest to this record would be a regression, and the tests assert the shape.
  */
-public class PakeAttemptFailure(public val verdict: PakeAttemptVerdict) {
+public class PakeAttemptFailure(
+    public val attemptId: PakeAttemptId,
+    public val verdict: PakeAttemptVerdict,
+) {
 
-    /** Redacted: the verdict is the whole message, and even that is not worth a log line. */
-    override fun toString(): String = "PakeAttemptFailure(verdict=${verdict.name})"
+    /** Redacted: identity is not logged, and the verdict is not worth a log line either. */
+    override fun toString(): String = "PakeAttemptFailure(verdict=${verdict.name}, ids=[redacted])"
 }
 
 public sealed interface PakeAttemptFailureResult {
@@ -259,7 +268,13 @@ public sealed interface PakeAttemptFailureResult {
 /** MPSF framing: the generic attempt-failure signal. */
 public object PakeAttemptFailureCodec {
     public fun encode(record: PakeAttemptFailure): ByteArray =
-        PakeRecordFormat.encode(FAILURE_MAGIC, listOf(TAG_VERDICT to byteArrayOf(record.verdict.wireId.toByte())))
+        PakeRecordFormat.encode(
+            FAILURE_MAGIC,
+            listOf(
+                TAG_ATTEMPT_ID to record.attemptId.bytes(),
+                TAG_VERDICT to byteArrayOf(record.verdict.wireId.toByte()),
+            ).sortedBy { it.first },
+        )
 
     public fun decode(frame: ByteArray): PakeAttemptFailureResult {
         val fields = when (val parsed = PakeRecordFormat.decode(frame, FAILURE_MAGIC)) {
@@ -269,10 +284,15 @@ public object PakeAttemptFailureCodec {
         // The shared envelope accepts every tag the other records define, so a failure frame
         // carrying a suite or a digest would otherwise be parsed and then silently ignored --
         // the record would mean one thing on the wire and another to the decoder. This record
-        // defines exactly one tag; anything else is unknown here even though it is known elsewhere.
-        if (fields.keys.any { it != TAG_VERDICT }) {
+        // defines exactly two tags; anything else is unknown here even though it is known
+        // elsewhere.
+        if (fields.keys.any { it != TAG_ATTEMPT_ID && it != TAG_VERDICT }) {
             return PakeAttemptFailureResult.Rejected(PakeRecordReject.UNKNOWN_FIELD)
         }
+        val attemptIdBytes = fields[TAG_ATTEMPT_ID]
+            ?: return PakeAttemptFailureResult.Rejected(PakeRecordReject.MISSING_FIELD)
+        val attemptId = PakeAttemptId.fromBytes(attemptIdBytes)
+            ?: return PakeAttemptFailureResult.Rejected(PakeRecordReject.FIELD_LENGTH_OUT_OF_BOUNDS)
         val verdictBytes = fields[TAG_VERDICT]
             ?: return PakeAttemptFailureResult.Rejected(PakeRecordReject.MISSING_FIELD)
         if (verdictBytes.size != 1) {
@@ -280,7 +300,50 @@ public object PakeAttemptFailureCodec {
         }
         val verdict = PakeAttemptVerdict.fromWireId(verdictBytes[0].toInt() and 0xFF)
             ?: return PakeAttemptFailureResult.Rejected(PakeRecordReject.VERDICT_INVALID)
-        return PakeAttemptFailureResult.Success(PakeAttemptFailure(verdict))
+        return PakeAttemptFailureResult.Success(PakeAttemptFailure(attemptId, verdict))
+    }
+}
+
+/**
+ * Which control record a complete, length-prefixed frame carries, decided from its magic alone.
+ *
+ * The exchange has to decide what it is looking at before it hands a frame to a decoder, because a
+ * peer may send any record at any point and "the wrong record here" is a refusal rather than a
+ * parse error. Reading the magic is safe: it is four fixed bytes behind the length prefix, and
+ * nothing is allocated or decoded on the strength of it.
+ *
+ * The magic byte strings live here, next to the codecs that emit them, so this classifier cannot
+ * drift from the records it classifies.
+ */
+public enum class PakeRecordKind {
+    ATTEMPT_START,
+    APPROVAL,
+    FAILURE,
+}
+
+/** Magic-based framing facts shared by the three PAKE control records. */
+public object PakeRecordFraming {
+    /** Offset of the magic inside a complete frame: behind the 4-byte length prefix. */
+    public const val MAGIC_OFFSET: Int = 4
+
+    public const val MAGIC_BYTES: Int = 4
+
+    /** The record kind, or null when the frame is not one of the three control records. */
+    public fun kindOf(frame: ByteArray): PakeRecordKind? {
+        if (frame.size < MAGIC_OFFSET + MAGIC_BYTES) return null
+        return when {
+            matches(frame, ATTEMPT_START_MAGIC) -> PakeRecordKind.ATTEMPT_START
+            matches(frame, APPROVAL_MAGIC) -> PakeRecordKind.APPROVAL
+            matches(frame, FAILURE_MAGIC) -> PakeRecordKind.FAILURE
+            else -> null
+        }
+    }
+
+    private fun matches(frame: ByteArray, magic: ByteArray): Boolean {
+        for (index in magic.indices) {
+            if (frame[MAGIC_OFFSET + index] != magic[index]) return false
+        }
+        return true
     }
 }
 

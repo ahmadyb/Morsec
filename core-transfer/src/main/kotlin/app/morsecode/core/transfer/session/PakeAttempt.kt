@@ -208,6 +208,15 @@ public class PakeAttemptLedger(
     private var invalidated: Boolean = false
     private var outstanding: PakeAttempt? = null
 
+    /**
+     * Identifiers this ledger has already issued or adopted.
+     *
+     * An attempt identifier is an identity, not a nonce: reusing one would make two attempts
+     * indistinguishable inside the authentication context, which is how a replayed round-one frame
+     * gets back in. The set is bounded by [maxAttempts], so it is not an unbounded growth path.
+     */
+    private val usedAttemptIds: MutableSet<PakeAttemptId> = HashSet()
+
     init {
         require(codeInstance.size == CODE_INSTANCE_BYTES) {
             "code instance id must be $CODE_INSTANCE_BYTES bytes"
@@ -239,6 +248,47 @@ public class PakeAttemptLedger(
             ordinal = charged + 1,
             codeInstanceId = codeInstance,
         )
+        usedAttemptIds.add(attempt.id)
+        outstanding = attempt
+        return attempt
+    }
+
+    /**
+     * Records an attempt whose identifier the peer chose.
+     *
+     * The responder cannot generate the identifier: the initiator sends it in the attempt-start
+     * record before either side is in a round, so the responder has to adopt it. Adopting is not
+     * the same as trusting it. Three things are enforced here, and each one closes a way to make
+     * two exchanges look like one:
+     *
+     *  - the ordinal must be exactly the next ordinal this ledger's own budget allows, so a peer
+     *    cannot skip ahead, reopen a spent ordinal or restart at one after a failure;
+     *  - the identifier must not have been used by any earlier attempt in this ledger, so a peer
+     *    cannot re-present attempt one's identity as attempt two's;
+     *  - only one attempt may be outstanding, exactly as for [beginAttempt].
+     *
+     * The identifier's width is guaranteed by [PakeAttemptId] itself. Everything else about it --
+     * that it matches the peer's, that it is fresh, that it belongs to this code instance -- is
+     * enforced where it matters: it is an input to the authentication context, so a substituted
+     * value changes both participant identifiers and the proofs stop verifying.
+     */
+    @Synchronized
+    public fun adoptAttempt(attemptId: PakeAttemptId, ordinal: Int): PakeAttempt? {
+        if (invalidated) return null
+        if (charged >= maxAttempts) {
+            invalidate()
+            return null
+        }
+        if (ordinal != charged + 1) return null
+        if (usedAttemptIds.contains(attemptId)) return null
+        if (outstanding?.isSettled() == false) return null
+        val attempt = PakeAttempt(
+            ledger = this,
+            id = attemptId,
+            ordinal = ordinal,
+            codeInstanceId = codeInstance,
+        )
+        usedAttemptIds.add(attemptId)
         outstanding = attempt
         return attempt
     }

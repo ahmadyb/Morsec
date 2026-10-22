@@ -237,40 +237,59 @@ public class PakeRecordsTest {
     }
 
     @Test
-    public fun `a failure signal round-trips and says only the verdict`() {
+    public fun `a failure signal round-trips and says only what it must`() {
         for (verdict in PakeAttemptVerdict.entries) {
+            val original = PakeAttemptFailure(attemptId(0x77), verdict)
             val decoded = requireNotNull(
-                (PakeAttemptFailureCodec.decode(PakeAttemptFailureCodec.encode(PakeAttemptFailure(verdict)))
+                (PakeAttemptFailureCodec.decode(PakeAttemptFailureCodec.encode(original))
                     as? PakeAttemptFailureResult.Success)?.record,
             )
             assertEquals(verdict, decoded.verdict)
+            assertEquals(original.attemptId, decoded.attemptId)
         }
     }
 
     @Test
     public fun `a failure signal cannot express why the attempt failed`() {
-        // The shape is the guarantee: one constructor parameter, one enum, two values. If any of
-        // these change, a peer would gain a way to distinguish a wrong code from a failed proof.
+        // The shape is the guarantee. Two values: the attempt the verdict belongs to, which is
+        // already public on the wire, and the retry policy. There is deliberately nowhere to put a
+        // reason, because a reason field would let a peer distinguish a wrong code from a failed
+        // proof. Identity is not a cause: it is the same identifier MPS4 and every round frame
+        // carry, and it is what makes a replayed verdict refusable.
         assertEquals(2, PakeAttemptVerdict.entries.size)
         assertEquals(setOf(1, 2), PakeAttemptVerdict.entries.map { it.wireId }.toSet())
         val constructors = PakeAttemptFailure::class.java.declaredConstructors
-        assertEquals("a failure record carries exactly one value", 1, constructors.size)
+        assertEquals("a failure record carries exactly two values", 1, constructors.size)
         assertEquals(
-            "the only value a failure record carries is the verdict",
-            listOf(PakeAttemptVerdict::class.java),
+            "the only values are the attempt identity and the verdict",
+            listOf(PakeAttemptId::class.java, PakeAttemptVerdict::class.java),
             constructors.single().parameterTypes.toList(),
         )
         val declared = PakeAttemptFailure::class.java.declaredFields.filterNot { it.isSynthetic }
         assertEquals(
             "no field may be added: a cause field would be a cryptographic oracle",
-            listOf("verdict"),
+            listOf("attemptId", "verdict"),
             declared.map { it.name }.sorted(),
         )
     }
 
     @Test
+    public fun `a failure signal names exactly one attempt`() {
+        val ours = attemptId(0x11)
+        val theirs = attemptId(0x22)
+        val decoded = requireNotNull(
+            (PakeAttemptFailureCodec.decode(
+                PakeAttemptFailureCodec.encode(PakeAttemptFailure(theirs, PakeAttemptVerdict.RETRY)),
+            ) as? PakeAttemptFailureResult.Success)?.record,
+        )
+        assertEquals(theirs, decoded.attemptId)
+        // The identity is compared, not merely carried: a verdict for another attempt is not ours.
+        assertFalse("a verdict for attempt B must not bind attempt A", decoded.attemptId == ours)
+    }
+
+    @Test
     public fun `the failure signal is not interchangeable with the other records`() {
-        val failure = PakeAttemptFailureCodec.encode(PakeAttemptFailure(PakeAttemptVerdict.RETRY))
+        val failure = PakeAttemptFailureCodec.encode(PakeAttemptFailure(attemptId(), PakeAttemptVerdict.RETRY))
         assertEquals(PakeRecordReject.BAD_MAGIC, rejection(PakeAttemptStartCodec.decode(failure)))
         assertEquals(PakeRecordReject.BAD_MAGIC, rejection(PakeApprovalCodec.decode(failure)))
         assertEquals(
@@ -281,18 +300,59 @@ public class PakeRecordsTest {
 
     @Test
     public fun `an unknown verdict is refused rather than defaulted`() {
-        fun frame(value: Int): ByteArray =
-            raw(FAILURE_MAGIC, listOf(TAG_VERDICT to byteArrayOf(value.toByte())))
+        // Canonical order is ascending by tag, and the envelope enforces it before any field is
+        // interpreted, so every hand-built frame here is sorted rather than written in reading order.
+        fun frame(value: Int): ByteArray = raw(
+            FAILURE_MAGIC,
+            listOf(
+                TAG_VERDICT to byteArrayOf(value.toByte()),
+                TAG_ATTEMPT_ID to ByteArray(16) { 0x11 },
+            ),
+        )
         assertEquals(PakeRecordReject.VERDICT_INVALID, rejection(PakeAttemptFailureCodec.decode(frame(0))))
         assertEquals(PakeRecordReject.VERDICT_INVALID, rejection(PakeAttemptFailureCodec.decode(frame(3))))
         assertEquals(PakeRecordReject.VERDICT_INVALID, rejection(PakeAttemptFailureCodec.decode(frame(255))))
         assertEquals(
             PakeRecordReject.FIELD_LENGTH_OUT_OF_BOUNDS,
-            rejection(PakeAttemptFailureCodec.decode(raw(FAILURE_MAGIC, listOf(TAG_VERDICT to ByteArray(2))))),
+            rejection(
+                PakeAttemptFailureCodec.decode(
+                    raw(
+                        FAILURE_MAGIC,
+                        listOf(
+                            TAG_VERDICT to ByteArray(2),
+                            TAG_ATTEMPT_ID to ByteArray(16) { 0x11 },
+                        ),
+                    ),
+                ),
+            ),
         )
         assertEquals(
             PakeRecordReject.MISSING_FIELD,
             rejection(PakeAttemptFailureCodec.decode(raw(FAILURE_MAGIC, emptyList()))),
+        )
+        assertEquals(
+            "a verdict with no attempt is refused, not attributed to whatever is current",
+            PakeRecordReject.MISSING_FIELD,
+            rejection(
+                PakeAttemptFailureCodec.decode(
+                    raw(FAILURE_MAGIC, listOf(TAG_VERDICT to byteArrayOf(1))),
+                ),
+            ),
+        )
+        assertEquals(
+            "a truncated attempt id is refused on its width",
+            PakeRecordReject.FIELD_LENGTH_OUT_OF_BOUNDS,
+            rejection(
+                PakeAttemptFailureCodec.decode(
+                    raw(
+                        FAILURE_MAGIC,
+                        listOf(
+                            TAG_VERDICT to byteArrayOf(1),
+                            TAG_ATTEMPT_ID to ByteArray(15),
+                        ),
+                    ),
+                ),
+            ),
         )
         // A tag that is defined for MPS4/MPA1 is still unknown in a failure frame. Accepting it
         // would let the record carry bytes the decoder silently discards.
@@ -302,8 +362,11 @@ public class PakeRecordsTest {
                 PakeAttemptFailureCodec.decode(
                     raw(
                         FAILURE_MAGIC,
-                        listOf(TAG_VERDICT to byteArrayOf(1), TAG_PROFILE to byteArrayOf(1))
-                            .sortedBy { it.first },
+                        listOf(
+                            TAG_VERDICT to byteArrayOf(1),
+                            TAG_PROFILE to byteArrayOf(1),
+                            TAG_ATTEMPT_ID to ByteArray(16) { 0x11 },
+                        ),
                     ),
                 ),
             ),
@@ -312,9 +375,12 @@ public class PakeRecordsTest {
 
     @Test
     public fun `a failure signal is small and redacted`() {
-        val frame = PakeAttemptFailureCodec.encode(PakeAttemptFailure(PakeAttemptVerdict.ABORT))
+        val frame = PakeAttemptFailureCodec.encode(PakeAttemptFailure(attemptId(), PakeAttemptVerdict.ABORT))
         assertTrue("measured ${frame.size} bytes", frame.size <= 4 + 256)
-        assertEquals("PakeAttemptFailure(verdict=ABORT)", PakeAttemptFailure(PakeAttemptVerdict.ABORT).toString())
+        assertEquals(
+            "PakeAttemptFailure(verdict=ABORT, ids=[redacted])",
+            PakeAttemptFailure(attemptId(), PakeAttemptVerdict.ABORT).toString(),
+        )
     }
 
     @Test

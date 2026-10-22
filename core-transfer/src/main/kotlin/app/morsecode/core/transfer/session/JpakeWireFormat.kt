@@ -282,6 +282,10 @@ public object JpakeMessageCodec {
     private val MAGIC_MPS2 = byteArrayOf(0x4D, 0x50, 0x53, 0x32) // "MPS2"
 
     private const val SCHEMA_VERSION: Int = 2
+
+    /** Width of the magic that follows the length prefix. */
+    private const val MAGIC_BYTES: Int = 4
+
     private const val TAG_END: Int = 0x0000
     private const val TAG_SUITE: Int = 0x0001
     private const val TAG_PROFILE: Int = 0x0002
@@ -307,6 +311,22 @@ public object JpakeMessageCodec {
 
     private const val TLV_OVERHEAD: Int = 4 // tag(2) + length(2)
     private const val MAX_TAG: Int = 0x0030
+
+    /**
+     * True when a complete, length-prefixed frame carries the round-frame magic.
+     *
+     * Framing only. Nothing is decoded, no length is trusted beyond the four-byte prefix, and a
+     * frame that claims this magic but is otherwise malformed still has to survive [decode]. The
+     * exchange uses this to tell a round frame from a control record without restating the magic
+     * bytes in another module, which is where they would eventually drift.
+     */
+    public fun hasMagic(frame: ByteArray): Boolean {
+        if (frame.size < HEADER_BYTES + MAGIC_BYTES) return false
+        for (index in MAGIC_MPS3.indices) {
+            if (frame[HEADER_BYTES + index] != MAGIC_MPS3[index]) return false
+        }
+        return true
+    }
 
     /** True for bounded printable-ASCII text within [maxBytes]. */
     public fun isBoundedText(value: String, maxBytes: Int): Boolean {
