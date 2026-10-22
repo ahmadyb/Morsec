@@ -61,6 +61,8 @@ Not added, deliberately: any coordinator call site, any use of the authority, an
 | `8d179af` | docs(security): name MODP as the implemented profile and mark EC historical |
 | `8adbdf9` | feat(pairing): add an attempt-failure signal that cannot name a cause |
 | `4fb62d9` | fix(pairing): refuse a failure frame that carries more than a verdict |
+| `5a37339` | feat(pairing): add an inert entered-code exchange with its paired-stream tests |
+| `cdff450` | test(pairing): cancel a parked exchange instead of racing a fast one |
 
 The first three are the slice and compiler repairs. The last three exist because the suites had
 never executed: this environment has no JDK, so the only compile and test signal is an exact-SHA CI
@@ -122,11 +124,89 @@ cancelled run. That commit therefore has no green run of its own. Its content is
 saw it there. The distinction is recorded rather than smoothed over, because "the tree was green
 later" is a weaker statement than "this SHA was green" and this record should not conflate them.
 
+## The inert exchange, and what running it found
+
+The second increment builds the component the coordinator will eventually call, and still does not
+call it. `PairingAttemptExchange` owns one connection from attempt-start to the intended-peer
+decision — MPS4, three PAKE rounds, the retry handshake, MPA1 — and returns an internal,
+non-constructible `PairingExchangeResult`. It is not referenced by `SecureLanPairingCoordinator`,
+which is byte-for-byte unchanged, and a confirmed result is not `SecurePairingRunResult.Authenticated`
+and carries no record-layer, payload or authority handle. A test asserts that by reflection so the
+property cannot be lost silently.
+
+Three things had to change outside the new package, and each is small on purpose:
+
+- `PakeAttemptLedger` now keeps every identifier it has issued, and `adoptAttempt` lets the responder
+  adopt the initiator's identifier under the same rules as `beginAttempt`: the ordinal must be the
+  next one, the identifier must be unused, and only one attempt may be outstanding.
+- `PakeAttemptFailure` gained the attempt identifier. Without it a verdict replayed from an earlier
+  attempt was indistinguishable from an answer to the current one, so "wrong failure-record
+  context" could not be enforced — only documented. The identifier is already public: it names the
+  attempt in MPS4 and in every round frame. The record still cannot express a cause, and the shape
+  test was rewritten to assert exactly that (two fields, identity and policy; no string, integer,
+  byte array or throwable).
+- `JpakeMessageCodec.hasMagic` exposes framing only, so the exchange can tell a round frame from a
+  control record without restating the magic bytes in another module.
+
+Two defects were found by writing the tests that drive both peers over real serialized frames, and
+both were the kind that reading cannot catch:
+
+**1. The three rounds were built as a list.** `listOf(exchangeStep(...), exchangeStep(...), ...)`
+evaluates every argument before the first result is looked at, so all three rounds ran even after one
+had failed. Written as three statements, each round starts only when the previous one was accepted.
+
+**2. A legitimate retry always failed.** Each round is write-then-read on both sides, so a peer that
+got past the failed step has exactly one frame in flight; the retry then read that residue as its own
+first round. The exchange now skips at most one round frame, and only when it decodes and names the
+attempt immediately before the current one. The allowance is one because one is the most that can
+exist, and a frame naming any other attempt — or a control record — is still refused. A scripted peer
+replays the abandoned attempt's round-one frame verbatim before the fresh one, and the retry confirms.
+
+**3. A cancellation test measured the machine.** The first cancellation case cancelled from a timer
+while an honest peer ran, and on a fast runner the exchange confirmed before the flag was set. The
+peer now goes silent after round one, so the exchange is certainly parked in a read when the
+cancellation lands. The assertion did not change; only the race did.
+
+## Evidence for the exchange increment
+
+Run `39811828683` on `5a3733950c36d1e9ad131defb1c4e33a082c1026` — **failure**, and the useful kind:
+3,105 JVM tests in 193 reports, of which **2 failed**, both being the same cancellation test in its
+debug and release executions. `core-transfer` 583, `transport-lan` 330 with 2 failed; the other
+modules unchanged. API 23 instrumentation: 57 tests, 0 failures, exit status 0. Lint: 0 errors, 48
+warnings. APKs: 32.31 MiB and 1.10 MiB. That run is the compile signal for code that had never been
+compiled: everything else in this increment — the honest exchange, the wrong-code retry, three
+exhausted attempts, a failure record where each round belongs, a duplicate verdict, retry-versus-abort
+disagreement, the stale-frame discard, wrong ordinal, reused identifier, silence, connection loss,
+both rejections, the approval echo, exact-once close and the no-authority property — passed first
+time.
+
+Run `39816150179` on `cdff4501ec6a4bfc7d4cf517889d6c7c82fcd090` — **failure, not a code failure**:
+3,105 JVM tests, **0 failed**, 0 skipped; lint 0 errors, 48 warnings; the same 32.31 MiB and 1.10 MiB
+artifacts. The build failed on `:transport-lan:connectedDebugAndroidTest` with one assertion:
+
+```
+ControlEstablishmentCapacityTest#establishmentCapacityShutdownAndObserverDefectsOnOneBoundLease
+pairing capacity was not restored after the admitted pairings closed;
+observed [null, SecurePairingResult.Failed(secure_session_limit_reached)]
+```
+
+That is a live-coordinator instrumentation test, and this increment does not touch the coordinator,
+the attempt limiter or the establishment permits. The same test passed on `5a37339` — the run above,
+with identical production Kotlin — which makes it a timing race in the test rather than a regression:
+it closes three admitted pairings and then admits three more, and a refusal that arrives while the
+closed sessions' cleanup is still in flight is terminal, so the `awaitTrue` around it can never
+succeed. It is recorded here rather than smoothed over, and it is **not** accepted as evidence that
+this increment is green: the code SHAs above are the ones with the JVM and instrumentation results
+quoted, and a later run on a documentation commit is reported separately.
+
 ## What is still missing
 
 - The coordinator still offers SAS (`SecureLanPairingCoordinator` around the suite offer), still
   calls `select` rather than `selectRequired`, and never reaches the authority.
 - `SecurePairingRunResult.Authenticated` does not yet carry an authority.
+- The exchange itself has no API 23 instrumentation: its 19 cases run on the JVM over in-memory
+  channels, which is where a protocol can be exercised deterministically and where a socket would
+  add nothing to the assertions. The socket adapter is exercised by its own bounds, not by a device.
 - No end-to-end hostile test exists at the coordinator level or as API 23 instrumentation: replay
   across attempts, cross-session substitution, approval before round three, one peer rejecting,
   approval replay, concurrent approve/reject, cancellation in each round, exact-once cleanup,
