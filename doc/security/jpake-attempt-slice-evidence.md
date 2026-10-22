@@ -22,6 +22,12 @@ Added:
   record that tells a responder which fresh attempt it is in, and the approve/reject record that
   names the attempt, ordinal, code instance, transcript digest, both session identifiers, suite,
   profile and the peer role.
+- `PakeAttemptFailure` with the MPSF codec — the generic attempt-failure signal retry needs, so
+  that one peer cannot wait for a round the other abandoned. It carries exactly one value,
+  RETRY or ABORT, which are policy states rather than causes. Wrong code, invalid proof, bad
+  round-three tag, context mismatch, replay and malformed input produce identical bytes; a test
+  pins the shape (one constructor, one parameter type, one field) so a cause cannot be added
+  without failing, and the decoder refuses any tag but the verdict.
 - Three new MPS3 fields (attempt id, ordinal, code instance) and schema version 2, so every
   round-one, round-two and round-three frame names the attempt it belongs to.
 - `AuthenticatedControlAuthority` and its nested `AuthenticatedControlChannel` — an opaque,
@@ -52,6 +58,9 @@ Not added, deliberately: any coordinator call site, any use of the authority, an
 | `7afb747` | test(wire): build MPS3 vectors from the attempt-aware schema |
 | `6eb9e40` | fix(pairing): size control-record payloads without the length prefix |
 | `622ecaa` | fix(pairing): keep the attempt identifier the generator just drew |
+| `8d179af` | docs(security): name MODP as the implemented profile and mark EC historical |
+| `8adbdf9` | feat(pairing): add an attempt-failure signal that cannot name a cause |
+| `4fb62d9` | fix(pairing): refuse a failure frame that carries more than a verdict |
 
 The first three are the slice and compiler repairs. The last three exist because the suites had
 never executed: this environment has no JDK, so the only compile and test signal is an exact-SHA CI
@@ -59,7 +68,13 @@ run. Their subject lines are the honest record of what execution found.
 
 ## Exact-SHA evidence
 
-Run `39680845579` on `622ecaacc8fe81e243a0af2ed849bfc943ed7dd2` — **success**.
+Run `39741492111` on `4fb62d9092afcbb69fee2ee0036c3dbb4fde8d9d` — **success**, and the current
+head at the time of writing: 3,066 JVM tests (0 failed, 0 skipped), 57 API 23 instrumentation
+tests, 0 lint errors, 48 warnings. It differs from the run below by the documentation correction,
+the failure-signal record and its decoder fix, and five additional tests.
+
+Run `39680845579` on `622ecaacc8fe81e243a0af2ed849bfc943ed7dd2` — **success**, the run that first
+put the attempt-identity slice green.
 
 - JVM: 3,061 tests, 0 failed, 0 skipped, 191 reports. `core-transfer` 577, `transport-lan` 292;
   the rest unchanged (`app` 588, `core-storage` 1,408, `core-design` 100, `core-data` 56,
@@ -97,6 +112,15 @@ Three test-side mistakes were also found and fixed: the hand-built hostile frame
 `PakeRecordsTest` repeated the same header arithmetic, its binding matrix compared the responder's
 honest approval against an initiator role, and the ledger's stand-in entropy source returned the
 same block on every draw — which made "distinct identifiers" compare a value with itself.
+
+## Exact-SHA caveat on the documentation commit
+
+Run `39738376206` for `8d179af4410b737ed008416a967828862fa83284` was **cancelled** by the
+branch's concurrency group when the next commit was pushed, and GitHub refuses to re-run a
+cancelled run. That commit therefore has no green run of its own. Its content is not unverified:
+`8adbdf9` and `4fb62d9` are descendants, their green runs include it, and the compiler and tests
+saw it there. The distinction is recorded rather than smoothed over, because "the tree was green
+later" is a weaker statement than "this SHA was green" and this record should not conflate them.
 
 ## What is still missing
 
