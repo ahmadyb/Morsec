@@ -237,6 +237,73 @@ public class PakeRecordsTest {
     }
 
     @Test
+    public fun `a failure signal round-trips and says only the verdict`() {
+        for (verdict in PakeAttemptVerdict.entries) {
+            val decoded = requireNotNull(
+                (PakeAttemptFailureCodec.decode(PakeAttemptFailureCodec.encode(PakeAttemptFailure(verdict)))
+                    as? PakeAttemptFailureResult.Success)?.record,
+            )
+            assertEquals(verdict, decoded.verdict)
+        }
+    }
+
+    @Test
+    public fun `a failure signal cannot express why the attempt failed`() {
+        // The shape is the guarantee: one constructor parameter, one enum, two values. If any of
+        // these change, a peer would gain a way to distinguish a wrong code from a failed proof.
+        assertEquals(2, PakeAttemptVerdict.entries.size)
+        assertEquals(setOf(1, 2), PakeAttemptVerdict.entries.map { it.wireId }.toSet())
+        val constructors = PakeAttemptFailure::class.java.declaredConstructors
+        assertEquals("a failure record carries exactly one value", 1, constructors.size)
+        assertEquals(
+            "the only value a failure record carries is the verdict",
+            listOf(PakeAttemptVerdict::class.java),
+            constructors.single().parameterTypes.toList(),
+        )
+        val declared = PakeAttemptFailure::class.java.declaredFields.filterNot { it.isSynthetic }
+        assertEquals(
+            "no field may be added: a cause field would be a cryptographic oracle",
+            listOf("verdict"),
+            declared.map { it.name }.sorted(),
+        )
+    }
+
+    @Test
+    public fun `the failure signal is not interchangeable with the other records`() {
+        val failure = PakeAttemptFailureCodec.encode(PakeAttemptFailure(PakeAttemptVerdict.RETRY))
+        assertEquals(PakeRecordReject.BAD_MAGIC, rejection(PakeAttemptStartCodec.decode(failure)))
+        assertEquals(PakeRecordReject.BAD_MAGIC, rejection(PakeApprovalCodec.decode(failure)))
+        assertEquals(
+            PakeRecordReject.BAD_MAGIC,
+            rejection(PakeAttemptFailureCodec.decode(PakeApprovalCodec.encode(approval()))),
+        )
+    }
+
+    @Test
+    public fun `an unknown verdict is refused rather than defaulted`() {
+        fun frame(value: Int): ByteArray =
+            raw(FAILURE_MAGIC, listOf(TAG_VERDICT to byteArrayOf(value.toByte())))
+        assertEquals(PakeRecordReject.VERDICT_INVALID, rejection(PakeAttemptFailureCodec.decode(frame(0))))
+        assertEquals(PakeRecordReject.VERDICT_INVALID, rejection(PakeAttemptFailureCodec.decode(frame(3))))
+        assertEquals(PakeRecordReject.VERDICT_INVALID, rejection(PakeAttemptFailureCodec.decode(frame(255))))
+        assertEquals(
+            PakeRecordReject.FIELD_LENGTH_OUT_OF_BOUNDS,
+            rejection(PakeAttemptFailureCodec.decode(raw(FAILURE_MAGIC, listOf(TAG_VERDICT to ByteArray(2))))),
+        )
+        assertEquals(
+            PakeRecordReject.MISSING_FIELD,
+            rejection(PakeAttemptFailureCodec.decode(raw(FAILURE_MAGIC, emptyList()))),
+        )
+    }
+
+    @Test
+    public fun `a failure signal is small and redacted`() {
+        val frame = PakeAttemptFailureCodec.encode(PakeAttemptFailure(PakeAttemptVerdict.ABORT))
+        assertTrue("measured ${frame.size} bytes", frame.size <= 4 + 256)
+        assertEquals("PakeAttemptFailure(verdict=ABORT)", PakeAttemptFailure(PakeAttemptVerdict.ABORT).toString())
+    }
+
+    @Test
     public fun `a record never exceeds its bound`() {
         val frame = PakeAttemptStartCodec.encode(attemptStart())
         assertTrue("measured ${frame.size} bytes", frame.size <= 4 + 256)
@@ -331,6 +398,9 @@ public class PakeRecordsTest {
     private fun success(result: PakeAttemptStartResult): PakeAttemptStart? =
         (result as? PakeAttemptStartResult.Success)?.record
 
+    private fun rejection(result: PakeAttemptFailureResult): PakeRecordReject? =
+        (result as? PakeAttemptFailureResult.Rejected)?.reason
+
     private fun success(result: PakeApprovalResult): PakeApproval? =
         (result as? PakeApprovalResult.Success)?.record
 
@@ -343,6 +413,8 @@ public class PakeRecordsTest {
     private companion object {
         val SECURE_ID = SessionId("0123456789abcdef0123456789abcdef")
         val APPROVAL_MAGIC = byteArrayOf(0x4D, 0x50, 0x41, 0x31)
+        val FAILURE_MAGIC = byteArrayOf(0x4D, 0x50, 0x53, 0x46)
+        const val TAG_VERDICT = 0x0001
         const val TAG_SUITE = 0x0001
         const val TAG_PROFILE = 0x0002
         const val TAG_ROLE = 0x0003

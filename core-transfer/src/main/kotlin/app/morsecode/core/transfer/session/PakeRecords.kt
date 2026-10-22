@@ -1,5 +1,5 @@
 /*
- * MPS4 and MPA1 -- the two control records the PAKE exchange needs around its three rounds.
+ * MPS4, MPA1 and MPSF -- the control records the PAKE exchange needs around its three rounds.
  *
  * WHY THEY EXIST
  *   MPS3 carries rounds one, two and three and nothing else. Two things happen outside those rounds
@@ -10,6 +10,14 @@
  *      of both participant ids. MPS4 carries it.
  *
  *   2. Both peers have to state an explicit decision after round three. MPA1 carries it.
+ *
+ *   3. When an attempt fails, the two peers have to agree that it failed before either can decide
+ *      to retry. Without a signal, the peer still waiting for a round the other side abandoned
+ *      blocks until its deadline. MPSF carries that agreement, and it deliberately carries nothing
+ *      else: a wrong code, an invalid proof, a bad round-three tag, a context mismatch, a replay and
+ *      malformed input all produce the *same* record. Only the policy state travels -- "another
+ *      attempt is acceptable" or "this connection ends" -- because that is the only thing the peer
+ *      needs in order not to wait, and it is the only thing that must not be inferred from timing.
  *
  * WHY CARRYING THEM INSIDE TLS IS NOT ENOUGH ON ITS OWN
  *   TLS at this point is encrypted but unauthenticated -- that is the whole reason a PAKE is running.
@@ -64,6 +72,7 @@ public enum class PakeRecordReject(public val wireReason: String) {
     DECISION_INVALID("decision_invalid"),
     SESSION_ID_INVALID("session_id_invalid"),
     CONTROL_SESSION_ID_INVALID("control_session_id_invalid"),
+    VERDICT_INVALID("verdict_invalid"),
 }
 
 /** An explicit local decision. Two values, because "no answer" is not a decision. */
@@ -207,6 +216,67 @@ public sealed interface PakeApprovalResult {
     public data class Rejected(public val reason: PakeRecordReject) : PakeApprovalResult
 }
 
+/**
+ * The only two things a failed attempt may say to its peer.
+ *
+ * These are *policy states*, not causes. [RETRY] means the local side is willing to make another
+ * attempt against the same code; [ABORT] means it is not, so the connection ends. Which
+ * cryptographic check failed is deliberately not representable -- see [PakeAttemptFailure].
+ */
+public enum class PakeAttemptVerdict(public val wireId: Int) {
+    RETRY(1),
+    ABORT(2);
+
+    public companion object {
+        public fun fromWireId(id: Int): PakeAttemptVerdict? = entries.firstOrNull { it.wireId == id }
+    }
+}
+
+/**
+ * A bounded, deliberately uninformative failure signal.
+ *
+ * The type has exactly one field. That is the security property, not a simplification: a wrong
+ * code, an invalid zero-knowledge proof, an invalid round-three tag, an attempt-context mismatch, a
+ * replay from a previous attempt and structurally hostile input are all indistinguishable here,
+ * because there is no place to put the difference. A peer that receives one of these learns that
+ * this attempt did not complete and whether a retry is still allowed -- nothing about why.
+ *
+ * This is what the interaction contract calls "never expose the specific cryptographic cause to the
+ * peer", expressed as a type rather than as a review convention. Adding a reason code, a counter, a
+ * round number or a digest to this record would be a regression, and the tests assert the shape.
+ */
+public class PakeAttemptFailure(public val verdict: PakeAttemptVerdict) {
+
+    /** Redacted: the verdict is the whole message, and even that is not worth a log line. */
+    override fun toString(): String = "PakeAttemptFailure(verdict=${verdict.name})"
+}
+
+public sealed interface PakeAttemptFailureResult {
+    public data class Success(public val record: PakeAttemptFailure) : PakeAttemptFailureResult
+    public data class Rejected(public val reason: PakeRecordReject) : PakeAttemptFailureResult
+}
+
+/** MPSF framing: the generic attempt-failure signal. */
+public object PakeAttemptFailureCodec {
+    public fun encode(record: PakeAttemptFailure): ByteArray =
+        PakeRecordFormat.encode(FAILURE_MAGIC, listOf(TAG_VERDICT to byteArrayOf(record.verdict.wireId.toByte())))
+
+    public fun decode(frame: ByteArray): PakeAttemptFailureResult {
+        val fields = when (val parsed = PakeRecordFormat.decode(frame, FAILURE_MAGIC)) {
+            is PakeRecordFormat.Parsed.Rejected -> return PakeAttemptFailureResult.Rejected(parsed.reason)
+            is PakeRecordFormat.Parsed.Fields -> parsed.values
+        }
+        val verdictBytes = fields[TAG_VERDICT]
+            ?: return PakeAttemptFailureResult.Rejected(PakeRecordReject.MISSING_FIELD)
+        if (verdictBytes.size != 1) {
+            return PakeAttemptFailureResult.Rejected(PakeRecordReject.FIELD_LENGTH_OUT_OF_BOUNDS)
+        }
+        val verdict = PakeAttemptVerdict.fromWireId(verdictBytes[0].toInt() and 0xFF)
+            ?: return PakeAttemptFailureResult.Rejected(PakeRecordReject.VERDICT_INVALID)
+        return PakeAttemptFailureResult.Success(PakeAttemptFailure(verdict))
+    }
+}
+
 /** MPS4 framing: the attempt-start record. */
 public object PakeAttemptStartCodec {
     public fun encode(record: PakeAttemptStart): ByteArray =
@@ -316,6 +386,13 @@ private const val MAX_TAG: Int = TAG_DECISION
 
 private val ATTEMPT_START_MAGIC = byteArrayOf(0x4D, 0x50, 0x53, 0x34) // "MPS4"
 private val APPROVAL_MAGIC = byteArrayOf(0x4D, 0x50, 0x41, 0x31) // "MPA1"
+private val FAILURE_MAGIC = byteArrayOf(0x4D, 0x50, 0x53, 0x46) // "MPSF"
+
+/**
+ * The failure record's only tag. Tag numbers are scoped to a magic, so reusing 0x0001 here does
+ * not collide with the suite field of MPS4/MPA1: a frame is decoded against exactly one magic.
+ */
+private const val TAG_VERDICT: Int = 0x0001
 
 private const val CODE_INSTANCE_BYTES: Int = PakeAttemptLedger.CODE_INSTANCE_BYTES
 private const val DIGEST_BYTES: Int = 32
