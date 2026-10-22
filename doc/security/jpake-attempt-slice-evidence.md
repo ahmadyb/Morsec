@@ -196,8 +196,15 @@ with identical production Kotlin — which makes it a timing race in the test ra
 it closes three admitted pairings and then admits three more, and a refusal that arrives while the
 closed sessions' cleanup is still in flight is terminal, so the `awaitTrue` around it can never
 succeed. It is recorded here rather than smoothed over, and it is **not** accepted as evidence that
-this increment is green: the code SHAs above are the ones with the JVM and instrumentation results
-quoted, and a later run on a documentation commit is reported separately.
+this increment is green.
+
+Run `39819276806` on `0f66d49fb8a9af6c759bd3b7fa179a4ae2189b0b` — **success**, the green run for
+this increment, and the tree that contains it: 3,105 JVM tests, **0 failed**, 0 skipped, 193
+reports (`transport-lan` 330, `core-transfer` 583, `app` 588, `core-storage` 1,408, `core-design`
+100, `core-data` 56, `core-model` 40). API 23 instrumentation: 57 tests, 0 failures. Lint: 0 errors,
+48 warnings in 7 reports. APKs: 32.31 MiB and 1.10 MiB. `0f66d49` is the documentation commit that
+first recorded the two runs above; the Kotlin it runs is the Kotlin of `cdff450`, and the
+instrumentation suite that raced on `cdff450` passed here.
 
 ## What is still missing
 
