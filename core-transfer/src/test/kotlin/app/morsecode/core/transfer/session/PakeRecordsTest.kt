@@ -294,6 +294,20 @@ public class PakeRecordsTest {
             PakeRecordReject.MISSING_FIELD,
             rejection(PakeAttemptFailureCodec.decode(raw(FAILURE_MAGIC, emptyList()))),
         )
+        // A tag that is defined for MPS4/MPA1 is still unknown in a failure frame. Accepting it
+        // would let the record carry bytes the decoder silently discards.
+        assertEquals(
+            PakeRecordReject.UNKNOWN_FIELD,
+            rejection(
+                PakeAttemptFailureCodec.decode(
+                    raw(
+                        FAILURE_MAGIC,
+                        listOf(TAG_VERDICT to byteArrayOf(1), TAG_PROFILE to byteArrayOf(1))
+                            .sortedBy { it.first },
+                    ),
+                ),
+            ),
+        )
     }
 
     @Test

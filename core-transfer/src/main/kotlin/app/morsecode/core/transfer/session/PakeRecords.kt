@@ -266,6 +266,13 @@ public object PakeAttemptFailureCodec {
             is PakeRecordFormat.Parsed.Rejected -> return PakeAttemptFailureResult.Rejected(parsed.reason)
             is PakeRecordFormat.Parsed.Fields -> parsed.values
         }
+        // The shared envelope accepts every tag the other records define, so a failure frame
+        // carrying a suite or a digest would otherwise be parsed and then silently ignored --
+        // the record would mean one thing on the wire and another to the decoder. This record
+        // defines exactly one tag; anything else is unknown here even though it is known elsewhere.
+        if (fields.keys.any { it != TAG_VERDICT }) {
+            return PakeAttemptFailureResult.Rejected(PakeRecordReject.UNKNOWN_FIELD)
+        }
         val verdictBytes = fields[TAG_VERDICT]
             ?: return PakeAttemptFailureResult.Rejected(PakeRecordReject.MISSING_FIELD)
         if (verdictBytes.size != 1) {
