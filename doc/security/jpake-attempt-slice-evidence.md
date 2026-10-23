@@ -317,3 +317,33 @@ not true in production. The switch — advertise only `JPAKE_MODP3072_ENTERED_CO
 `selectRequired`, invoke this path, delete the SAS generation and comparison, drop
 `HumanVerificationCode` from live approval, add the SAS-reachability verifier and move the live
 coordinator's API 23 matrix — remains a single later commit.
+
+**Evidence.** Two runs, and the second is the green one.
+
+Run `39999057151` on `99ca354f04cbbb40085f5408245af8bb905b1429` — **failure**, on the device only.
+3,199 JVM tests, **0 failed**, 0 skipped, 201 reports (`transport-lan` 424, `core-transfer` 583,
+`app` 588, `core-storage` 1,408, `core-design` 100, `core-data` 56, `core-model` 40); lint 0 errors,
+48 warnings; APKs 32.32 MiB and 1.10 MiB. Instrumentation ran for the first time — 58 tests,
+**1 failure** — `PakeSessionApi23Test#theComposedPathAuthenticatesOverRealConscryptTls` stopping at
+the first frame with `IndexOutOfBoundsException: offset=1, count=4, length=4` raised inside the TLS
+provider's `read`. This is the run that also proved the three JVM hangs were gone: the cases that
+had burned their annotations on `3aae5d05` passed here.
+
+Run `40003172019` on `68a095b57df89cdfcccbefe8aa6d4dfd6244488b` — **success**, and the tree this
+section describes: 3,209 JVM tests, **0 failed**, 0 skipped in 203 reports (`transport-lan` 434,
+`core-transfer` 583, `app` 588, `core-storage` 1,408, `core-design` 100, `core-data` 56,
+`core-model` 40). API 23 instrumentation: 58 tests, 0 failures, exit status 0, the phase log ending
+at `cleanup_completed`. Lint: 0 errors, 48 warnings in 7 reports. APKs: 32.32 MiB and 1.10 MiB. The
+composed chain authenticated over genuine Conscrypt TLS 1.3 on API 23, the authority was claimed
+once, and the payload gate refused on the device.
+
+**Four defects the execution found, all fixed before this run.** A wait whose deadline was compared
+against a frozen clock could never expire, which is what turned three cases into timeouts; the JVM
+link was using the production peer budget, so one side stopping without telling the peer left the
+other blocked for a minute; a case asserted that `internal` is not public in bytecode, which is not
+what `internal` means; and the frame prefix read asked for four bytes at offset one of a four-byte
+array, which only a real stream could catch.
+
+**Verdict for this increment.** The inert path is green on the JVM and on API 23. That is not a
+completed Part B: the live coordinator is unchanged, SAS still runs in production, and payload is
+still refused. `EXPERIMENTAL PART B INCOMPLETE`.
