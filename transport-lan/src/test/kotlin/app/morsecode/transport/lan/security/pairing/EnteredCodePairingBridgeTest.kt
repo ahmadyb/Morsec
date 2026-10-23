@@ -103,9 +103,10 @@ internal class EnteredCodePairingBridgeTest {
         waiting.start()
         val foreign = otherPrompter.awaitChallenge(EnteredCodeChallengeKind.ENTERED_CODE)
 
-        // A handle from another session cannot answer this one's prompt, and vice versa.
-        assertFalse(bridge.submitEnteredCode(foreign, "7KQF2XPD".toCharArray()))
-        assertFalse(bridge.submitDecision(foreign, SecureApprovalDecision.APPROVE))
+        // A handle from another session cannot answer this bridge, whatever it is asked to do.
+        val mine = bridge(RecordingPrompter())
+        assertFalse(mine.submitEnteredCode(foreign, "7KQF2XPD".toCharArray()))
+        assertFalse(mine.submitDecision(foreign, SecureApprovalDecision.APPROVE))
 
         other.close()
         waiting.join(10_000L)

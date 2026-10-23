@@ -109,7 +109,10 @@ internal class PakeSessionCoordinatorTest {
     @Test
     fun threeWrongCodesEndInLimitReached() {
         val fixture = PakeSessionFixture()
-        val responderInteraction = quietInteraction(fixture.board) { _, published -> wrongCode(published) }
+        val responderInteraction = quietInteraction(
+            fixture.board,
+            entered = { _, published -> wrongCode(published) },
+        )
 
         val (left, right) = runCoordinators(
             fixture.initiator(fixture.initiatorInteraction()),
