@@ -37,7 +37,6 @@
 
 package app.morsecode.transport.lan.security.pairing
 
-import app.morsecode.core.model.TransportKind
 import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.session.EncryptionCapability
 import app.morsecode.core.transfer.session.MonotonicClock
@@ -510,14 +509,4 @@ private class NoCloseExchangeIo(private val delegate: PairingExchangeIo) : Pairi
     override fun close() = Unit
 
     override fun toString(): String = "NoCloseExchangeIo(ids=[redacted])"
-}
-
-/** The two offers this milestone may select, checked once so the coordinator reads as prose. */
-internal object RequiredSuite {
-    fun offered(offer: PairingOfferV2): Boolean =
-        offer.transport == TransportKind.LAN &&
-            offer.offeredEncryption == EncryptionCapability.TLS_1_3 &&
-            PairingAuthenticationPolicy.isProductionSuite(
-                offer.offeredAuthentication ?: return false,
-            )
 }
