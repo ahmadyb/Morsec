@@ -267,17 +267,28 @@ is new is everything the switch will need, and none of it is called by productio
    release exactly once: a test closes it twice and asserts one release, one revocation and no
    second claim.
 
+4. Timing is part of the fixture, not an accident of the runner. Two cases asserted an expiry while
+   the suite's clock was frozen at its start value, so the wait they were measuring could never
+   elapse and each burned its whole `@Test` timeout on CI; the coordinator suite also used the
+   production peer budgets, so a case where one side stops without telling the peer left the other
+   blocking for a minute. The waits now run on a clock that advances with wall time, the JVM link
+   uses five-second exchange budgets that still dwarf an in-memory exchange, and every worker thread
+   is a daemon so a stuck case fails its own annotation instead of starving the run.
+
 **Tests.** JVM: `PakeSessionCoordinatorTest` (17 cases — honest run, single-use authority, payload
 still refused after control authentication, wrong code then retry, exhaustion, local and remote
 rejection, unanswered approval, record-key mismatch, an AEAD-refused record, a replayed confirmation
 frame refused by the record layer, a missing confirmation, cancellation, exactly-once release, two
 concurrent sessions, a legacy suite and a non-1.3 channel refused before a frame is written),
-`PakePairingProgressionTest` (16 cases over the ordered reducer: the honest sequence and a second
+`PakePairingProgressionTest` (15 cases over the ordered reducer: the honest sequence and a second
 authority refused, approval before PAKE, the remote approval standing in for the local one, a
 confirmation standing in for the PAKE, authentication before key confirmation, a replayed approval,
 an approval for another transcript or the sender's own role, a second confirmation, a legacy suite, a
-confirmation from the wrong role or transcript, a digest of the wrong width, an unconfirmed session,
-a settled attempt, and no public caller able to build transition evidence), `EnteredCodePairingBridgeTest`
+confirmation from the wrong role or transcript, a digest of the wrong width, an unconfirmed session
+and a settled attempt. The handover type is `internal` and its only source is the reducer, so the
+synthesis question is a visibility fact rather than something reflection can assert: `internal`
+classes are public in bytecode, and a case that claimed otherwise failed for exactly that reason),
+`EnteredCodePairingBridgeTest`
 (10) and `EnteredCodePairingSlotTest` (5). API 23: `PakeSessionApi23Test` runs the full chain over a
 real Conscrypt TLS 1.3 connection on loopback — the exporter material both sides derive is the TLS
 one, and both key confirmations cross a real encrypted stream — then asserts single-use authority and

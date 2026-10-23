@@ -129,25 +129,6 @@ internal class PakePairingProgressionTest {
     }
 
     @Test(timeout = 40_000L)
-    fun noPublicCallerCanBuildTransitionEvidence() {
-        // The handover is not a token: it is only constructible inside this module, and the class it
-        // carries is not public. Authority is re-derived downstream, so a hand-built transition
-        // would have to smuggle a genuinely confirmed session to be accepted.
-        assertFalse(
-            java.lang.reflect.Modifier.isPublic(
-                AuthenticatedTransition::class.java.modifiers,
-            ),
-        )
-        val constructors = AuthenticatedTransition::class.java.declaredConstructors
-            .filter { !it.isSynthetic }
-        assertTrue("a transition has exactly one declared constructor", constructors.size == 1)
-        assertFalse(
-            "no declared constructor may be public",
-            java.lang.reflect.Modifier.isPublic(constructors.single().modifiers),
-        )
-    }
-
-    @Test(timeout = 40_000L)
     fun aLegacySelectionNeverValidates() {
         val fixture = Fixture()
         assertFalse(

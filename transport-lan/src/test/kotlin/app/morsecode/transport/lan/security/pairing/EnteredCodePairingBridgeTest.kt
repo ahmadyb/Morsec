@@ -218,7 +218,7 @@ internal class EnteredCodePairingBridgeTest {
         EnteredCodePairingBridge(
             sessionId = sessionId,
             localRole = SecurePeerRole.RESPONDER,
-            clock = TestClock(startMillis = 1_000L),
+            clock = TickingClock(startMillis = 1_000L),
             prompter = prompter,
         )
 

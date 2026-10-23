@@ -94,7 +94,9 @@ public class PakeSessionApi23Test {
             assertNotNull(initiator.authority.claim())
             assertNull("a control authority is single use", initiator.authority.claim())
 
-            val decision = PayloadTransferGate.evaluate(offer(secureSessionId, SecurePeerRole.INITIATOR))
+            // The gate takes the session the authority was issued for, not an offer: an offer is a
+            // claim, and the gate's refusal must not depend on a claim.
+            val decision = PayloadTransferGate.evaluate(initiator.authority.authenticatedControlSession)
             assertTrue(decision is PayloadTransferDecision.Refused)
         } finally {
             executor.shutdownNow()

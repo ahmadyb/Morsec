@@ -65,6 +65,19 @@ internal class TestClock(startMillis: Long = 1_000L) : MonotonicClock {
 }
 
 /**
+ * A clock that starts at [startMillis] and then advances with the wall clock.
+ *
+ * Some waits are measured by comparing [MonotonicClock.nowMillis] against a deadline handed to the
+ * interaction, so a clock frozen on purpose never lets them expire and the case turns into a hang.
+ * Where a test asserts that something *expires*, it has to use this one.
+ */
+internal class TickingClock(private val startMillis: Long = 1_000L) : MonotonicClock {
+    private val startedAtNanos: Long = System.nanoTime()
+
+    override fun nowMillis(): Long = startMillis + (System.nanoTime() - startedAtNanos) / 1_000_000L
+}
+
+/**
  * Deterministic bytes that differ on every call.
  *
  * Differing per call is not cosmetic: two attempts that received identical entropy would present the

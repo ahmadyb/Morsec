@@ -95,6 +95,11 @@ internal class PakeSessionCoordinator(
     private val responderOffer: PairingOfferV2,
     private val transcriptDigest: ByteArray,
     private val recordBudgets: RecordBudgets = RecordBudgets.DEFAULT,
+    /**
+     * The exchange's deadlines. Defaulted to production's; a test shortens them so that a peer that
+     * never answers fails in a second instead of spending a real approval window.
+     */
+    private val exchangeBudgets: PairingExchangeBudgets = PairingExchangeBudgets.DEFAULT,
 ) {
     init {
         require(transcriptDigest.size == SecureSessionLimits.TRANSCRIPT_HASH_BYTES) {
@@ -162,6 +167,7 @@ internal class PakeSessionCoordinator(
             initiatorOffer = initiatorOffer,
             responderOffer = responderOffer,
             random = random,
+            budgets = exchangeBudgets,
         ).run()
         val confirmed = when (exchangeResult) {
             is PairingExchangeResult.Confirmed -> exchangeResult

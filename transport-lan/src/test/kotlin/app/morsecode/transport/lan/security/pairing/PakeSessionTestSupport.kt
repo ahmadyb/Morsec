@@ -191,7 +191,7 @@ internal class PakeLink(
     val transcriptDigest: ByteArray = ByteArray(32) { 0x66 },
     secret: ByteArray = ByteArray(32) { 0x0A },
 ) {
-    val clock = TestClock()
+    val clock = TickingClock()
     val board = CodeBoard()
 
     private val exchangeToInitiator = LinkedBlockingQueue<Any>()
@@ -258,6 +258,12 @@ internal class PakeLink(
         responderOffer = responderOffer,
         transcriptDigest = transcriptDigest,
         recordBudgets = RecordBudgets(writeMillis = 5_000L, readMillis = 1_500L),
+        exchangeBudgets = PairingExchangeBudgets(
+            peerResponseMillis = 5_000L,
+            roundMillis = 5_000L,
+            codeLifetimeMillis = 120_000L,
+            approvalMillis = 5_000L,
+        ),
     )
 
     fun controlSession(): NegotiatedSession = NegotiatedSession(
