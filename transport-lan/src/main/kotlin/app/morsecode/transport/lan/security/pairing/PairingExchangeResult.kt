@@ -29,6 +29,7 @@ package app.morsecode.transport.lan.security.pairing
 import app.morsecode.core.transfer.session.PakeApproval
 import app.morsecode.core.transfer.session.PakeApprovalDecision
 import app.morsecode.core.transfer.session.PakeAttemptId
+import app.morsecode.core.transfer.session.SecureApprovalDecision
 import app.morsecode.core.transfer.session.SecureSessionLimits
 import app.morsecode.transport.lan.security.jpake.ModpJpakeSession
 
@@ -86,12 +87,18 @@ internal sealed interface PairingExchangeResult {
      * caller, which is why the exchange does not close it on this path: the coordinator needs the
      * confirmed session as evidence when it builds the authority. Every other path closes it.
      *
+     * The attempt behind [session] is left *unsettled* on purpose. Issuing
+     * [app.morsecode.transport.lan.security.AuthenticatedControlAuthority] requires an attempt that
+     * has not been settled, so the exchange cannot settle it: the caller settles it once the record
+     * layer, both key confirmations and the authority itself have succeeded.
+     *
      * The members carry no visibility modifier because the enclosing interface is `internal`, which
      * is what confines them: nothing outside this module can name the type or hold a value of it.
      */
     class Confirmed internal constructor(
         val attemptId: PakeAttemptId,
         val attemptOrdinal: Int,
+        val localDecision: SecureApprovalDecision,
         val peerDecision: PakeApprovalDecision,
         val peerApproval: PakeApproval,
         val session: ModpJpakeSession,

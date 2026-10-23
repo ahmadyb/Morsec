@@ -66,6 +66,8 @@ const AUTHORIZED_JPAKE_FILES = new Set([
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/pairing/PairingAttemptExchange.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/pairing/PairingExchangeIo.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/pairing/PairingExchangeResult.kt',
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/pairing/PakePairingProgression.kt',
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/pairing/PakeSessionCoordinator.kt',
 ]);
 
 /**

@@ -221,3 +221,62 @@ instrumentation suite that raced on `cdff450` passed here.
 - Because none of that is wired, the SAS-removal claim is **not** yet true in production, and the
   static verifier still permits the SAS constants that the coordinator uses. The atomic rule means
   the offer must be removed in the same commit that makes the PAKE path mandatory.
+
+## The composed path, still inert
+
+This increment adds the whole authenticated-control chain beside the live one. `SecureLanPairingCoordinator.run()`
+is untouched: it still offers SAS, still calls `select`, and still never reaches an authority. What
+is new is everything the switch will need, and none of it is called by production.
+
+**What was added.**
+
+- `EnteredCodePairingBridge` and `EnteredCodePairingSlot` — the screen-facing half. One bridge per
+  control session, sharing the session's existing pairing gate with the SAS operation, so a session
+  cannot be in two pairings at once. Every prompt is a single-use handle bound to one session and one
+  role; the slot's shutdown resolves a pending prompt with no answer rather than a default approval.
+- `PairingChannel` / `SocketPairingRecordIo` / `TlsPairingChannel` — the two seams the composed path
+  needs from one connection: framed control records, then AES-GCM records, over the same socket. The
+  socket reader validates every header with `SecureRecordCodec.decodeHeader` before allocating a
+  ciphertext buffer, and treats a budget that runs out as a timeout rather than arming a deadline
+  that would abortively close the socket underneath the peer.
+- `PakePairingProgression` — the seven ordered states beside the live `SecurePairingState` enum,
+  with typed evidence objects and no `advance(boolean)`. Approval before the PAKE is refused, a
+  remote approval cannot stand in for the local one, key confirmation cannot stand in for the PAKE,
+  a duplicate confirmation fails closed, and AUTHENTICATED is reachable once.
+- `PakeSessionCoordinator` — required-suite selection, the entered-code exchange, both approvals, the
+  exporter-derived record layer, both key confirmations and one single-use control authority. It is
+  constructed by nothing in production.
+
+**Two changes to the inert exchange, both consequences of composing it.**
+
+1. `PairingExchangeResult.Confirmed` now carries the local decision. The exchange has already asked
+   the human; carrying the answer out is what lets the reducer record the same decision afterwards
+   without a second prompt, which is what makes "approval before PAKE" unreachable rather than
+   merely unusual.
+2. A confirmed exchange no longer settles its attempt or invalidates its ledger. `issue` refuses an
+   attempt that has already been settled, so the exchange cannot settle it and still hand the caller
+   something an authority can be built from; the caller settles it after the authority exists. The
+   attempt's abandonment in the exchange's own failure path is skipped only for the attempt it
+   handed over, so a stop still leaves no outstanding attempt behind.
+
+**Tests.** JVM: `PakeSessionCoordinatorTest` (16 cases — honest run, single-use authority, payload
+still refused, wrong code then retry, exhaustion, local and remote rejection, unanswered approval, a
+corrupted record, a missing confirmation, a duplicate confirmation, cancellation, exactly-once close,
+two concurrent sessions, a legacy suite and a non-1.3 channel refused before a frame is written),
+`PakePairingProgressionTest` (15 cases over the ordered reducer), `EnteredCodePairingBridgeTest` (10)
+and `EnteredCodePairingSlotTest` (5). API 23: `PakeSessionApi23Test` runs the full chain over a real
+Conscrypt TLS 1.3 connection on loopback — the exporter material both sides derive is the TLS one,
+and both key confirmations cross a real encrypted stream — then asserts single-use authority and the
+payload refusal on the device.
+
+**What these tests cannot show.** The JVM transport is in-memory and its exporter is deterministic,
+so the JVM cases prove the composition is wired correctly and prove nothing about TLS. Nothing here
+is a review of the construction, and none of it is authority for payload. See the owner-risk waiver
+of 2026-10-19.
+
+**Still missing, unchanged by this increment.** The coordinator still offers SAS, still calls
+`select` rather than `selectRequired`, and still never reaches an authority. The SAS-removal claim is
+not true in production. The switch — advertise only `JPAKE_MODP3072_ENTERED_CODE_V1`, call
+`selectRequired`, invoke this path, delete the SAS generation and comparison, drop
+`HumanVerificationCode` from live approval, add the SAS-reachability verifier and move the live
+coordinator's API 23 matrix — remains a single later commit.

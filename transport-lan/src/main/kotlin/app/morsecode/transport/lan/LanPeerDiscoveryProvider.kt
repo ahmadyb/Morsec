@@ -31,6 +31,9 @@ import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordLayer
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionOperation
+import app.morsecode.transport.lan.security.pairing.EnteredCodePairingBridge
+import app.morsecode.transport.lan.security.pairing.EnteredCodePairingPrompter
+import app.morsecode.transport.lan.security.pairing.EnteredCodePairingSlot
 import app.morsecode.transport.lan.security.ControlEstablishmentObserver
 import app.morsecode.transport.lan.security.PairingAdmissionScope
 import app.morsecode.transport.lan.security.SecurePairingAttemptLimiter
@@ -1356,6 +1359,22 @@ public class LanPeerDiscoveryProvider(
             @Volatile
             private var negotiatedValue: app.morsecode.core.transfer.session.NegotiatedSession = negotiatedSession
 
+            /**
+             * The entered-code bridge for this session, if one was started.
+             *
+             * It shares [pairingStarted] with the legacy SAS operation, so a session cannot be in
+             * both a comparison and an entered-code exchange at once, and it is closed by the same
+             * `close()` that cancels a pairing. Declared after [negotiatedValue] because the slot
+             * binds this session's identifier the moment it is constructed.
+             */
+            private val enteredCodePairing = EnteredCodePairingSlot(
+                sessionId = negotiatedValue.attemptId,
+                localRole = role,
+                clock = clock,
+                gate = pairingStarted,
+                isSessionClosed = { closed.get() || closedSession.get() },
+            )
+
             override val negotiated: app.morsecode.core.transfer.session.NegotiatedSession
                 get() = negotiatedValue
 
@@ -1377,6 +1396,18 @@ public class LanPeerDiscoveryProvider(
                 operation.start()
                 return operation
             }
+
+            /**
+             * Opens the entered-code interaction for this session.
+             *
+             * Nothing calls this yet -- the live coordinator still runs the SAS path -- but the
+             * lifecycle it needs is production code: one bridge per control session, bound to this
+             * session's id and role, sharing the pairing gate with the SAS operation, and closed by
+             * the same `close()` that cancels a pairing. A closed, closing or already-paired
+             * session returns null rather than a bridge nobody can answer.
+             */
+            internal fun beginEnteredCodePairing(prompter: EnteredCodePairingPrompter): EnteredCodePairingBridge? =
+                enteredCodePairing.open(prompter)
 
             fun expireSecureSessionIfNeeded(nowElapsedMillis: Long) {
                 val expiresAt = secureExpiresAtElapsedMillis ?: return
@@ -1442,6 +1473,9 @@ public class LanPeerDiscoveryProvider(
             @Synchronized
             override fun close() {
                 if (!closedSession.compareAndSet(false, true)) return
+                // Resolves any outstanding prompt exactly once and refuses every later answer, so a
+                // screen that is being dismissed cannot approve a pairing on its way out.
+                enteredCodePairing.closeOnce()
                 activePairing.get()?.cancel()
                 secureControlChannel?.close()
                 secureControlChannel = null

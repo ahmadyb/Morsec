@@ -112,6 +112,16 @@ internal class PairingAttemptExchange(
     private var codeExpiresAtElapsedMillis: Long = 0L
     private var previousAttemptId: PakeAttemptId? = null
     private var session: ModpJpakeSession? = null
+
+    /**
+     * The attempt handed to the caller on success.
+     *
+     * Held so the attempt's own `finally` does not abandon it, and so the ledger is not invalidated
+     * under it: the authority is issued against an attempt that is still outstanding, and settling
+     * it is the caller's job once the whole chain -- record layer, key confirmation, authority --
+     * has actually completed.
+     */
+    private var handedOffAttempt: PakeAttempt? = null
     private var closed: Boolean = false
 
     init {
@@ -232,11 +242,17 @@ internal class PairingAttemptExchange(
             }
             when (val approval = runApproval(attempt)) {
                 is ApprovalOutcome.Confirmed -> {
-                    if (!attempt.succeed()) return AttemptStep.Stop(PairingExchangeFailure.INTERNAL)
+                    // Deliberately not settled here. A confirmed exchange is three rounds and two
+                    // approvals, not an authenticated session: the caller still has to derive the
+                    // record layer, confirm both keys and issue authority, and the authority is
+                    // refused for an attempt that has already been settled. Handing the attempt
+                    // over unsettled is what makes that chain enforceable rather than advisory.
+                    handedOffAttempt = attempt
                     return AttemptStep.Confirmed(
                         PairingExchangeResult.Confirmed(
                             attemptId = attempt.id,
                             attemptOrdinal = attempt.ordinal,
+                            localDecision = approval.localDecision,
                             peerDecision = approval.peerApproval.decision,
                             peerApproval = approval.peerApproval,
                             session = opened,
@@ -251,7 +267,7 @@ internal class PairingAttemptExchange(
             // must not leave the ledger believing an attempt is still running. Abandoning is
             // uncharged and idempotent, so the paths that already charged or succeeded keep their
             // settlement and this is a no-op for them.
-            if (!attempt.isSettled()) attempt.abandon()
+            if (attempt !== handedOffAttempt && !attempt.isSettled()) attempt.abandon()
         }
     }
 
@@ -700,7 +716,10 @@ internal class PairingAttemptExchange(
     // --- approval ---------------------------------------------------------------------------
 
     private sealed interface ApprovalOutcome {
-        class Confirmed(val peerApproval: PakeApproval) : ApprovalOutcome
+        class Confirmed(
+            val localDecision: SecureApprovalDecision,
+            val peerApproval: PakeApproval,
+        ) : ApprovalOutcome
         class Stop(val reason: PairingExchangeFailure) : ApprovalOutcome
     }
 
@@ -760,7 +779,16 @@ internal class PairingAttemptExchange(
             peer.clearSensitive()
             return ApprovalOutcome.Stop(PairingExchangeFailure.APPROVAL_REJECTED)
         }
-        return ApprovalOutcome.Confirmed(peer)
+        // The decision this side actually recorded, carried out with the peer's record so the
+        // caller does not have to ask the human a second time to learn what they already said.
+        return ApprovalOutcome.Confirmed(
+            localDecision = if (decision == PakeApprovalDecision.APPROVE) {
+                SecureApprovalDecision.APPROVE
+            } else {
+                SecureApprovalDecision.REJECT
+            },
+            peerApproval = peer,
+        )
     }
 
     /**
@@ -896,7 +924,11 @@ internal class PairingAttemptExchange(
         code = null
         codeInstance?.fill(0)
         codeInstance = null
-        ledger?.invalidate()
+        if (!keepSession) {
+            // On success the ledger stays valid: the handed-off attempt still has to settle, and
+            // invalidating here would wipe the code instance the caller's authority is bound to.
+            ledger?.invalidate()
+        }
         ledger = null
         io.close()
     }
