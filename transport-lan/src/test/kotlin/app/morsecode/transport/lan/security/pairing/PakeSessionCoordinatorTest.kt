@@ -133,7 +133,9 @@ internal class PakeSessionCoordinatorTest {
             link.responder(responderInteraction),
         )
 
-        assertEquals(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED, refused(left).reason)
+        // The initiator learns that its peer declined, not why or by whom: the record says REJECT and
+        // binds to this exchange, and the refusal is the same one a local decline produces.
+        assertEquals(SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED, refused(left).reason)
     }
 
     @Test(timeout = 120_000L)

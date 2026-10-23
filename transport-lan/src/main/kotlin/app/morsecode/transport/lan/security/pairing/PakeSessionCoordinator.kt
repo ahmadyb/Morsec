@@ -245,8 +245,10 @@ internal class PakeSessionCoordinator(
     private fun confirmKeys(layer: SecureRecordLayer, recordIo: PairingRecordIo): PakeSessionOutcome? {
         val written = writeKeyConfirmation(layer, recordIo)
         if (!written) return refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
-        val peerConfirmation = readKeyConfirmation(layer, recordIo)
-            ?: return refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+        val peerConfirmation = when (val read = readKeyConfirmation(layer, recordIo)) {
+            is ConfirmationRead.Refused -> return refused(read.reason)
+            is ConfirmationRead.Verified -> read.confirmation
+        }
         val verified = try {
             progression.remoteKeyConfirmationVerified(peerConfirmation)
         } finally {
@@ -294,20 +296,33 @@ internal class PakeSessionCoordinator(
         }
     }
 
-    /** Reads the peer's confirmation record, or null when it did not arrive or did not verify. */
+    /** One read of the peer's confirmation, or the reason it will not be had. */
+    private sealed interface ConfirmationRead {
+        class Verified(val confirmation: SecureKeyConfirmation) : ConfirmationRead
+
+        class Refused(val reason: SessionFailureCode) : ConfirmationRead
+    }
+
+    /**
+     * Reads the peer's confirmation record.
+     *
+     * The reason the record layer gives is carried out rather than flattened: a frame the AEAD
+     * refused and a confirmation that never arrived are different events, and the caller reports
+     * which one happened.
+     */
     private fun readKeyConfirmation(
         layer: SecureRecordLayer,
         recordIo: PairingRecordIo,
-    ): SecureKeyConfirmation? {
+    ): ConfirmationRead {
         // One budget for the whole wait, not a slice per attempt: the framing may hand back a frame
         // split across several reads, and a per-slice timeout would be indistinguishable from a
         // truncated frame. A peer that sends nothing costs the full budget exactly once.
         val deadline = clock.nowMillis() + recordBudgets.readMillis
         var residual = recordBudgets.readMillis
         while (true) {
-            if (residual <= 0L) return null
+            if (residual <= 0L) return ConfirmationRead.Refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
             val now = clock.nowMillis()
-            if (now >= deadline) return null
+            if (now >= deadline) return ConfirmationRead.Refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
             val budget = minOf(residual, maxOf(1L, deadline - now))
             val read = recordIo.readFrame(layer.sessionId, budget)
             val frame = when (read) {
@@ -318,7 +333,10 @@ internal class PakeSessionCoordinator(
                     residual = 0L
                     continue
                 }
-                PairingRecordRead.EndOfStream, PairingRecordRead.Invalid -> return null
+                PairingRecordRead.EndOfStream ->
+                    return ConfirmationRead.Refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+                PairingRecordRead.Invalid ->
+                    return ConfirmationRead.Refused(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
             }
             val decoded = try {
                 layer.unprotect(frame)
@@ -327,18 +345,25 @@ internal class PakeSessionCoordinator(
             }
             val record = when (decoded) {
                 is SecureRecordResult.Decoded -> decoded.record
-                is SecureRecordResult.Encoded, is SecureRecordResult.Failed -> return null
+                is SecureRecordResult.Failed -> return ConfirmationRead.Refused(decoded.failure.code)
+                is SecureRecordResult.Encoded ->
+                    return ConfirmationRead.Refused(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
             }
             if (record.type != SecureRecordType.KEY_CONFIRMATION) {
                 record.clearSensitive()
-                return null
+                return ConfirmationRead.Refused(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
             }
             val payload = record.payloadBytes()
             record.clearSensitive()
-            return try {
+            val confirmation = try {
                 SecureKeyConfirmationCodec.decode(payload)
             } finally {
                 payload.fill(0)
+            }
+            return if (confirmation == null) {
+                ConfirmationRead.Refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+            } else {
+                ConfirmationRead.Verified(confirmation)
             }
         }
     }
