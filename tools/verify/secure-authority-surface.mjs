@@ -888,7 +888,7 @@ function verifyPairingOwnershipAfterLeaseStop() {
   );
   check(
     'a control session reports cancelled from the lease flag, not only its own',
-    /override fun isCancelled\(\): Boolean = cancelled\.get\(\) \|\| closedSession\.get\(\) \|\| closed\.get\(\)/.test(provider),
+    /fun isCancelled\(\): Boolean = cancelled\.get\(\) \|\| closedSession\.get\(\) \|\| closed\.get\(\)/.test(provider),
   );
   check(
     'an authenticated result is re-checked against cancellation before the session is installed',

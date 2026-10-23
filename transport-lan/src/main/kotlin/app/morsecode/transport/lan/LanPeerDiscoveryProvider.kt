@@ -1501,7 +1501,12 @@ public class LanPeerDiscoveryProvider(
                 @Volatile
                 private var coordinator: SecureLanPairingCoordinator? = null
 
-                override fun isCancelled(): Boolean = cancelled.get() || closedSession.get() || closed.get()
+                /**
+                 * Local ownership check. No longer an interface member: the operation is not the
+                 * interaction any more -- the bridge is -- and a cancellation now reaches the
+                 * exchange through the bridge closing, not through this flag.
+                 */
+                fun isCancelled(): Boolean = cancelled.get() || closedSession.get() || closed.get()
 
                 fun start() {
                     val work = FutureTask<Unit>({
