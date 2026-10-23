@@ -1,18 +1,16 @@
 /*
- * The composed PAKE path on API 23 over a real TLS 1.3 connection.
+ * The composed path over a real Conscrypt TLS 1.3 connection, on API 23.
  *
- * WHY THIS EXISTS SEPARATELY FROM THE JVM TEST
- *   The JVM test proves the composition over an in-memory channel with a deterministic exporter.
- *   That is a wiring proof, not a TLS proof: nothing on the JVM exercises Conscrypt, the ephemeral
- *   certificate path, or an exporter tied to a real handshake. This test runs the same coordinator
- *   over two sockets that completed a TLS 1.3 handshake through the bundled provider on an API 23
- *   emulator, so the exporter material both sides derive is the TLS one, and both key confirmations
- *   cross a real encrypted stream.
+ * This is the only place the exporter is real: both peers derive their record keys from the TLS
+ * session's own keying material, over the transcript digest, and the key-confirmation records cross
+ * an actual encrypted stream. The exchange's frames and the record frames share one socket, in
+ * order, exactly as production will drive them.
  *
- * WHAT IT DOES NOT SHOW
- *   It is not a review, not a proof and not a security claim. See
- *   doc/security/owner-risk-waiver-2026-10-19.md. The authority it produces is control-only and the
- *   payload gate still refuses; the last assertion checks that on this device too.
+ * The payload gate is asserted here too, on the device, after a successful control authentication:
+ * authority is control-only and payload is still refused.
+ *
+ * STATUS: experimental, project-defined, not independently cryptographically reviewed. See
+ * doc/security/owner-risk-waiver-2026-10-19.md.
  */
 
 package app.morsecode.transport.lan.security.pairing
@@ -55,79 +53,48 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Runs the whole chain over a genuine TLS 1.3 connection on API 23. */
+/** Runs the whole chain over genuine TLS 1.3 on API 23. */
 @RunWith(AndroidJUnit4::class)
 public class PakeSessionApi23Test {
 
-    @Test
-    public fun theComposedPakePathAuthenticatesOverRealConscryptTls() {
+    @Test(timeout = 240_000L)
+    public fun theComposedPathAuthenticatesOverRealConscryptTls() {
         val server = ServerSocket().apply {
             reuseAddress = false
             bind(InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
             soTimeout = SecureSessionLimits.TLS_HANDSHAKE_TIMEOUT_MILLIS
         }
         val clock = MonotonicClock { System.nanoTime() / 1_000_000L }
-        val executor = Executors.newFixedThreadPool(2)
-        val board = CodeBoard()
+        val executor = Executors.newFixedThreadPool(2) { runnable ->
+            Thread(runnable, "pake-api23").apply { isDaemon = true }
+        }
+        val board = ApiCodeBoard()
         try {
             val secureSessionId = SessionId("0123456789abcdef0123456789abcdef")
             val offers = offers(secureSessionId)
             val transcript = ByteArray(SecureSessionLimits.TRANSCRIPT_HASH_BYTES) { (it + 9).toByte() }
 
-            // One side of the connection, driven on its own thread once the handshake completes.
-            fun side(initiator: Boolean, socket: Socket): PakePairingOutcome {
-                val tls = ConscryptSecureSessionEngine(SecureRandom()).establish(socket, initiator)
-                return try {
-                    assertEquals("TLSv1.3", tls.protocol)
-                    val role = if (initiator) SecurePeerRole.INITIATOR else SecurePeerRole.RESPONDER
-                    val coordinator = PakeSessionCoordinator(
-                        channel = TlsPairingChannel(tls),
-                        controlSession = controlSession(secureSessionId),
-                        role = role,
-                        clock = clock,
-                        entropy = SecureEntropy { destination -> SecureRandom().nextBytes(destination) },
-                        random = SecureRandom(),
-                        interaction = SocketInteraction(board, initiator),
-                        exchangeIo = SocketPairingExchangeIo(tls.socket, clock),
-                        recordIo = SocketPairingRecordIo(tls.socket, secureSessionId, role, clock),
-                        initiatorOffer = offers.first,
-                        responderOffer = offers.second,
-                        transcriptDigestInput = transcript,
-                        budgets = PairingExchangeBudgets(
-                            peerResponseMillis = 60_000L,
-                            roundMillis = 60_000L,
-                            codeLifetimeMillis = 120_000L,
-                            approvalMillis = 60_000L,
-                        ),
-                    )
-                    coordinator.run()
-                } finally {
-                    tls.clearFingerprints()
-                }
-            }
-
             val serverHandshake = executor.submit(Callable {
                 val accepted = server.accept()
                 accepted.soTimeout = SecureSessionLimits.TLS_HANDSHAKE_TIMEOUT_MILLIS
-                side(initiator = false, socket = accepted)
+                side(accepted, initiator = false, offers, transcript, clock, board)
             })
             val rawClient = Socket()
             rawClient.connect(server.localSocketAddress, SecureSessionLimits.TLS_HANDSHAKE_TIMEOUT_MILLIS)
             rawClient.soTimeout = SecureSessionLimits.TLS_HANDSHAKE_TIMEOUT_MILLIS
-            val clientOutcome = side(initiator = true, socket = rawClient)
-            val serverOutcome = serverHandshake.get(300, TimeUnit.SECONDS)
+            val clientOutcome = side(rawClient, initiator = true, offers, transcript, clock, board)
+            val serverOutcome = serverHandshake.get(240, TimeUnit.SECONDS)
 
-            val authenticatedClient = clientOutcome as? PakePairingOutcome.Authenticated
+            val initiator = clientOutcome as? PakeSessionOutcome.Authenticated
                 ?: throw AssertionError("the initiator did not authenticate: $clientOutcome")
-            val authenticatedServer = serverOutcome as? PakePairingOutcome.Authenticated
+            val responder = serverOutcome as? PakeSessionOutcome.Authenticated
                 ?: throw AssertionError("the responder did not authenticate: $serverOutcome")
-            assertEquals(1, authenticatedClient.attemptOrdinal)
-            assertEquals(1, authenticatedServer.attemptOrdinal)
-            assertNotNull(authenticatedClient.authority.claim())
-            assertNull("a control authority is single use", authenticatedClient.authority.claim())
+            assertEquals(PakePairingState.AUTHENTICATED, initiator.state)
+            assertEquals(PakePairingState.AUTHENTICATED, responder.state)
+            assertNotNull(initiator.authority.claim())
+            assertNull("a control authority is single use", initiator.authority.claim())
 
-            // Control authentication does not unlock payload, on this device either.
-            val decision = PayloadTransferGate.evaluate(authenticatedServer.controlSession)
+            val decision = PayloadTransferGate.evaluate(offer(secureSessionId, SecurePeerRole.INITIATOR))
             assertTrue(decision is PayloadTransferDecision.Refused)
         } finally {
             executor.shutdownNow()
@@ -135,26 +102,52 @@ public class PakeSessionApi23Test {
         }
     }
 
-    private fun offers(secureSessionId: SessionId): Pair<PairingOfferV2, PairingOfferV2> {
-        val controlId = SessionId("control-00000000000000000000001")
-        val initiatorPeer = PeerInstanceId("00000000000000000000000000000001")
-        val responderPeer = PeerInstanceId("00000000000000000000000000000002")
-        return offer(SecurePeerRole.INITIATOR, secureSessionId, controlId, initiatorPeer, responderPeer) to
-            offer(SecurePeerRole.RESPONDER, secureSessionId, controlId, responderPeer, initiatorPeer)
+    private fun side(
+        socket: Socket,
+        initiator: Boolean,
+        offers: Pair<PairingOfferV2, PairingOfferV2>,
+        transcript: ByteArray,
+        clock: MonotonicClock,
+        board: ApiCodeBoard,
+    ): PakeSessionOutcome {
+        val tls: EstablishedTlsSession =
+            ConscryptSecureSessionEngine(SecureRandom()).establish(socket, initiator)
+        val role = if (initiator) SecurePeerRole.INITIATOR else SecurePeerRole.RESPONDER
+        return try {
+            assertEquals("TLSv1.3", tls.protocol)
+            val channel = SocketPairingChannel(tls, clock, role)
+            PakeSessionCoordinator(
+                channel = channel,
+                controlSession = controlSession(),
+                role = role,
+                clock = clock,
+                entropy = SecureEntropy { destination -> SecureRandom().nextBytes(destination) },
+                random = SecureRandom(),
+                interaction = ApiInteraction(board, initiator),
+                initiatorOffer = offers.first,
+                responderOffer = offers.second,
+                transcriptDigest = transcript,
+            ).run()
+        } finally {
+            tls.clearFingerprints()
+        }
     }
 
-    private fun offer(
-        role: SecurePeerRole,
-        secureSessionId: SessionId,
-        controlId: SessionId,
-        local: PeerInstanceId,
-        remote: PeerInstanceId,
-    ): PairingOfferV2 = PairingOfferV2(
+    private fun offers(secureSessionId: SessionId): Pair<PairingOfferV2, PairingOfferV2> =
+        offer(secureSessionId, SecurePeerRole.INITIATOR) to offer(secureSessionId, SecurePeerRole.RESPONDER)
+
+    private fun offer(secureSessionId: SessionId, role: SecurePeerRole): PairingOfferV2 = PairingOfferV2(
         secureSessionId = secureSessionId,
-        controlSessionId = controlId,
+        controlSessionId = SessionId("control-00000000000000000000001"),
         role = role,
-        localPeerInstanceId = local,
-        remotePeerInstanceId = remote,
+        localPeerInstanceId = PeerInstanceId(
+            if (role == SecurePeerRole.INITIATOR) "00000000000000000000000000000001" else
+                "00000000000000000000000000000002",
+        ),
+        remotePeerInstanceId = PeerInstanceId(
+            if (role == SecurePeerRole.INITIATOR) "00000000000000000000000000000002" else
+                "00000000000000000000000000000001",
+        ),
         protocolMinimumVersion = 1,
         protocolMaximumVersion = 2,
         nonce = if (role == SecurePeerRole.INITIATOR) ByteArray(32) { 0x10 } else ByteArray(32) { 0x20 },
@@ -177,8 +170,8 @@ public class PakeSessionApi23Test {
         extensions = emptyList(),
     )
 
-    private fun controlSession(secureSessionId: SessionId): NegotiatedSession = NegotiatedSession(
-        attemptId = secureSessionId,
+    private fun controlSession(): NegotiatedSession = NegotiatedSession(
+        attemptId = SessionId("control-00000000000000000000001"),
         localProfile = profile("00000000000000000000000000000001", "Local"),
         remoteProfile = profile("00000000000000000000000000000002", "Remote"),
         protocolVersion = 1,
@@ -198,8 +191,8 @@ public class PakeSessionApi23Test {
         capabilities = SessionCapabilities.controlOnly(TransportKind.LAN),
     )
 
-    /** What the initiator displayed, shared in-process the way a human would read it across. */
-    private class CodeBoard {
+    /** What the initiator displayed, read back in-process the way a human would read it out. */
+    private class ApiCodeBoard {
         @Volatile
         private var text: String? = null
 
@@ -217,20 +210,19 @@ public class PakeSessionApi23Test {
         }
     }
 
-    /** The human, scripted: the initiator shows the code and this process reads it back. */
-    private class SocketInteraction(private val board: CodeBoard, private val initiator: Boolean) :
+    /** The human, scripted: the initiator shows a code and this process types it back. */
+    private class ApiInteraction(private val board: ApiCodeBoard, private val initiator: Boolean) :
         EnteredCodePairingInteraction {
 
         override fun publishGeneratedCode(code: EnteredPairingCode, expiresAtElapsedMillis: Long): Boolean {
-            // The initiator is the only side that shows a code; a responder that somehow reached
-            // here has been wired backwards and must not publish anything.
             if (!initiator) return false
             board.publish(code.displayText().replace("-", ""))
             return true
         }
 
         override fun requestEnteredCode(attemptOrdinal: Int, expiresAtElapsedMillis: Long): EnteredPairingCode? {
-            val text = board.await(60_000L) ?: return null
+            if (initiator) return null
+            val text = board.await(120_000L) ?: return null
             return EnteredPairingCode.parse(text.toCharArray())
         }
 

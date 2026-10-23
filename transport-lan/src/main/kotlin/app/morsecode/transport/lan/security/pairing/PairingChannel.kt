@@ -1,235 +1,248 @@
 /*
- * The two seams the composed PAKE path needs from the connection it runs over.
+ * What the composed path needs from the connection: keying material, and record framing.
  *
- * WHY TWO SEAMS AND NOT ONE
- *   The path speaks twice on the same TLS stream, in two different formats. First it carries the
- *   pairing's control records -- attempt start, the three rounds, a failure verdict, the approval --
- *   as length-prefixed frames. Then, once the record layer has been derived, it carries
- *   key-confirmation records protected with AES-GCM. Both are byte streams on one socket; they
- *   differ in framing, not in ownership.
+ * WHY AN INTERFACE AND NOT THE SOCKET
+ *   The composed path must be exercised twice. On a device, against the bundled Conscrypt TLS 1.3
+ *   session the coordinator already established, so the exporter material is produced by a real
+ *   handshake. On the JVM, where there is no Conscrypt, so the order of the steps, the record
+ *   framing and every refusal can be driven deterministically. Handing the path an `SSLSocket`
+ *   would make the second impossible and would put socket code inside the proof path.
  *
- *   Keeping them as `PairingExchangeIo` (already written for the inert exchange) plus a small
- *   [PairingRecordIo] means the composed path never touches a socket directly, and a test can drive
- *   it over the same in-memory channels the exchange tests use. It also means the path cannot read
- *   the peer's plaintext: everything that comes back is either a framed control record or an
- *   authenticated record the record layer accepted.
+ * WHAT THE INTERFACE CANNOT DO
+ *   It cannot assert a result. It exports bytes, builds an AEAD and moves frames; the only thing
+ *   that can say "the PAKE succeeded" is a confirmed `ModpJpakeSession`, and the only thing that can
+ *   say "the keys agree" is a confirmation record the peer's AEAD accepted.
  *
- * WHY [PairingChannel] EXISTS
- *   The composed path needs three things from TLS: the negotiated protocol, the exporter and the
- *   AEAD factory. It must not need the `SSLSocket` itself, because the transport modules differ:
- *   production has one, the JVM tests have no Conscrypt at all. [TlsPairingChannel] is the
- *   production adapter; the test adapter in `src/test` supplies deterministic exporter bytes and is
- *   labelled as such. Neither can express "the PAKE succeeded": the exporter only derives keys, and
- *   the protocol string is compared against `TLSv1.3` before anything else happens.
+ * FRAMING
+ *   Two framings share one stream, in order: the exchange's length-prefixed frames, then the record
+ *   layer's self-describing MSR1 frames. [PairingRecordIo] is the second; [PairingExchangeIo] is the
+ *   first, unchanged from the inert exchange.
  *
  * STATUS
- *   Experimental, project-defined and not independently cryptographically reviewed. The owner
- *   accepted that risk on 2026-10-19; see doc/security/owner-risk-waiver-2026-10-19.md.
+ *   Experimental, project-defined, not independently cryptographically reviewed. The owner accepted
+ *   that risk on 2026-10-19; see doc/security/owner-risk-waiver-2026-10-19.md.
  */
 
 package app.morsecode.transport.lan.security.pairing
 
 import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.session.MonotonicClock
-import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordAead
+import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordCodec
-import app.morsecode.core.transfer.session.SecureRecordLayer
-import app.morsecode.core.transfer.session.SecureRecordResult
-import app.morsecode.transport.lan.security.DeadlineOutcome
+import app.morsecode.core.transfer.session.SecureRecordDirection
 import app.morsecode.transport.lan.security.EstablishedTlsSession
 import app.morsecode.transport.lan.security.MonotonicSocketDeadline
 import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.io.IOException
 import java.net.Socket
 import java.net.SocketTimeoutException
 
-/** One protected record frame, or why there is none. */
+/** One read of a protected record frame, or the reason there is none. */
 internal sealed interface PairingRecordRead {
-    /** A frame the record layer authenticated. [frame] is still encrypted; hand it to `unprotect`. */
-    class Frame(val frame: ByteArray) : PairingRecordRead
+    /** A complete frame, header included, exactly as it crossed the wire. */
+    class Frame(val bytes: ByteArray) : PairingRecordRead
 
+    /** The peer closed the stream. */
     data object EndOfStream : PairingRecordRead
 
+    /** No complete frame within the budget. Recoverable: the caller may read again. */
     data object TimedOut : PairingRecordRead
 
-    /** A frame that cannot be one this protocol produces. Never partially read. */
+    /** Bytes that cannot be a record of this session. Never recoverable. */
     data object Invalid : PairingRecordRead
 }
 
 /**
- * Reads and writes protected record frames over the same stream the PAKE frames used.
+ * Reads and writes whole protected record frames.
  *
- * The interface exists so the composed path can be driven over an in-memory channel. The frame
- * bounds, the deadline behaviour and the "one call returns at most one complete frame" rule are the
- * same obligations [PairingExchangeIo] carries, for the same reasons.
+ * Frame boundaries come from the record header, not from a second length prefix: the record layer
+ * is the only thing that knows how to delimit its own frames, and duplicating that here would give
+ * the two places a way to disagree.
  */
 internal interface PairingRecordIo {
-    fun readRecordFrame(budgetMillis: Long): PairingRecordRead
+    fun readFrame(sessionId: SessionId, budgetMillis: Long): PairingRecordRead
 
-    fun writeRecordFrame(frame: ByteArray, budgetMillis: Long): Boolean
+    fun writeFrame(frame: ByteArray, budgetMillis: Long): Boolean
 
+    /** Releases the underlying stream. Idempotent. */
     fun close()
 }
 
 /**
- * The production record transport: the socket the PAKE frames already crossed.
+ * The production record transport: the same socket the exchange's frames crossed, in order.
  *
- * It shares the socket with `SocketPairingExchangeIo`, so it must not re-buffer or re-open anything:
- * a record follows the last PAKE frame on the same byte stream, in order.
+ * The header is validated by [SecureRecordCodec.decodeHeader] *before* the ciphertext body is read:
+ * magic, version, this session's identifier, the expected direction, a bounded sequence number, a
+ * known record type and the declared length all have to hold first. That is what stops a peer from
+ * making this allocate an arbitrary buffer by declaring one.
  */
 internal class SocketPairingRecordIo(
     private val socket: Socket,
-    private val sessionId: SessionId,
-    private val localRole: SecurePeerRole,
     private val clock: MonotonicClock,
+    private val expectedDirection: SecureRecordDirection,
 ) : PairingRecordIo {
 
     @Volatile
     private var closed: Boolean = false
 
-    /**
-     * Reads one whole frame, or reports why there is none.
-     *
-     * The deadline is checked, never armed: arming aborts the socket, which is the right behaviour
-     * for a blocked write and the wrong one for a read that may still be waiting on a peer which is
-     * itself waiting on a human. Exhausting the budget here abandons the socket to its owner rather
-     * than killing it.
-     */
-    override fun readRecordFrame(budgetMillis: Long): PairingRecordRead {
+    override fun readFrame(sessionId: SessionId, budgetMillis: Long): PairingRecordRead {
         if (closed) return PairingRecordRead.EndOfStream
         if (budgetMillis <= 0L) return PairingRecordRead.TimedOut
+        val deadline = MonotonicSocketDeadline("secure-record", socket, budgetMillis, clock::nowMillis)
         val input = try {
-            DataInputStream(socket.inputStream)
+            DataInputStream(socket.getInputStream())
         } catch (_: IOException) {
             return PairingRecordRead.Invalid
         }
-        val deadline = MonotonicSocketDeadline("secure-record-read", socket, budgetMillis, clock::nowMillis)
-        try {
+        return try {
             val header = ByteArray(SecureRecordCodec.HEADER_SIZE_BYTES)
-            when (readFully(input, header, 0, header.size, deadline, cleanEofAllowed = true)) {
-                ReadProgress.COMPLETE -> Unit
-                ReadProgress.CLEAN_EOF -> return PairingRecordRead.EndOfStream
-                ReadProgress.EXPIRED -> return PairingRecordRead.TimedOut
-                ReadProgress.BROKEN -> return PairingRecordRead.Invalid
+            when (readFully(input, header, 0, header.size, deadline, allowCleanEof = true)) {
+                ReadOutcome.CLEAN_EOF -> return PairingRecordRead.EndOfStream
+                ReadOutcome.TIMED_OUT_EMPTY -> return PairingRecordRead.TimedOut
+                ReadOutcome.SHORT -> return PairingRecordRead.Invalid
+                ReadOutcome.DONE -> Unit
             }
-            // The codec's own header check, not a hand-rolled one: it validates the magic, version,
-            // this exact session id, the expected direction, the sequence number, the type and the
-            // declared length before a single byte is allocated for the ciphertext.
-            val expectedDirection = SecureRecordLayer.directionFrom(localRole).opposite
             val decoded = SecureRecordCodec.decodeHeader(header, sessionId, expectedDirection)
-                ?: return PairingRecordRead.Invalid
-            val frame = ByteArray(decoded.frameLength)
-            header.copyInto(frame)
-            val bodyLength = decoded.frameLength - header.size
-            val progress = readFully(input, frame, header.size, bodyLength, deadline, cleanEofAllowed = false)
-            if (progress != ReadProgress.COMPLETE) {
-                frame.fill(0)
-                return when (progress) {
-                    ReadProgress.EXPIRED -> PairingRecordRead.TimedOut
-                    ReadProgress.CLEAN_EOF, ReadProgress.BROKEN -> PairingRecordRead.Invalid
-                    ReadProgress.COMPLETE -> PairingRecordRead.Invalid
-                }
+            if (decoded == null) {
+                header.fill(0)
+                return PairingRecordRead.Invalid
             }
-            return PairingRecordRead.Frame(frame)
+            // Half a frame is fatal, not retryable: the read cursor has already advanced past the
+            // header, so a "timeout" here would silently desynchronise the stream and let the next
+            // header be read from the middle of a ciphertext.
+            val body = ByteArray(decoded.frameLength - header.size)
+            if (readFully(input, body, 0, body.size, deadline, allowCleanEof = false) != ReadOutcome.DONE) {
+                body.fill(0)
+                header.fill(0)
+                return PairingRecordRead.Invalid
+            }
+            val frame = ByteArray(decoded.frameLength)
+            header.copyInto(frame, 0)
+            body.copyInto(frame, header.size)
+            body.fill(0)
+            header.fill(0)
+            PairingRecordRead.Frame(frame)
+        } catch (_: IOException) {
+            if (deadline.isExpired()) PairingRecordRead.TimedOut else PairingRecordRead.Invalid
         } finally {
             deadline.complete()
         }
     }
 
-    /**
-     * Writes one whole frame, or gives up.
-     *
-     * The deadline is armed here. A write blocked on a peer that stopped reading has no socket-level
-     * timeout, so the only way out is to close the socket, and the deadline already does exactly
-     * that when its budget runs out.
-     */
-    override fun writeRecordFrame(frame: ByteArray, budgetMillis: Long): Boolean {
+    override fun writeFrame(frame: ByteArray, budgetMillis: Long): Boolean {
         if (closed || budgetMillis <= 0L) return false
         if (frame.size > SecureRecordCodec.MAX_FRAME_SIZE_BYTES) return false
         val deadline = MonotonicSocketDeadline("secure-record-write", socket, budgetMillis, clock::nowMillis)
         deadline.arm()
-        try {
-            val output = DataOutputStream(socket.outputStream)
+        return try {
+            val output = socket.getOutputStream()
             output.write(frame)
             output.flush()
-            return deadline.complete() == DeadlineOutcome.Resolved
+            !deadline.isExpired()
         } catch (_: IOException) {
-            return false
+            false
+        } finally {
+            deadline.complete()
         }
     }
 
-    /** Stops this reader. The socket belongs to its owner, so it is not closed from here. */
     override fun close() {
+        if (closed) return
         closed = true
     }
 
-    override fun toString(): String = "SocketPairingRecordIo(closed=$closed, ids=[redacted])"
+    override fun toString(): String = "SocketPairingRecordIo(closed=$closed)"
+
+    private enum class ReadOutcome {
+        DONE,
+
+        /** The peer closed before a single byte arrived. */
+        CLEAN_EOF,
+
+        /** The budget ran out before a single byte arrived. Nothing was consumed; a retry is safe. */
+        TIMED_OUT_EMPTY,
+
+        /** A frame was begun and not finished. Never retryable. */
+        SHORT,
+    }
 
     private fun readFully(
         input: DataInputStream,
-        frame: ByteArray,
+        buffer: ByteArray,
         offset: Int,
         length: Int,
         deadline: MonotonicSocketDeadline,
-        cleanEofAllowed: Boolean,
-    ): ReadProgress {
+        allowCleanEof: Boolean,
+    ): ReadOutcome {
         var position = offset
         val end = offset + length
         var readAny = false
         while (position < end) {
             val remaining = deadline.remainingMillis()
-            if (remaining <= 0L) return ReadProgress.EXPIRED
+            if (remaining <= 0L) {
+                return if (readAny) ReadOutcome.SHORT else ReadOutcome.TIMED_OUT_EMPTY
+            }
+            socket.soTimeout = remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1)
             val read = try {
-                socket.soTimeout = remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1)
-                input.read(frame, position, end - position)
+                input.read(buffer, position, end - position)
             } catch (_: SocketTimeoutException) {
                 continue
             } catch (_: IOException) {
-                return ReadProgress.BROKEN
+                return ReadOutcome.SHORT
             }
             if (read < 0) {
-                return if (!readAny && cleanEofAllowed) ReadProgress.CLEAN_EOF else ReadProgress.BROKEN
+                if (readAny) return ReadOutcome.SHORT
+                return if (allowCleanEof) ReadOutcome.CLEAN_EOF else ReadOutcome.TIMED_OUT_EMPTY
             }
             if (read == 0) continue
             readAny = true
             position += read
         }
-        return ReadProgress.COMPLETE
+        return ReadOutcome.DONE
     }
-
-    private enum class ReadProgress { COMPLETE, CLEAN_EOF, EXPIRED, BROKEN }
 }
 
 /**
- * The TLS facts the composed path needs, and nothing else.
+ * The connection the composed path runs over: TLS facts plus both framings.
  *
- * [export] is the RFC 5705 / RFC 9266 exporter. It is the only source of keying material in this
- * path: PAKE keys come from the entered code inside the PAKE library, and record keys come from
- * here, bound to the transcript digest. Neither can be supplied by a caller, which is what stops a
- * "preconstructed success" from being expressible.
+ * Production supplies [SocketPairingChannel]; the JVM tests supply a double that shares a byte pipe
+ * and a deterministic exporter, and the API 23 test supplies the real Conscrypt session. The
+ * interface is deliberately narrow so a double cannot fake a confirmation: it has no method that
+ * returns a decision.
  */
-internal interface PairingChannel : AutoCloseable {
-    /** The negotiated TLS protocol. Compared against `TLSv1.3` before anything is derived. */
+internal interface PairingChannel {
+    /** The negotiated TLS protocol. The composed path requires exactly `TLSv1.3`. */
     val protocol: String
 
-    /** The negotiated cipher suite, bound into the transcript by the caller. */
+    /** The negotiated cipher suite, for diagnostics and for the authority's record. */
     val cipherSuite: String
 
+    /** TLS-exported keying material. The only source of record keys in this path. */
     fun export(label: String, context: ByteArray, length: Int): ByteArray
 
     fun createAead(exportedKey: ByteArray): SecureRecordAead
+
+    fun exchangeIo(): PairingExchangeIo
+
+    fun recordIo(): PairingRecordIo
+
+    fun close()
 }
 
 /**
- * Production adapter: TLS through the bundled Conscrypt provider.
+ * The production channel: the Conscrypt session plus the socket underneath it.
  *
- * It is a thin wrapper on purpose. Every check that matters -- protocol, exporter labels, key
- * widths -- lives in `EstablishedTlsSession` already, and duplicating it here would give two places
- * for it to disagree with itself.
+ * [EstablishedTlsSession.export] refuses a socket Conscrypt does not own, so this adapter cannot be
+ * pointed at a JCA socket by accident.
  */
-internal class TlsPairingChannel(private val session: EstablishedTlsSession) : PairingChannel {
+internal class SocketPairingChannel(
+    private val session: EstablishedTlsSession,
+    private val clock: MonotonicClock,
+    private val localRole: SecurePeerRole,
+) : PairingChannel {
+    private var records: PairingRecordIo? = null
+
     override val protocol: String get() = session.protocol
 
     override val cipherSuite: String get() = session.cipherSuite
@@ -239,35 +252,44 @@ internal class TlsPairingChannel(private val session: EstablishedTlsSession) : P
 
     override fun createAead(exportedKey: ByteArray): SecureRecordAead = session.createAead(exportedKey)
 
-    override fun close() {
-        session.clearFingerprints()
+    override fun exchangeIo(): PairingExchangeIo = SocketPairingExchangeIo(session.socket, clock)
+
+    override fun recordIo(): PairingRecordIo {
+        // The receive direction is the peer's send direction, which is the mirror of this role's.
+        val expected = if (localRole == SecurePeerRole.INITIATOR) {
+            SecureRecordDirection.RESPONDER_TO_INITIATOR
+        } else {
+            SecureRecordDirection.INITIATOR_TO_RESPONDER
+        }
+        return SocketPairingRecordIo(session.socket, clock, expected).also { records = it }
     }
 
-    override fun toString(): String = "TlsPairingChannel(protocol=$protocol, ids=[redacted])"
+    override fun close() {
+        // The TLS session owns the socket; closing it here would close a channel the caller may
+        // still be draining. The framings are released, and the caller closes the session.
+        records?.close()
+        records = null
+    }
+
+    override fun toString(): String = "SocketPairingChannel(protocol=$protocol)"
 }
 
 /**
- * Reads one protected record and hands it to [layer] for authentication.
+ * Wraps an exchange IO so the exchange's own `close()` does not close a socket the record phase
+ * still needs.
  *
- * Shared by the coordinator and by the tests so both exercise the same framing. A record that the
- * layer refuses is reported as null rather than as a record: an unauthenticated frame is not a
- * message, and the caller must not see its bytes.
+ * The exchange closes what it is handed when it finishes -- correct when it owns the connection, and
+ * wrong here, where the same socket carries the key-confirmation records afterwards. Ownership stays
+ * with [PakeSessionCoordinator], which closes the channel exactly once at the end.
  */
-internal fun readProtectedRecord(
-    io: PairingRecordIo,
-    layer: SecureRecordLayer,
-    budgetMillis: Long,
-): SecureRecordResult? {
-    val frame = when (val read = io.readRecordFrame(budgetMillis)) {
-        is PairingRecordRead.Frame -> read.frame
-        PairingRecordRead.EndOfStream, PairingRecordRead.TimedOut, PairingRecordRead.Invalid -> return null
-    }
-    return try {
-        // A record that cannot be authenticated is not a message. `unprotect` reports that as a
-        // Failed result; anything it throws is treated the same way rather than escaping the
-        // coordinator, because a caller must never see a partially trusted frame.
-        runCatching { layer.unprotect(frame) }.getOrElse { null }
-    } finally {
-        frame.fill(0)
-    }
+internal class NonClosingExchangeIo(private val delegate: PairingExchangeIo) : PairingExchangeIo {
+    override fun readFrame(label: String, budgetMillis: Long): PairingFrameRead =
+        delegate.readFrame(label, budgetMillis)
+
+    override fun writeFrame(label: String, frame: ByteArray, budgetMillis: Long): Boolean =
+        delegate.writeFrame(label, frame, budgetMillis)
+
+    override fun close() = Unit
+
+    override fun toString(): String = "NonClosingExchangeIo"
 }

@@ -259,15 +259,29 @@ is new is everything the switch will need, and none of it is called by productio
    attempt's abandonment in the exchange's own failure path is skipped only for the attempt it
    handed over, so a stop still leaves no outstanding attempt behind.
 
-**Tests.** JVM: `PakeSessionCoordinatorTest` (16 cases — honest run, single-use authority, payload
-still refused, wrong code then retry, exhaustion, local and remote rejection, unanswered approval, a
-corrupted record, a missing confirmation, a duplicate confirmation, cancellation, exactly-once close,
-two concurrent sessions, a legacy suite and a non-1.3 channel refused before a frame is written),
-`PakePairingProgressionTest` (15 cases over the ordered reducer), `EnteredCodePairingBridgeTest` (10)
-and `EnteredCodePairingSlotTest` (5). API 23: `PakeSessionApi23Test` runs the full chain over a real
-Conscrypt TLS 1.3 connection on loopback — the exporter material both sides derive is the TLS one,
-and both key confirmations cross a real encrypted stream — then asserts single-use authority and the
-payload refusal on the device.
+3. The composed path settles and releases whatever it still owns on every refusal, and hands both
+   to the authority on success. A refusal abandons the handed-off attempt (so a spent budget is
+   visible and the next try is not blocked), closes the record stream first (so a peer waiting on a
+   confirmation sees a close instead of a deadline) and then the layer, which destroys the key
+   material. On success those three are cleared, and the authority's single close performs the
+   release exactly once: a test closes it twice and asserts one release, one revocation and no
+   second claim.
+
+**Tests.** JVM: `PakeSessionCoordinatorTest` (17 cases — honest run, single-use authority, payload
+still refused after control authentication, wrong code then retry, exhaustion, local and remote
+rejection, unanswered approval, record-key mismatch, an AEAD-refused record, a replayed confirmation
+frame refused by the record layer, a missing confirmation, cancellation, exactly-once release, two
+concurrent sessions, a legacy suite and a non-1.3 channel refused before a frame is written),
+`PakePairingProgressionTest` (16 cases over the ordered reducer: the honest sequence and a second
+authority refused, approval before PAKE, the remote approval standing in for the local one, a
+confirmation standing in for the PAKE, authentication before key confirmation, a replayed approval,
+an approval for another transcript or the sender's own role, a second confirmation, a legacy suite, a
+confirmation from the wrong role or transcript, a digest of the wrong width, an unconfirmed session,
+a settled attempt, and no public caller able to build transition evidence), `EnteredCodePairingBridgeTest`
+(10) and `EnteredCodePairingSlotTest` (5). API 23: `PakeSessionApi23Test` runs the full chain over a
+real Conscrypt TLS 1.3 connection on loopback — the exporter material both sides derive is the TLS
+one, and both key confirmations cross a real encrypted stream — then asserts single-use authority and
+the payload refusal on the device.
 
 **What these tests cannot show.** The JVM transport is in-memory and its exporter is deterministic,
 so the JVM cases prove the composition is wired correctly and prove nothing about TLS. Nothing here

@@ -90,7 +90,9 @@ internal sealed interface PairingExchangeResult {
      * The attempt behind [session] is left *unsettled* on purpose. Issuing
      * [app.morsecode.transport.lan.security.AuthenticatedControlAuthority] requires an attempt that
      * has not been settled, so the exchange cannot settle it: the caller settles it once the record
-     * layer, both key confirmations and the authority itself have succeeded.
+     * layer, both key confirmations and the authority itself have succeeded. The ledger is left
+     * valid for the same reason -- invalidation wipes the code instance the authority binds to -- so
+     * the caller also owns the final settlement of the code's budget.
      *
      * The members carry no visibility modifier because the enclosing interface is `internal`, which
      * is what confines them: nothing outside this module can name the type or hold a value of it.
