@@ -27,7 +27,7 @@ internal class EnteredCodePairingBridgeTest {
 
     private val sessionId = SessionId("0123456789abcdef0123456789abcdef")
 
-    @Test
+    @Test(timeout = 20_000L)
     fun anAcknowledgedCodeIsPublishedOnce() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)
@@ -44,7 +44,7 @@ internal class EnteredCodePairingBridgeTest {
         assertFalse(prompter.published.single().contains("7KQF2XPD"))
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun anEnteredCodeIsParsedAndReturned() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)
@@ -60,7 +60,7 @@ internal class EnteredCodePairingBridgeTest {
         entered.clearSensitive()
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun aMalformedEntryDoesNotSettleThePrompt() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)
@@ -76,7 +76,7 @@ internal class EnteredCodePairingBridgeTest {
         assertNotNull(bridge.requestEnteredCode(attemptOrdinal = 1, expiresAtElapsedMillis = 60_000L))
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun aChallengeOfTheWrongKindCannotBeAnswered() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)
@@ -92,7 +92,7 @@ internal class EnteredCodePairingBridgeTest {
         assertNotNull(bridge.requestEnteredCode(attemptOrdinal = 1, expiresAtElapsedMillis = 60_000L))
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun aHandleFromAnotherBridgeIsRefused() {
         val otherPrompter = RecordingPrompter()
         val other = bridge(otherPrompter)
@@ -114,7 +114,7 @@ internal class EnteredCodePairingBridgeTest {
         assertNull(otherAnswer.get())
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun anApprovalReturnsTheRecordedDecisionAndNeverADefault() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)
@@ -138,7 +138,7 @@ internal class EnteredCodePairingBridgeTest {
         assertEquals(SecureApprovalDecision.REJECT, decision)
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun anUnansweredApprovalExpiresToNull() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)
@@ -151,7 +151,7 @@ internal class EnteredCodePairingBridgeTest {
         assertTrue("the prompt must expire promptly, took ${elapsedMillis}ms", elapsedMillis < 5_000L)
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun closingResolvesThePendingPromptOnceAndRefusesLaterAnswers() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)
@@ -176,7 +176,7 @@ internal class EnteredCodePairingBridgeTest {
         assertTrue(refusedAfterClose.get())
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun aSecondPromptIsRefusedWhileOneIsOutstanding() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)
@@ -196,7 +196,7 @@ internal class EnteredCodePairingBridgeTest {
         assertEquals("a refused second prompt raises nothing", 1, prompter.prompts.get())
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun nothingInTheBridgeRendersACodeOrASessionId() {
         val prompter = RecordingPrompter()
         val bridge = bridge(prompter)

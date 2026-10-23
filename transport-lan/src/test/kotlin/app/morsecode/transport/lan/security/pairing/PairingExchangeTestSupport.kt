@@ -364,7 +364,9 @@ internal fun runPair(
     responder: PairingAttemptExchange,
     timeoutMillis: Long = 120_000L,
 ): Pair<PairingExchangeResult, PairingExchangeResult> {
-    val pool = Executors.newFixedThreadPool(2)
+    val pool = Executors.newFixedThreadPool(2) { worker ->
+        Thread(worker, "pairing-exchange").apply { isDaemon = true }
+    }
     try {
         val left = pool.submit(Callable { initiator.run() })
         val right = pool.submit(Callable { responder.run() })
@@ -382,7 +384,9 @@ internal fun runAgainstScripted(
     scripted: () -> Unit,
     timeoutMillis: Long = 120_000L,
 ): PairingExchangeResult {
-    val pool = Executors.newFixedThreadPool(2)
+    val pool = Executors.newFixedThreadPool(2) { worker ->
+        Thread(worker, "pairing-scripted").apply { isDaemon = true }
+    }
     try {
         val script = pool.submit(Callable { scripted() })
         val result = pool.submit(Callable { exchange.run() })

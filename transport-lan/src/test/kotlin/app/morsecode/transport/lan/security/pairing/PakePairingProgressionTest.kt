@@ -31,7 +31,7 @@ import org.junit.Test
 
 internal class PakePairingProgressionTest {
 
-    @Test
+    @Test(timeout = 40_000L)
     fun theHonestSequenceReachesAuthenticationExactlyOnce() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -47,7 +47,7 @@ internal class PakePairingProgressionTest {
         assertEquals(fixture.attempt, transition.attempt)
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun approvalBeforeThePakeFailsClosed() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -55,7 +55,7 @@ internal class PakePairingProgressionTest {
         assertEquals(PakePairingState.FAILED, fixture.progression.state())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun thePairedApprovalCannotStandInForTheLocalOne() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -65,7 +65,7 @@ internal class PakePairingProgressionTest {
         assertEquals(PakePairingState.FAILED, fixture.progression.state())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun aConfirmationCannotStandInForThePake() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -73,7 +73,7 @@ internal class PakePairingProgressionTest {
         assertEquals(PakePairingState.FAILED, fixture.progression.state())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun authenticationBeforeKeyConfirmationReturnsNothing() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -84,7 +84,7 @@ internal class PakePairingProgressionTest {
         assertEquals(PakePairingState.REMOTE_INTENDED_PEER_APPROVED, fixture.progression.state())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun aReplayedApprovalStopsAtTheStateItCameFrom() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -96,7 +96,7 @@ internal class PakePairingProgressionTest {
         assertEquals(PakePairingState.FAILED, fixture.progression.state())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun anApprovalForAnotherTranscriptIsRefused() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -110,7 +110,7 @@ internal class PakePairingProgressionTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED, fixture.progression.failureCode())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun anApprovalForTheSameRoleIsRefused() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -119,7 +119,7 @@ internal class PakePairingProgressionTest {
         assertFalse(fixture.progression.remoteIntendedPeerApproved(fixture.peerApproval(role = fixture.role)))
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun aSecondConfirmationCannotBeVerified() {
         val fixture = Fixture()
         fixture.reachLocalConfirmationSent()
@@ -128,7 +128,7 @@ internal class PakePairingProgressionTest {
         assertEquals(PakePairingState.FAILED, fixture.progression.state())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun noPublicCallerCanBuildTransitionEvidence() {
         // The handover is not a token: it is only constructible inside this module, and the class it
         // carries is not public. Authority is re-derived downstream, so a hand-built transition
@@ -147,7 +147,7 @@ internal class PakePairingProgressionTest {
         )
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun aLegacySelectionNeverValidates() {
         val fixture = Fixture()
         assertFalse(
@@ -159,7 +159,7 @@ internal class PakePairingProgressionTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID, fixture.progression.failureCode())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun aConfirmationFromTheWrongRoleFails() {
         val fixture = Fixture()
         fixture.reachLocalConfirmationSent()
@@ -171,7 +171,7 @@ internal class PakePairingProgressionTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED, fixture.progression.failureCode())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun aConfirmationForAnotherTranscriptFails() {
         val fixture = Fixture()
         fixture.reachLocalConfirmationSent()
@@ -183,7 +183,7 @@ internal class PakePairingProgressionTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED, fixture.progression.failureCode())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun aConfirmationOfTheWrongWidthCannotBeSent() {
         val fixture = Fixture()
         fixture.reachRemoteApproval()
@@ -191,7 +191,7 @@ internal class PakePairingProgressionTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED, fixture.progression.failureCode())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun anUnconfirmedSessionIsRefused() {
         val fixture = Fixture()
         assertTrue(fixture.validated())
@@ -209,7 +209,7 @@ internal class PakePairingProgressionTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED, fixture.progression.failureCode())
     }
 
-    @Test
+    @Test(timeout = 40_000L)
     fun aSettledAttemptIsRefused() {
         val fixture = Fixture()
         assertTrue(fixture.validated())

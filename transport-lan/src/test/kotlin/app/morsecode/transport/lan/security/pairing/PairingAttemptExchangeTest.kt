@@ -27,7 +27,7 @@ public class PairingAttemptExchangeTest {
 
     // --- the honest path ------------------------------------------------------------------
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `an honest exchange confirms on both sides`() {
         val fixture = ExchangeFixture()
         val initiatorInteraction = TestInteraction(fixture.board)
@@ -63,7 +63,7 @@ public class PairingAttemptExchangeTest {
         assertEquals("the responder is asked for the code once", listOf(1), responderInteraction.enteredOrdinals)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a retry confirms with a fresh attempt and a fresh session`() {
         val fixture = ExchangeFixture()
         val responderInteraction = TestInteraction(fixture.board).apply {
@@ -91,7 +91,7 @@ public class PairingAttemptExchangeTest {
 
     // --- budget and failure handshake ------------------------------------------------------
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `three failed attempts end the pairing on both sides`() {
         val fixture = ExchangeFixture()
         val responderInteraction = TestInteraction(fixture.board).apply {
@@ -114,7 +114,7 @@ public class PairingAttemptExchangeTest {
         )
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a failure record is accepted where each round belongs`() {
         for (round in 1..3) {
             val fixture = ExchangeFixture()
@@ -141,7 +141,7 @@ public class PairingAttemptExchangeTest {
         }
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a duplicate failure record is refused rather than counted twice`() {
         val fixture = ExchangeFixture()
         val exchange = fixture.initiator(TestInteraction(fixture.board), ExchangeFixture.SHORT)
@@ -161,7 +161,7 @@ public class PairingAttemptExchangeTest {
         assertEquals(1, result.attemptsCharged)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a peer that refuses to retry ends the pairing even though this side would`() {
         val fixture = ExchangeFixture()
         val exchange = fixture.initiator(TestInteraction(fixture.board))
@@ -179,7 +179,7 @@ public class PairingAttemptExchangeTest {
         assertEquals(1, result.attemptsCharged)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a stale round frame from the previous attempt is discarded by identity`() {
         val fixture = ExchangeFixture()
         val exchange = fixture.initiator(TestInteraction(fixture.board))
@@ -197,7 +197,7 @@ public class PairingAttemptExchangeTest {
 
     // --- attempt identity ------------------------------------------------------------------
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `an attempt ordinal that skips ahead is refused`() {
         val fixture = ExchangeFixture()
         fixture.board.publish("7KQF2XPD")
@@ -219,7 +219,7 @@ public class PairingAttemptExchangeTest {
         assertEquals("no attempt was charged", 0, result.attemptsCharged)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a reused attempt identifier is refused on the second presentation`() {
         val fixture = ExchangeFixture()
         fixture.board.publish("7KQF2XPD")
@@ -249,7 +249,7 @@ public class PairingAttemptExchangeTest {
 
     // --- cancellation, deadlines, connection loss ------------------------------------------
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a cancellation during a round is not charged to the peer`() {
         val fixture = ExchangeFixture()
         val interaction = TestInteraction(fixture.board)
@@ -281,7 +281,7 @@ public class PairingAttemptExchangeTest {
         assertEquals("a local stop never spends the budget", 0, result.attemptsCharged)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `silence where round three belongs is a deadline`() {
         val fixture = ExchangeFixture()
         val exchange = fixture.initiator(TestInteraction(fixture.board), ExchangeFixture.SHORT)
@@ -293,7 +293,7 @@ public class PairingAttemptExchangeTest {
         assertEquals("a deadline is not a failed proof", 0, result.attemptsCharged)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a closed connection is reported as a lost connection`() {
         val fixture = ExchangeFixture()
         val exchange = fixture.initiator(TestInteraction(fixture.board))
@@ -307,7 +307,7 @@ public class PairingAttemptExchangeTest {
 
     // --- approvals -------------------------------------------------------------------------
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a local rejection is sent and ends the pairing`() {
         val fixture = ExchangeFixture()
         val initiatorInteraction = TestInteraction(fixture.board).apply {
@@ -327,7 +327,7 @@ public class PairingAttemptExchangeTest {
         )
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a remote rejection is reported to the peer that asked`() {
         val fixture = ExchangeFixture()
         val responderInteraction = TestInteraction(fixture.board).apply {
@@ -343,7 +343,7 @@ public class PairingAttemptExchangeTest {
         assertEquals(PairingExchangeFailure.APPROVAL_REJECTED, failed(fromResponder).reason)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `an unanswered approval is never an approval`() {
         val fixture = ExchangeFixture()
         val initiatorInteraction = TestInteraction(fixture.board).apply {
@@ -360,7 +360,7 @@ public class PairingAttemptExchangeTest {
         assertEquals(0, failed(fromResponder).attemptsCharged)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `an approval reflected back is refused`() {
         val fixture = ExchangeFixture()
         val exchange = fixture.initiator(TestInteraction(fixture.board))
@@ -377,7 +377,7 @@ public class PairingAttemptExchangeTest {
 
     // --- lifecycle -------------------------------------------------------------------------
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a confirmed pairing closes its channel exactly once`() {
         val fixture = ExchangeFixture()
         val (fromInitiator, fromResponder) = runPair(
@@ -390,7 +390,7 @@ public class PairingAttemptExchangeTest {
         assertEquals(1, fixture.responderIo.closes)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `a refused pairing releases everything once`() {
         val fixture = ExchangeFixture()
         val interaction = TestInteraction(fixture.board).apply {
@@ -403,7 +403,7 @@ public class PairingAttemptExchangeTest {
         assertEquals("closing must be idempotent and complete", 1, fixture.initiatorIo.closes)
     }
 
-    @Test
+    @Test(timeout = 30_000L)
     public fun `the result carries no authority`() {
         val confirmedType = PairingExchangeResult.Confirmed::class.java
         val suspicious = confirmedType.declaredMethods.map { it.returnType.name }.filter { name ->

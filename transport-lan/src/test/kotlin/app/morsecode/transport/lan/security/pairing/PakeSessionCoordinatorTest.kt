@@ -30,7 +30,7 @@ import org.junit.Test
 
 internal class PakeSessionCoordinatorTest {
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun anHonestRunAuthenticatesBothSides() {
         val link = PakeLink()
         val (left, right) = runPairing(
@@ -47,7 +47,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(PakePairingState.AUTHENTICATED, initiator.state)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun theAuthorityIsSingleUse() {
         val link = PakeLink()
         val outcome = authenticated(
@@ -61,7 +61,7 @@ internal class PakeSessionCoordinatorTest {
         assertNull("an authority is claimed exactly once", outcome.authority.claim())
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun payloadIsStillRefusedAfterControlAuthentication() {
         val link = PakeLink()
         val outcome = authenticated(
@@ -79,7 +79,7 @@ internal class PakeSessionCoordinatorTest {
         )
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aWrongCodeIsRetriedAndTheSecondAttemptAuthenticates() {
         val link = PakeLink()
         val responderInteraction = quietInteraction(link.board, entered = ::wrongOnFirstAttempt)
@@ -94,7 +94,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(listOf(1, 2), responderInteraction.enteredOrdinals)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun threeWrongCodesEndInLimitReached() {
         val link = PakeLink()
         val responderInteraction = quietInteraction(link.board, entered = { _, published ->
@@ -110,7 +110,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(listOf(1, 2, 3), responderInteraction.enteredOrdinals)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aLocalRejectionEndsTheRunWithoutAuthority() {
         val link = PakeLink()
         val initiatorInteraction = quietInteraction(link.board, approval = SecureApprovalDecision.REJECT)
@@ -123,7 +123,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED, refused(left).reason)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aRemoteRejectionEndsTheRunWithoutAuthority() {
         val link = PakeLink()
         val responderInteraction = quietInteraction(link.board, approval = SecureApprovalDecision.REJECT)
@@ -138,7 +138,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED, refused(left).reason)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aRecordKeyMismatchIsNotAuthentication() {
         val link = PakeLink()
         val initiatorChannel = link.initiatorChannel(recordKeySalt = ByteArray(8) { 0x0B })
@@ -151,7 +151,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_RECORD_INVALID, refused(left).reason)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aReplayedConfirmationFrameIsRefusedByTheRecordLayer() {
         val link = PakeLink()
         val authenticatedOutcome = authenticated(
@@ -173,7 +173,7 @@ internal class PakeSessionCoordinatorTest {
         )
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun closingTheAuthorityReleasesOnceAndRevokesLaterClaims() {
         val link = PakeLink()
         val outcome = authenticated(
@@ -189,7 +189,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals("the record stream is released exactly once", 1, link.initiatorRecordIo.closeCount())
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun anUnansweredApprovalIsNeverAnApproval() {
         val link = PakeLink()
         val initiatorInteraction = quietInteraction(link.board, approval = null)
@@ -202,7 +202,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED, refused(left).reason)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aRecordTheAeadRefusesIsNotAuthentication() {
         val link = PakeLink()
         link.responderRecordIo.corruptNextFrame = true
@@ -215,7 +215,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_RECORD_INVALID, refused(left).reason)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aMissingKeyConfirmationIsNotAuthentication() {
         val link = PakeLink()
         link.responderRecordIo.silent = true
@@ -228,7 +228,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED, refused(left).reason)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aCancelledInteractionEndsWithoutAuthority() {
         val link = PakeLink()
         val interaction = link.initiatorInteraction().apply { cancelled = true }
@@ -238,7 +238,7 @@ internal class PakeSessionCoordinatorTest {
         assertEquals(SessionFailureCode.OPERATION_CANCELLED, refused(outcome).reason)
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aLegacySuiteNeverReachesThePake() {
         val link = PakeLink()
         val initiatorLegacy = PairingOfferFactory.legacy(link, SecurePeerRole.INITIATOR)
@@ -263,7 +263,7 @@ internal class PakeSessionCoordinatorTest {
         )
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun aPeerThatDoesNotSpeakTls13CannotStart() {
         val link = PakeLink()
         val channel = DeterministicPairingChannel(
@@ -279,7 +279,7 @@ internal class PakeSessionCoordinatorTest {
         assertTrue(link.initiatorExchangeIo.writtenLabels.isEmpty())
     }
 
-    @Test(timeout = 120_000L)
+    @Test(timeout = 40_000L)
     fun twoSessionsRunConcurrently() {
         val one = PakeLink()
         val two = PakeLink(secureSessionId = app.morsecode.core.transfer.identity.SessionId(

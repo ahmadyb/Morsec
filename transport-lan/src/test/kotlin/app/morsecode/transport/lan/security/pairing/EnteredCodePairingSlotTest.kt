@@ -26,7 +26,7 @@ internal class EnteredCodePairingSlotTest {
 
     private val sessionId = SessionId("0123456789abcdef0123456789abcdef")
 
-    @Test
+    @Test(timeout = 20_000L)
     fun aSessionGetsExactlyOneBridge() {
         val gate = AtomicBoolean(false)
         val slot = slot(gate)
@@ -38,7 +38,7 @@ internal class EnteredCodePairingSlotTest {
         assertEquals(first, slot.current())
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun aGateTakenByAnotherPathRefusesTheEntrance() {
         val gate = AtomicBoolean(true)
         val slot = slot(gate)
@@ -47,7 +47,7 @@ internal class EnteredCodePairingSlotTest {
         assertNull(slot.current())
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun aClosedSessionRefusesAndClosesNothingTwice() {
         val gate = AtomicBoolean(false)
         var sessionClosed = false
@@ -65,7 +65,7 @@ internal class EnteredCodePairingSlotTest {
         assertNull("a shut-down slot never opens again", slot.open(RecordingPrompter()))
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun closingResolvesAPendingPromptWithNoAnswer() {
         val gate = AtomicBoolean(false)
         val slot = slot(gate)
@@ -97,7 +97,7 @@ internal class EnteredCodePairingSlotTest {
         assertNull("a shutdown is not an approval", answer.get())
     }
 
-    @Test
+    @Test(timeout = 20_000L)
     fun aPromptRaisedThroughTheSlotIsBoundToItsSessionAndRole() {
         val gate = AtomicBoolean(false)
         val slot = slot(gate)
