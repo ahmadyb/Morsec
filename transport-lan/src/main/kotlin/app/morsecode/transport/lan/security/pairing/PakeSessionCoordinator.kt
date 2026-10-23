@@ -4,9 +4,11 @@
  * WHAT THIS IS
  *   One function that performs the whole authenticated-control chain in the order the protocol
  *   requires, over one connection, and returns either a single-use control authority or a typed
- *   reason. It is inert: nothing in production calls it. `SecureLanPairingCoordinator.run()` -- the
- *   only live pairing -- is untouched, still advertises SAS and still never reaches this file. The
- *   atomic switch is the later commit that wires it in and deletes the comparison path.
+ *   reason. It is the live path: `SecureLanPairingCoordinator.run()` performs TLS, the MPS2 offers,
+ *   the required-suite selection and the MST2 transcript, then calls this for everything that
+ *   follows -- the attempt, the three rounds, both approvals, the record layer, key confirmation in
+ *   both directions and the authority. It was built and tested inert before that switch precisely so
+ *   the switch would not have to reimplement any of it.
  *
  * WHY IT TAKES ITS INPUTS AS OBJECTS AND NOT FLAGS
  *   There is no `pakeSucceeded: Boolean`, no proof token and no caller-supplied key. Every step
@@ -72,9 +74,15 @@ internal sealed interface PakeSessionOutcome {
         val state: PakePairingState,
     ) : PakeSessionOutcome
 
+    /**
+     * No authority. [reason] is the local diagnostic; [classification] is what the admission
+     * budgets charge for, decided where the cause was still known rather than re-derived from the
+     * code downstream.
+     */
     class Refused(
         val reason: SessionFailureCode,
         val state: PakePairingState,
+        val classification: PakeRefusalClass,
     ) : PakeSessionOutcome
 }
 
@@ -133,21 +141,25 @@ internal class PakeSessionCoordinator(
     /** One run. Returns a typed outcome; never throws for anything the peer can cause. */
     fun run(): PakeSessionOutcome {
         if (channel.protocol != REQUIRED_TLS_PROTOCOL) {
-            return refused(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
+            return refused(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID, PakeRefusalClass.TRANSCRIPT_MISMATCH)
         }
         // 1. Required-suite selection. The policy re-derives the selection from both offers and
         //    refuses anything that is not the experimental PAKE suite, so an SAS peer cannot be
         //    negotiated "down" into this path.
         val selection = when (val result = selectRequired()) {
             is PairingSelectionResult.Selected -> result.selection
-            is PairingSelectionResult.Rejected -> return refused(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
+            is PairingSelectionResult.Rejected ->
+                return refused(
+                    SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID,
+                    PakeRefusalClass.TRANSCRIPT_MISMATCH,
+                )
         }
         if (!progression.transcriptValidated(
                 selection.selectedAuthentication,
                 selection.selectedEncryption,
             )
         ) {
-            return refused(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
+            return refused(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID, PakeRefusalClass.TRANSCRIPT_MISMATCH)
         }
 
         // 2. The entered-code exchange. Its own budgets, its own retry rule, and its own refusals:
@@ -171,7 +183,8 @@ internal class PakeSessionCoordinator(
         ).run()
         val confirmed = when (exchangeResult) {
             is PairingExchangeResult.Confirmed -> exchangeResult
-            is PairingExchangeResult.Failed -> return refused(refusalFor(exchangeResult.reason))
+            is PairingExchangeResult.Failed ->
+                return refused(refusalFor(exchangeResult.reason), classificationFor(exchangeResult.reason))
         }
 
         // 3. PAKE confirmed, then the local decision. The exchange already asked the human; it
@@ -179,14 +192,23 @@ internal class PakeSessionCoordinator(
         val attempt: PakeAttempt = confirmed.session.attempt
         handedOffAttempt = attempt
         if (!progression.pakeConfirmed(attempt, confirmed.session)) {
-            return refused(progression.failureCode() ?: SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+            return refused(
+                progression.failureCode() ?: SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED,
+                PakeRefusalClass.AUTHENTICATION_FAILURE,
+            )
         }
         if (!progression.localIntendedPeerApproved(confirmed.localDecision)) {
-            return refused(progression.failureCode() ?: SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED)
+            return refused(
+                progression.failureCode() ?: SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED,
+                approvalRefusalClass(progression.failureCode()),
+            )
         }
         // 4. The peer's approval, bound to this exact exchange.
         if (!progression.remoteIntendedPeerApproved(confirmed.peerApproval)) {
-            return refused(progression.failureCode() ?: SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED)
+            return refused(
+                progression.failureCode() ?: SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED,
+                peerApprovalRefusalClass(progression.failureCode()),
+            )
         }
 
         // 5-7. Record layer, then key confirmation in both directions.
@@ -194,7 +216,7 @@ internal class PakeSessionCoordinator(
             deriveRecordLayer()
         } catch (_: RuntimeException) {
             null
-        } ?: return refused(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
+        } ?: return refused(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED, PakeRefusalClass.LOCAL_FAILURE)
         activeLayer = layer
         val recordIo = channel.recordIo()
         activeRecords = recordIo
@@ -205,7 +227,10 @@ internal class PakeSessionCoordinator(
         //    the chain from the same objects. It refuses -- returns null -- if any of them disagrees
         //    with the connection, so this is a second opinion, not a formality.
         val transition = progression.authenticated()
-            ?: return refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+            ?: return refused(
+                SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED,
+                PakeRefusalClass.KEY_CONFIRMATION_FAILURE,
+            )
         val authority = try {
             AuthenticatedControlAuthority.issue(
                 channel = ConnectionRelease(layer, recordIo),
@@ -228,11 +253,14 @@ internal class PakeSessionCoordinator(
             // The exchange handed the attempt over unsettled; nothing was authenticated, so the
             // budget is spent and the attempt settles as a failure rather than staying open.
             runCatching { attempt.abandon() }
-            return refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+            return refused(
+                SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED,
+                PakeRefusalClass.KEY_CONFIRMATION_FAILURE,
+            )
         }
         if (!attempt.succeed()) {
             runCatching { authority.close() }
-            return refused(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
+            return refused(SessionFailureCode.SECURE_SESSION_RECORD_INVALID, PakeRefusalClass.AUTHENTICATION_FAILURE)
         }
         // Ownership passes to the authority, which closes the record stream and the layer when it is
         // spent. Clearing these keeps a later refusal from releasing them a second time.
@@ -250,9 +278,21 @@ internal class PakeSessionCoordinator(
      */
     private fun confirmKeys(layer: SecureRecordLayer, recordIo: PairingRecordIo): PakeSessionOutcome? {
         val written = writeKeyConfirmation(layer, recordIo)
-        if (!written) return refused(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+        if (!written) {
+            return refused(
+                SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED,
+                PakeRefusalClass.KEY_CONFIRMATION_FAILURE,
+            )
+        }
         val peerConfirmation = when (val read = readKeyConfirmation(layer, recordIo)) {
-            is ConfirmationRead.Refused -> return refused(read.reason)
+            is ConfirmationRead.Refused -> return refused(
+                read.reason,
+                if (read.reason == SessionFailureCode.SECURE_SESSION_RECORD_INVALID) {
+                    PakeRefusalClass.AUTHENTICATION_FAILURE
+                } else {
+                    PakeRefusalClass.KEY_CONFIRMATION_FAILURE
+                },
+            )
             is ConfirmationRead.Verified -> read.confirmation
         }
         val verified = try {
@@ -261,7 +301,10 @@ internal class PakeSessionCoordinator(
             peerConfirmation.clearSensitive()
         }
         if (!verified) {
-            return refused(progression.failureCode() ?: SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
+            return refused(
+                progression.failureCode() ?: SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED,
+                PakeRefusalClass.KEY_CONFIRMATION_FAILURE,
+            )
         }
         return null
     }
@@ -424,12 +467,50 @@ internal class PakeSessionCoordinator(
         PairingExchangeFailure.CRYPTO_FAILED -> SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED
         PairingExchangeFailure.ABORTED_BY_PEER -> SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED
         PairingExchangeFailure.APPROVAL_REJECTED -> SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED
+        // The peer's answer reaches the local app through the same "declined" code -- there is no
+        // local-only wording that would be true here -- but it is classified apart below so the
+        // admission budgets never bill the local user for the remote decision.
+        PairingExchangeFailure.PEER_APPROVAL_REJECTED -> SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED
         PairingExchangeFailure.APPROVAL_TIMEOUT -> SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED
         PairingExchangeFailure.PROVIDER_FAILURE -> SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED
         PairingExchangeFailure.INTERNAL -> SessionFailureCode.INTERNAL_TRANSPORT_FAILURE
     }
 
-    private fun refused(reason: SessionFailureCode): PakeSessionOutcome {
+    /** What the exchange's reason means for the admission budgets. See [PakeRefusalClass]. */
+    private fun classificationFor(reason: PairingExchangeFailure): PakeRefusalClass = when (reason) {
+        PairingExchangeFailure.CANCELLED -> PakeRefusalClass.LOCAL_CANCELLATION
+        PairingExchangeFailure.CODE_EXPIRED -> PakeRefusalClass.LOCAL_EXPIRY
+        PairingExchangeFailure.ATTEMPTS_EXHAUSTED -> PakeRefusalClass.ATTEMPTS_EXHAUSTED
+        // A peer that stopped answering, or went away, costs the pair budget rather than the
+        // identity's: neither is evidence that this identity is the wrong peer.
+        PairingExchangeFailure.TIMEOUT -> PakeRefusalClass.PEER_UNRESPONSIVE
+        PairingExchangeFailure.CONNECTION_LOST -> PakeRefusalClass.PEER_DISCONNECTED
+        PairingExchangeFailure.PROTOCOL -> PakeRefusalClass.AUTHENTICATION_FAILURE
+        PairingExchangeFailure.CRYPTO_FAILED -> PakeRefusalClass.AUTHENTICATION_FAILURE
+        PairingExchangeFailure.ABORTED_BY_PEER -> PakeRefusalClass.AUTHENTICATION_FAILURE
+        PairingExchangeFailure.APPROVAL_REJECTED -> PakeRefusalClass.USER_REJECTION
+        PairingExchangeFailure.PEER_APPROVAL_REJECTED -> PakeRefusalClass.PEER_REJECTION
+        PairingExchangeFailure.APPROVAL_TIMEOUT -> PakeRefusalClass.LOCAL_EXPIRY
+        PairingExchangeFailure.PROVIDER_FAILURE -> PakeRefusalClass.LOCAL_FAILURE
+        PairingExchangeFailure.INTERNAL -> PakeRefusalClass.LOCAL_FAILURE
+    }
+
+    /** A local approval that the reducer refused: either the human declined or the prompt expired. */
+    private fun approvalRefusalClass(code: SessionFailureCode?): PakeRefusalClass =
+        if (code == SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED) {
+            PakeRefusalClass.LOCAL_EXPIRY
+        } else {
+            PakeRefusalClass.USER_REJECTION
+        }
+
+    /** The peer's approval record was refused or declined: a binding failure is not a human. */
+    private fun peerApprovalRefusalClass(code: SessionFailureCode?): PakeRefusalClass = when (code) {
+        SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED -> PakeRefusalClass.LOCAL_EXPIRY
+        SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED -> PakeRefusalClass.PEER_REJECTION
+        else -> PakeRefusalClass.AUTHENTICATION_FAILURE
+    }
+
+    private fun refused(reason: SessionFailureCode, classification: PakeRefusalClass): PakeSessionOutcome {
         releaseAfterFailure()
         val state = progression.state()
         val terminal = if (state == PakePairingState.FAILED) {
@@ -438,7 +519,7 @@ internal class PakeSessionCoordinator(
             progression.failedInsideProgression(reason)
             PakePairingState.FAILED
         }
-        return PakeSessionOutcome.Refused(reason, terminal)
+        return PakeSessionOutcome.Refused(reason, terminal, classification)
     }
 
     /**

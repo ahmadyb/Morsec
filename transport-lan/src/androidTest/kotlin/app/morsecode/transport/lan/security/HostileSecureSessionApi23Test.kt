@@ -7,6 +7,7 @@ import app.morsecode.core.transfer.session.EncryptionCapability
 import app.morsecode.core.transfer.session.MonotonicClock
 import app.morsecode.core.transfer.session.NegotiatedCapabilities
 import app.morsecode.core.transfer.session.NegotiatedSession
+import app.morsecode.core.transfer.session.PairingAuthenticationCapability
 import app.morsecode.core.transfer.session.PairingOfferV2
 import app.morsecode.core.transfer.session.PeerInstanceId
 import app.morsecode.core.transfer.session.ProtocolRange
@@ -49,6 +50,12 @@ internal enum class HostileMutation {
     ROLE_SWAPPED,
     NONCE_SUBSTITUTED,
     APP_VERSION_CHANGED,
+    /// A peer that offers only the retired short-authentication-string comparison.
+    AUTHENTICATION_SAS_ONLY,
+    /// A peer that offers the "none" authentication capability.
+    AUTHENTICATION_NONE,
+    /// A peer that offers no authentication capability at all.
+    AUTHENTICATION_ABSENT,
 }
 
 /**
@@ -150,6 +157,7 @@ internal class HostilePairingCryptoFactory(
         controlSessionId: SessionId = offer.controlSessionId,
         role: SecurePeerRole = offer.role,
         appVersion: String? = offer.appVersion,
+        offeredAuthentication: PairingAuthenticationCapability? = offer.offeredAuthentication,
     ): PairingOfferV2 = PairingOfferV2(
         secureSessionId = offer.secureSessionId,
         controlSessionId = controlSessionId,
@@ -172,7 +180,7 @@ internal class HostilePairingCryptoFactory(
         offeredMaxChunkSizeBytes = offer.offeredMaxChunkSizeBytes,
         offeredResumeSupported = offer.offeredResumeSupported,
         offeredEncryption = offer.offeredEncryption,
-        offeredAuthentication = offer.offeredAuthentication,
+        offeredAuthentication = offeredAuthentication,
         appVersion = appVersion,
         extensions = offer.extensions,
     )
@@ -186,8 +194,9 @@ internal class HostilePairingCryptoFactory(
 
 private class HostileOutcome(
     val honest: SecurePairingRunResult,
-    val honestInteraction: ProofComparisonController,
-    val hostileInteraction: ProofComparisonController,
+    val board: Api23CodeBoard,
+    val honestHuman: Api23Human,
+    val hostileHuman: Api23Human,
     val hostileFactory: HostilePairingCryptoFactory,
     val honestSocket: Socket,
     val hostileFuture: Future<SecurePairingRunResult>,
@@ -218,12 +227,14 @@ public class HostileSecureSessionApi23Test {
             )
             assertEquals(0, outcome.hostileFactory.mutatedFrames)
             assertEquals(
-                SecureApprovalDecision.APPROVE,
-                outcome.honestInteraction.decisionTaken,
+                "the initiator displayed exactly one code",
+                1,
+                outcome.board.shownCount,
             )
             assertEquals(
-                outcome.honestInteraction.proofAtDisplay,
-                outcome.hostileInteraction.proofAtDisplay,
+                "the honest human answered the intended-peer question",
+                1,
+                outcome.honestHuman.approvalPrompts,
             )
         } finally {
             dispose(outcome)
@@ -242,9 +253,9 @@ public class HostileSecureSessionApi23Test {
                 failed?.result?.failure?.code,
             )
             // No retry over MPS1, no plaintext fallback, no approval, no confirmation, no authority.
-            assertNull("an MPS1 peer must never be shown an approval", outcome.honestInteraction.proofAtDisplay)
-            assertNull(outcome.honestInteraction.decisionTaken)
-            assertNull(outcome.hostileInteraction.decisionTaken)
+            assertEquals("an MPS1 refusal refused before a code existed", 0, outcome.board.shownCount)
+            assertEquals("no approval may be asked for an MPS1 peer", 0, outcome.honestHuman.approvalPrompts)
+            assertEquals(0, outcome.hostileHuman.approvalPrompts)
             assertTrue("the socket was left open after a legacy-format refusal", outcome.honestSocket.isClosed)
             assertHostileEndpointGotNoAuthority(outcome)
         } finally {
@@ -263,10 +274,10 @@ public class HostileSecureSessionApi23Test {
                 SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED,
                 failed?.result?.failure?.code,
             )
-            // The direct fingerprint comparison runs before the transcript, so no proof is ever
-            // displayed and no approval is ever published.
-            assertNull("a fingerprint mismatch reached the approval seam", outcome.honestInteraction.proofAtDisplay)
-            assertNull(outcome.honestInteraction.decisionTaken)
+            // The direct fingerprint comparison runs before the transcript, so no code is ever
+            // displayed and no approval is ever asked for.
+            assertEquals("a fingerprint mismatch reached the code display", 0, outcome.board.shownCount)
+            assertEquals(0, outcome.honestHuman.approvalPrompts)
             assertTrue(outcome.honestSocket.isClosed)
             assertHostileEndpointGotNoAuthority(outcome)
         } finally {
@@ -280,7 +291,7 @@ public class HostileSecureSessionApi23Test {
         try {
             val failed = outcome.honest as? SecurePairingRunResult.Failed
             assertTrue("a substituted peer instance id was not refused", failed != null)
-            assertNull(outcome.honestInteraction.decisionTaken)
+            assertEquals(0, outcome.honestHuman.approvalPrompts)
             assertTrue(outcome.honestSocket.isClosed)
             assertHostileEndpointGotNoAuthority(outcome)
         } finally {
@@ -296,7 +307,7 @@ public class HostileSecureSessionApi23Test {
                 "a substituted control session id was not refused",
                 outcome.honest is SecurePairingRunResult.Failed,
             )
-            assertNull(outcome.honestInteraction.decisionTaken)
+            assertEquals(0, outcome.honestHuman.approvalPrompts)
             assertTrue(outcome.honestSocket.isClosed)
             assertHostileEndpointGotNoAuthority(outcome)
         } finally {
@@ -312,7 +323,7 @@ public class HostileSecureSessionApi23Test {
                 "a swapped role was not refused",
                 outcome.honest is SecurePairingRunResult.Failed,
             )
-            assertNull(outcome.honestInteraction.decisionTaken)
+            assertEquals(0, outcome.honestHuman.approvalPrompts)
             assertTrue(outcome.honestSocket.isClosed)
             assertHostileEndpointGotNoAuthority(outcome)
         } finally {
@@ -325,26 +336,17 @@ public class HostileSecureSessionApi23Test {
         val outcome = runPairing(HostileMutation.NONCE_SUBSTITUTED)
         try {
             assertEquals(1, outcome.hostileFactory.mutatedFrames)
-            // A substituted nonce is a well-formed offer, so this one does reach the approval seam.
-            // The transcripts differ, therefore the displayed proofs differ, therefore the
-            // controller refuses. This is the case an unconditional APPROVE callback would have
-            // silently passed.
-            val honestProof = outcome.honestInteraction.proofAtDisplay
-            val hostileProof = outcome.hostileInteraction.proofAtDisplay
-            if (honestProof != null && hostileProof != null) {
-                assertNotEquals(
-                    "a substituted nonce produced identical proofs",
-                    honestProof,
-                    hostileProof,
-                )
-                assertEquals(
-                    SecureApprovalDecision.REJECT,
-                    outcome.honestInteraction.decisionTaken,
-                )
-            }
+            // A substituted nonce is a well-formed offer, so both sides reach the PAKE. The
+            // transcripts differ, so the two sides derive different keying material for the same
+            // entered code; the first proof that fails is the PAKE tag, and neither side approves.
             assertTrue(
                 "a substituted nonce still produced an authenticated session",
                 outcome.honest !is SecurePairingRunResult.Authenticated,
+            )
+            assertEquals(
+                "a transcript that never authenticated must not reach the intended-peer question",
+                0,
+                outcome.honestHuman.approvalPrompts,
             )
             assertHostileEndpointGotNoAuthority(outcome)
         } finally {
@@ -361,6 +363,58 @@ public class HostileSecureSessionApi23Test {
                 "a changed app version still produced an authenticated session",
                 outcome.honest !is SecurePairingRunResult.Authenticated,
             )
+            assertHostileEndpointGotNoAuthority(outcome)
+        } finally {
+            dispose(outcome)
+        }
+    }
+
+    @Test
+    public fun aSasOnlyPeerIsRefusedBeforeAnyCodeIsDisplayed() {
+        val outcome = runPairing(HostileMutation.AUTHENTICATION_SAS_ONLY)
+        try {
+            assertEquals(1, outcome.hostileFactory.mutatedFrames)
+            val failed = outcome.honest as? SecurePairingRunResult.Failed
+            assertTrue("a SAS-only peer was not refused", failed != null)
+            assertEquals(
+                SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID,
+                failed?.result?.failure?.code,
+            )
+            // The whole point of the switch: an SAS peer is refused, never compared against.
+            assertEquals("a SAS-only peer was offered a code", 0, outcome.board.shownCount)
+            assertEquals(0, outcome.honestHuman.approvalPrompts)
+            assertHostileEndpointGotNoAuthority(outcome)
+        } finally {
+            dispose(outcome)
+        }
+    }
+
+    @Test
+    public fun anAuthenticationCapabilityOfNoneIsRefusedAndGrantsNoAuthority() {
+        val outcome = runPairing(HostileMutation.AUTHENTICATION_NONE)
+        try {
+            assertEquals(1, outcome.hostileFactory.mutatedFrames)
+            assertTrue(
+                "a peer offering no authentication was not refused",
+                outcome.honest is SecurePairingRunResult.Failed,
+            )
+            assertEquals(0, outcome.board.shownCount)
+            assertHostileEndpointGotNoAuthority(outcome)
+        } finally {
+            dispose(outcome)
+        }
+    }
+
+    @Test
+    public fun anAbsentAuthenticationCapabilityIsRefusedAndGrantsNoAuthority() {
+        val outcome = runPairing(HostileMutation.AUTHENTICATION_ABSENT)
+        try {
+            assertEquals(1, outcome.hostileFactory.mutatedFrames)
+            assertTrue(
+                "a peer offering no authentication field was not refused",
+                outcome.honest is SecurePairingRunResult.Failed,
+            )
+            assertEquals(0, outcome.board.shownCount)
             assertHostileEndpointGotNoAuthority(outcome)
         } finally {
             dispose(outcome)
@@ -388,12 +442,25 @@ public class HostileSecureSessionApi23Test {
             soTimeout = app.morsecode.core.transfer.session.SecureSessionLimits.TLS_HANDSHAKE_TIMEOUT_MILLIS
         }
         val executor = Executors.newSingleThreadExecutor()
-        val clock = MonotonicClock { 100L }
+        // A real, advancing clock: a frozen one would make every exchange deadline unreachable and
+        // turn a refused pairing into a hung test.
+        val clock = api23Clock()
         val random = SecureRandom()
-        val rendezvous = ProofRendezvous()
+        val board = Api23CodeBoard()
         // The honest endpoint always drives as initiator, so the hostile endpoint is the responder.
-        val honestInteraction = ProofComparisonController("honest", rendezvous)
-        val hostileInteraction = ProofComparisonController("hostile", rendezvous)
+        // Both humans are honest: the mutation is in the MPS2 offer, never in the answers.
+        val honestHuman = Api23Human(
+            board = board,
+            initiator = true,
+            enteredCodes = emptyList(),
+            approval = SecureApprovalDecision.APPROVE,
+        )
+        val hostileHuman = Api23Human(
+            board = board,
+            initiator = false,
+            enteredCodes = listOf({ board.await(6_000L)?.toCharArray() }),
+            approval = SecureApprovalDecision.APPROVE,
+        )
         val hostileFactory = HostilePairingCryptoFactory(mutation, random)
         val hostileSession = session(
             localId = "00000000000000000000000000000002",
@@ -413,8 +480,10 @@ public class HostileSecureSessionApi23Test {
                 role = SecurePeerRole.RESPONDER,
                 clock = clock,
                 random = random,
-                interaction = hostileInteraction,
+                interaction = hostileHuman,
                 cryptoFactory = hostileFactory,
+                exchangeBudgets = api23Budgets(),
+                recordBudgets = api23RecordBudgets(),
             ).run()
         }
         val honestSocket = Socket()
@@ -429,14 +498,17 @@ public class HostileSecureSessionApi23Test {
             role = SecurePeerRole.INITIATOR,
             clock = clock,
             random = SecureRandom(),
-            interaction = honestInteraction,
+            interaction = honestHuman,
+            exchangeBudgets = api23Budgets(),
+            recordBudgets = api23RecordBudgets(),
         ).run()
         listener.close()
         executor.shutdown()
         return HostileOutcome(
             honest = honest,
-            honestInteraction = honestInteraction,
-            hostileInteraction = hostileInteraction,
+            board = board,
+            honestHuman = honestHuman,
+            hostileHuman = hostileHuman,
             hostileFactory = hostileFactory,
             honestSocket = honestSocket,
             hostileFuture = hostileFuture,
@@ -444,12 +516,7 @@ public class HostileSecureSessionApi23Test {
     }
 
     private fun dispose(outcome: HostileOutcome) {
-        outcome.honestInteraction.dispose()
-        outcome.hostileInteraction.dispose()
-        if (outcome.honest is SecurePairingRunResult.Authenticated) {
-            outcome.honest.recordLayer.close()
-            try { outcome.honest.secureSocket.close() } catch (_: Exception) { }
-        }
+        (outcome.honest as? SecurePairingRunResult.Authenticated)?.authority?.close()
         try { outcome.honestSocket.close() } catch (_: Exception) { }
     }
 

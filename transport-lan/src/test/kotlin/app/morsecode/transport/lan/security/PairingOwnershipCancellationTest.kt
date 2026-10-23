@@ -8,12 +8,15 @@ import app.morsecode.core.transfer.session.NegotiatedCapabilities
 import app.morsecode.core.transfer.session.NegotiatedSession
 import app.morsecode.core.transfer.session.PeerInstanceId
 import app.morsecode.core.transfer.session.ProtocolRange
-import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
+import app.morsecode.core.transfer.session.EnteredPairingCode
+import app.morsecode.core.transfer.session.SecureApprovalDecision
 import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SessionCapabilities
 import app.morsecode.core.transfer.session.SessionFeature
 import app.morsecode.core.transfer.session.SessionFailureCode
 import app.morsecode.core.transfer.session.SessionPeerProfile
+import app.morsecode.transport.lan.security.pairing.EnteredCodePairingInteraction
+import app.morsecode.transport.lan.security.pairing.IntendedPeerContext
 import java.net.Socket
 import java.security.SecureRandom
 import org.junit.Assert.assertEquals
@@ -37,19 +40,37 @@ import org.junit.Test
  */
 public class PairingOwnershipCancellationTest {
 
+    /**
+     * The entered-code interaction, scripted.
+     *
+     * Nothing here can answer a challenge: [cancelled] is the only thing the coordinator reads
+     * before TLS, and the prompt methods would be reached only by a pairing that got that far.
+     * [promptsPublished] stays zero for every test below, which is what proves a refused admission
+     * never asked a human anything.
+     */
     private class CancellableInteraction(
         @Volatile var cancelled: Boolean = false,
-    ) : PairingInteraction {
-        var approvalsPublished = 0
-        override fun publishApproval(
-            machine: SecureSessionStateMachine,
-            request: SecurePairingApprovalRequest,
-        ): Boolean {
-            approvalsPublished += 1
-            return true
+    ) : EnteredCodePairingInteraction {
+        var promptsPublished = 0
+
+        override fun publishGeneratedCode(code: EnteredPairingCode, expiresAtElapsedMillis: Long): Boolean {
+            promptsPublished += 1
+            return false
         }
 
-        override fun awaitApproval(machine: SecureSessionStateMachine): Boolean = !cancelled
+        override fun requestEnteredCode(attemptOrdinal: Int, expiresAtElapsedMillis: Long): EnteredPairingCode? {
+            promptsPublished += 1
+            return null
+        }
+
+        override fun requestIntendedPeerApproval(
+            context: IntendedPeerContext,
+            expiresAtElapsedMillis: Long,
+        ): SecureApprovalDecision? {
+            promptsPublished += 1
+            return null
+        }
+
         override fun isCancelled(): Boolean = cancelled
     }
 
@@ -80,7 +101,7 @@ public class PairingOwnershipCancellationTest {
 
     private fun coordinator(
         socket: Socket,
-        interaction: PairingInteraction,
+        interaction: EnteredCodePairingInteraction,
         scope: PairingAdmissionScope?,
     ): SecureLanPairingCoordinator = SecureLanPairingCoordinator(
         rawSocket = socket,
@@ -107,7 +128,7 @@ public class PairingOwnershipCancellationTest {
                 result is SecurePairingRunResult.Authenticated,
             )
             assertEquals(SessionFailureCode.OPERATION_CANCELLED, codeOf(result))
-            assertEquals("cancellation must happen before approval is ever published", 0, interaction.approvalsPublished)
+            assertEquals("cancellation must happen before a prompt is ever published", 0, interaction.promptsPublished)
         } finally {
             runCatching { socket.close() }
             scope.close()
@@ -199,7 +220,7 @@ public class PairingOwnershipCancellationTest {
             val result = coordinator(socket, interaction, scope).run()
             assertFalse(result is SecurePairingRunResult.Authenticated)
             assertEquals(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED, codeOf(result))
-            assertEquals(0, interaction.approvalsPublished)
+            assertEquals(0, interaction.promptsPublished)
         } finally {
             runCatching { socket.close() }
         }

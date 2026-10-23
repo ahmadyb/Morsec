@@ -60,6 +60,10 @@ const AUTHORIZED_JPAKE_FILES = new Set([
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/PakeAttempt.kt',
   'core-transfer/src/main/kotlin/app/morsecode/core/transfer/session/PakeRecords.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/AuthenticatedControlAuthority.kt',
+  // The live coordinator names the suite it offers and calls the composed path, so it belongs in
+  // the set the inertness checks scan -- not because it is trusted, but because it is the one
+  // production file where a payload reference or a log line would now be reachable.
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/SecureLanPairingCoordinator.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeFrames.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeSession.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/pairing/EnteredCodePairingInteraction.kt',
@@ -153,6 +157,46 @@ function harnessLogsOnlyBoundedValues(harnessText) {
   return !/\$(CODE|WRONG_CODE|code|keyA|keyB|keyingMaterial|macTag)\b/.test(harnessText);
 }
 
+/**
+ * The live pairing path must not contain any trace of the retired comparison.
+ *
+ * `EnteredCodePairingInteraction` legitimately contains the substring `PairingInteraction`, so the
+ * allowed token is removed before the legacy interface is looked for. Everything else is matched as
+ * written: a coordinator that names `HumanVerificationCode`, `ProofComparisonController`, the SAS
+ * capability or the legacy state machine has grown a second human check, and the fix is to delete
+ * it rather than to explain it.
+ */
+function livePathHasNoSasSurface(text) {
+  const withoutEnteredCode = text.replace(/EnteredCodePairingInteraction/g, '');
+  const forbidden = [
+    /\bHumanVerificationCode\b/,
+    /\bProofComparisonController\b/,
+    /\bProofRendezvous\b/,
+    /\bSAS_25BIT_COMPARISON\b/,
+    /\bSecureSessionStateMachine\b/,
+    /\bPairingInteraction\b/,
+    /\.select\s*\(/,
+  ];
+  return !forbidden.some((pattern) => pattern.test(withoutEnteredCode));
+}
+
+/**
+ * The live pairing path must offer exactly the MODP entered-code suite and must call the proven
+ * composed path. Both halves are required: a coordinator that selects the required suite but keeps
+ * its own record layer would pass the first half and still be a second implementation.
+ */
+function livePathUsesRequiredSuite(text) {
+  return text.includes('selectRequired(') &&
+    text.includes('JPAKE_MODP3072_ENTERED_CODE_V1') &&
+    text.includes('PakeSessionCoordinator(') &&
+    !text.includes('SecureRecordLayer(');
+}
+
+/** SAS generation is gone from production, not merely unused by the coordinator. */
+function noSasGenerationAnywhere(text) {
+  return !text.includes('fromExporterMaterial') && !text.includes('ProofComparisonController');
+}
+
 /* ------------------------------------------------------------------ *
  * Self-test: mutate, then assert the guard caught it.
  * ------------------------------------------------------------------ */
@@ -184,6 +228,40 @@ function selfTest() {
   check('self-test: a println is caught', !pakeSurfaceIsInert('println(code)\n'));
   check('self-test: a transfer-engine reference is caught',
     !pakeSurfaceIsInert('val e = TransferEngine\n'));
+
+  check('self-test: an entered-code coordinator passes the SAS-surface scan',
+    livePathHasNoSasSurface('private val interaction: EnteredCodePairingInteraction\nselectRequired(a, b)\n'));
+  check('self-test: a coordinator naming HumanVerificationCode is caught',
+    !livePathHasNoSasSurface('val proof = HumanVerificationCode.fromExporterMaterial(b)\n'));
+  check('self-test: a coordinator naming the comparison controller is caught',
+    !livePathHasNoSasSurface('val c = ProofComparisonController(a, r)\n'));
+  check('self-test: a coordinator offering the SAS capability is caught',
+    !livePathHasNoSasSurface('offeredAuthentication = SAS_25BIT_COMPARISON\n'));
+  check('self-test: a coordinator calling the general select is caught',
+    !livePathHasNoSasSurface('SecurePairingSelectionV2.select(initiator, responder)\n'));
+  check('self-test: a coordinator keeping the legacy interaction is caught',
+    !livePathHasNoSasSurface('val interaction: PairingInteraction\n'));
+  check('self-test: a coordinator keeping the legacy state machine is caught',
+    !livePathHasNoSasSurface('private var machine: SecureSessionStateMachine? = null\n'));
+
+  check('self-test: the required-suite coordinator passes',
+    livePathUsesRequiredSuite(
+      'selectRequired(a, b)\nJPAKE_MODP3072_ENTERED_CODE_V1\nPakeSessionCoordinator(\n'));
+  check('self-test: a coordinator without selectRequired is caught',
+    !livePathUsesRequiredSuite('JPAKE_MODP3072_ENTERED_CODE_V1\nPakeSessionCoordinator(\n'));
+  check('self-test: a coordinator that never offers the suite is caught',
+    !livePathUsesRequiredSuite('selectRequired(a, b)\nPakeSessionCoordinator(\n'));
+  check('self-test: a coordinator that builds its own record layer is caught',
+    !livePathUsesRequiredSuite(
+      'selectRequired(a, b)\nJPAKE_MODP3072_ENTERED_CODE_V1\nPakeSessionCoordinator(\n' +
+      'SecureRecordLayer(\n'));
+
+  check('self-test: a production source with no SAS generator passes',
+    noSasGenerationAnywhere('class A\n'));
+  check('self-test: a surviving exporter-to-code generator is caught',
+    !noSasGenerationAnywhere('val c = HumanVerificationCode.fromExporterMaterial(m)\n'));
+  check('self-test: a surviving comparison controller in production is caught',
+    !noSasGenerationAnywhere('class ProofComparisonController\n'));
 
   check('self-test: a harness that does not implement the factory seam passes',
     harnessIsNotSelectableByProduction('class H {\n  fun go() = Unit\n}\n'));
@@ -284,6 +362,22 @@ function verify() {
   }
   check('the PAKE surface persists nothing, logs nothing and opens no payload path',
     offenders.length === 0, offenders.join(', '));
+
+  // 3b. The live pairing path is the switch, not a second implementation beside it.
+  const COORDINATOR = 'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/SecureLanPairingCoordinator.kt';
+  const PROVIDER = 'transport-lan/src/main/kotlin/app/morsecode/transport/lan/LanPeerDiscoveryProvider.kt';
+  const liveFiles = production.filter((f) => f.path === COORDINATOR || f.path === PROVIDER);
+  check('the live coordinator and provider both exist', liveFiles.length === 2,
+    liveFiles.map((f) => f.path).join(', '));
+  const sasOffenders = liveFiles.filter((f) => !livePathHasNoSasSurface(f.text)).map((f) => f.path);
+  check('the live pairing path names no SAS generation, comparison or general select',
+    sasOffenders.length === 0, sasOffenders.join(', '));
+  const coordinator = production.find((f) => f.path === COORDINATOR);
+  check('the coordinator offers only the MODP entered-code suite and calls the composed path',
+    coordinator !== undefined && livePathUsesRequiredSuite(coordinator.text));
+  const sasRemnants = production.filter((f) => !noSasGenerationAnywhere(f.text)).map((f) => f.path);
+  check('no production file can generate a SAS or construct a comparison controller',
+    sasRemnants.length === 0, sasRemnants.join(', '));
 
   // 4. The androidTest harness still exists and still cannot be reached from production.
   const harnessDir = join(ROOT, 'transport-lan', 'src', 'androidTest', 'kotlin',

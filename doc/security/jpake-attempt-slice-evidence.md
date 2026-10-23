@@ -344,6 +344,41 @@ other blocked for a minute; a case asserted that `internal` is not public in byt
 what `internal` means; and the frame prefix read asked for four bytes at offset one of a four-byte
 array, which only a real stream could catch.
 
-**Verdict for this increment.** The inert path is green on the JVM and on API 23. That is not a
-completed Part B: the live coordinator is unchanged, SAS still runs in production, and payload is
-still refused. `EXPERIMENTAL PART B INCOMPLETE`.
+**Verdict for that increment (historical).** The inert path was green on the JVM and on API 23. That
+was not a completed Part B: at that point the live coordinator was unchanged, SAS still ran in
+production, and payload was still refused. `EXPERIMENTAL PART B INCOMPLETE`.
+
+## The atomic switch, 2026-10-23
+
+The live coordinator is now the entered-code PAKE. In order: TLS 1.3, MPS2 offers advertising only
+`JPAKE_MODP3072_ENTERED_CODE_V1`, `selectRequired`, MST2, `PakeSessionCoordinator` (attempt, three
+J-PAKE rounds, both approvals, record layer, key confirmation in both directions), then a single-use
+control authority. The construction is **BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072`**.
+
+Removed in the same change, because two live human checks would be two chances to approve: the SAS
+proof generation (`HumanVerificationCode.fromExporterMaterial`), the proof-comparison harness, the
+coordinator's own record layer and confirmation, and the legacy approval prompt it published. The
+coordinator cannot name any of them: `tools/verify/jpake-production-boundary.mjs` fails if it does,
+and fails if the coordinator stops offering the MODP suite or builds its own record layer.
+
+The human interaction is the entered-code bridge the control session owns. Production has no pairing
+screen at this milestone, so the prompter it installs answers nothing; a prompt stays outstanding
+until its own deadline and the bridge resolves it as no answer. That is deliberate: an automatic
+reply would turn the check into no check, and the challenge may pend until timeout.
+
+Budgets are typed where the cause is still known. The exchange refuses with a `PakeRefusalClass` and
+the coordinator maps that class to a `PairingAttemptOutcome`, instead of re-deriving a charge from a
+coarse failure code: a wrong code, an exhausted code, a failed proof, a mutated round-three tag, a
+transcript mismatch or a failed key confirmation are charged; local cancellation, local expiry, a
+local provider or implementation failure, resource refusal and a rejection by either human are not.
+Peer rejection has its own non-security outcome (`PEER_APPROVAL_REJECTED` and `PEER_REJECTION`) so a
+remote decision is never billed to the local user.
+
+Device evidence, same source tree: the API 23 suite drives `SecureLanPairingCoordinator.run()` on both
+endpoints over a real Conscrypt TLS 1.3 loopback connection. Honest pairing authenticates, the
+authority is claimed exactly once, a control record round-trips and the payload gate refuses; a wrong
+code is retried and the second attempt authenticates; three wrong codes exhaust the budget; a
+rejection by either side ends the pairing with no authority; an unanswered approval expires; a
+cancellation before TLS is refused; and the hostile harness mutates exactly one MPS2 field at a time
+(legacy MPS1 frame, certificate fingerprint, peer instance id, control session id, role, nonce, app
+version, SAS-only, `NONE`, absent) with every case refused and no authority issued.

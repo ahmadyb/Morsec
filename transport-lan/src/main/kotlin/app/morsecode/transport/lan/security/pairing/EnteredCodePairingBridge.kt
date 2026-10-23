@@ -31,9 +31,11 @@
  *   recorded is [EnteredCodePairingBridge.submitDecision] with a challenge this bridge issued.
  *
  * REACHABILITY
- *   No production path constructs a bridge yet. The live coordinator still uses the legacy SAS
- *   `PairingInteraction`; the atomic switch is what will call this. Everything here is internal to
- *   `:transport-lan`.
+ *   The live path. `LanControlSession.beginSecurePairing` opens exactly one bridge per control
+ *   session through `EnteredCodePairingSlot`, and the coordinator asks its questions through it.
+ *   Production installs a prompter that answers nothing, because this build has no pairing screen:
+ *   a prompt therefore stays outstanding until its own deadline, which is the honest outcome for a
+ *   human check nobody can answer. Everything here is internal to `:transport-lan`.
  *
  * STATUS
  *   Experimental, project-defined and not independently cryptographically reviewed. The owner

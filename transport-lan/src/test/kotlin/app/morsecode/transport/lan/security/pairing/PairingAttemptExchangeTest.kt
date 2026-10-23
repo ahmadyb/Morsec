@@ -321,8 +321,9 @@ public class PairingAttemptExchangeTest {
 
         assertEquals(PairingExchangeFailure.APPROVAL_REJECTED, failed(fromInitiator).reason)
         assertEquals(
-            "the peer must learn it was refused rather than wait",
-            PairingExchangeFailure.APPROVAL_REJECTED,
+            "the peer must learn it was refused rather than wait, and must learn it was the " +
+                "peer's decision rather than its own",
+            PairingExchangeFailure.PEER_APPROVAL_REJECTED,
             failed(fromResponder).reason,
         )
     }
@@ -339,7 +340,11 @@ public class PairingAttemptExchangeTest {
             fixture.responder(responderInteraction),
         )
 
-        assertEquals(PairingExchangeFailure.APPROVAL_REJECTED, failed(fromInitiator).reason)
+        // The two sides see the same event from opposite ends: the responder declined, so its own
+        // reason is a local rejection while the initiator reads the peer's record. The limiter
+        // charges neither, but a taxonomy that merged them could not say which side changed its
+        // mind, and the budgets would then have to guess.
+        assertEquals(PairingExchangeFailure.PEER_APPROVAL_REJECTED, failed(fromInitiator).reason)
         assertEquals(PairingExchangeFailure.APPROVAL_REJECTED, failed(fromResponder).reason)
     }
 

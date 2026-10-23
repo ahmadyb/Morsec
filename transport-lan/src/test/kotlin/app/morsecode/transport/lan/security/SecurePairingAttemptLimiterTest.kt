@@ -529,19 +529,59 @@ class SecurePairingAttemptLimiterTest {
             PairingAttemptOutcome.LOCAL_FAILURE,
             pairingOutcomeFor(SessionFailureCode.INTERNAL_TRANSPORT_FAILURE),
         )
-        assertEquals(11, PairingAttemptOutcome.entries.size)
+        assertEquals(13, PairingAttemptOutcome.entries.size)
     }
 
     @Test
-    fun `only the three security outcomes are security failures`() {
+    fun `only the four security outcomes are security failures`() {
         val security = PairingAttemptOutcome.entries.filter { it.isSecurityFailure }
         assertEquals(
             setOf(
                 PairingAttemptOutcome.AUTHENTICATION_MISMATCH,
                 PairingAttemptOutcome.TRANSCRIPT_MISMATCH,
                 PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE,
+                PairingAttemptOutcome.ATTEMPT_EXHAUSTED,
             ),
             security.toSet(),
+        )
+    }
+
+    @Test
+    fun `a peer declining costs the local user no attempt`() {
+        val clock = StepClock()
+        val limiter = SecurePairingAttemptLimiter(clock::read)
+        // Three remote refusals in a row: the peer's answer, not the local user's, so no code is
+        // spent and the identity is not condemned.
+        repeat(3) {
+            assertTrue(granted(limiter.tryStart("peer-refused", "src-refused")))
+            limiter.recordOutcome("peer-refused", "src-refused", PairingAttemptOutcome.PEER_REJECTION)
+            limiter.releaseConcurrency()
+            clock.advance(120_000)
+        }
+        assertFalse(
+            "the peer declining is not evidence against the peer's identity",
+            limiter.isIdentityInvalidated("peer-refused"),
+        )
+        assertEquals(
+            "the pair budget is a retry bound, not a security charge",
+            PairingAdmission.RefusalReason.PAIR_INVALIDATED,
+            reason(limiter.tryStart("peer-refused", "src-refused")),
+        )
+    }
+
+    @Test
+    fun `an exhausted code is charged exactly like a mismatch`() {
+        val clock = StepClock()
+        val limiter = SecurePairingAttemptLimiter(clock::read)
+        repeat(3) {
+            assertTrue(granted(limiter.tryStart("peer-guess", "src-guess")))
+            limiter.recordOutcome("peer-guess", "src-guess", PairingAttemptOutcome.ATTEMPT_EXHAUSTED)
+            limiter.releaseConcurrency()
+            clock.advance(120_000)
+        }
+        assertTrue(
+            "spending the whole guessing budget is what the identity budget is for",
+            limiter.isIdentityInvalidated("peer-guess"),
         )
     }
 }

@@ -777,7 +777,9 @@ internal class PairingAttemptExchange(
         }
         if (peer.decision != PakeApprovalDecision.APPROVE) {
             peer.clearSensitive()
-            return ApprovalOutcome.Stop(PairingExchangeFailure.APPROVAL_REJECTED)
+            // The peer's own record refused this pairing. A distinct reason, because the local
+            // human approved and the limiter must not charge them for the remote decision.
+            return ApprovalOutcome.Stop(PairingExchangeFailure.PEER_APPROVAL_REJECTED)
         }
         // The decision this side actually recorded, carried out with the peer's record so the
         // caller does not have to ask the human a second time to learn what they already said.

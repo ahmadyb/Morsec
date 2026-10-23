@@ -7,11 +7,11 @@
  *   shutdown path so that "the session closed" and "the prompt is still waiting for an answer"
  *   cannot disagree.
  *
- * THE GATE IS SHARED ON PURPOSE
- *   [gate] is the control session's own `pairingStarted` flag -- the same object the legacy SAS
- *   operation compare-and-sets. Passing it in rather than owning a second flag is what makes "one
- *   pairing per session" true across both paths instead of only within each of them. So a session
- *   that has started a comparison cannot also start an entered-code exchange, and the reverse.
+ * THE GATE
+ *   [gate] is the control session's own `pairingStarted` flag. Opening a bridge is what claims the
+ *   session's single pairing, so one compare-and-set decides it and a refusal costs nothing. The
+ *   flag outlived the SAS path it was introduced with and stays the single source of truth for
+ *   "this session has already started a pairing".
  *
  * ONE CLOSE, AND IT RESOLVES
  *   [closeOnce] detaches the bridge and closes it. A bridge that is already closing resolves its own
@@ -24,9 +24,8 @@
  *   challenge the bridge issued.
  *
  * REACHABILITY
- *   One instance per control session, exposed through `LanControlSession.beginEnteredCodePairing`.
- *   Nothing calls that yet; the live coordinator still runs the SAS comparison. The atomic switch is
- *   what will.
+ *   One instance per control session, owned by `LanControlSession`. `beginSecurePairing` opens it,
+ *   `close()` shuts it down exactly once, and the coordinator receives the bridge it returned.
  *
  * STATUS
  *   Experimental, project-defined and not independently cryptographically reviewed. The owner

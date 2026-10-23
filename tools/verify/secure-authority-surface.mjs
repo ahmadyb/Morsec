@@ -294,12 +294,20 @@ check(
     'security', 'SecureLanPairingCoordinator.kt',
   );
   const coordinator = existsSync(coordPath) ? read(coordPath) : '';
-  for (const label of ['tls-handshake', 'pairing-hello', 'key-confirmation']) {
+  // The key-confirmation phase now lives in the composed path, which bounds it with
+  // `RecordBudgets` rather than with this file's phase helper. The check below pins that instead.
+  for (const label of ['tls-handshake', 'pairing-hello']) {
     check(
       `coordinator arms a total deadline for ${label}`,
       new RegExp(`label = "${label}"[\\s\\S]{0,200}?budgetMillis = SecureSessionLimits\\.[A-Z_]+_DEADLINE_MILLIS`).test(coordinator),
     );
   }
+  check(
+    'the composed path bounds key confirmation with its record budgets',
+    /recordBudgets = recordBudgets,/.test(coordinator) &&
+      /val readMillis: Long,/.test(read(join(ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app',
+        'morsecode', 'transport', 'lan', 'security', 'pairing', 'PakeSessionCoordinator.kt'))),
+  );
   check(
     'socket close runs under a bounded deadline',
     /private fun closeSocket\(socket: Socket\) \{[\s\S]{0,400}?MonotonicSocketDeadline\([\s\S]{0,300}?BOUNDED_CLOSE_DEADLINE_MILLIS/.test(coordinator),
@@ -345,11 +353,12 @@ check(
   const limiter = existsSync(limiterPath) ? read(limiterPath) : '';
   const outcomes = [
     'AUTHENTICATED', 'AUTHENTICATION_MISMATCH', 'TRANSCRIPT_MISMATCH', 'KEY_CONFIRMATION_FAILURE',
-    'USER_REJECTION', 'APPROVAL_EXPIRED', 'HANDSHAKE_TIMEOUT', 'PEER_DISCONNECT',
-    'LOCAL_CANCELLATION', 'LOCAL_FAILURE', 'RESOURCE_REFUSED',
+    'ATTEMPT_EXHAUSTED', 'APPROVAL_EXPIRED', 'USER_REJECTION', 'PEER_REJECTION',
+    'HANDSHAKE_TIMEOUT', 'PEER_DISCONNECT', 'LOCAL_CANCELLATION', 'LOCAL_FAILURE',
+    'RESOURCE_REFUSED',
   ];
   check(
-    'the attempt taxonomy names all eleven documented outcomes',
+    'the attempt taxonomy names all thirteen documented outcomes',
     /internal enum class PairingAttemptOutcome \{([\s\S]*?)\}/.test(limiter) &&
       outcomes.every((o) => new RegExp(`^\\s+${o},?$`, 'm').test(limiter)),
   );
@@ -359,11 +368,11 @@ check(
   );
   check(
     'only genuine security failures can escalate to identity invalidation',
-    /AUTHENTICATION_MISMATCH,\s*PairingAttemptOutcome\.TRANSCRIPT_MISMATCH,\s*PairingAttemptOutcome\.KEY_CONFIRMATION_FAILURE -> recordFailure\(/.test(limiter),
+    /KEY_CONFIRMATION_FAILURE,\s*PairingAttemptOutcome\.ATTEMPT_EXHAUSTED -> recordFailure\(/.test(limiter),
   );
   check(
     'a declined approval applies cooldown but never failure escalation',
-    /USER_REJECTION,\s*PairingAttemptOutcome\.APPROVAL_EXPIRED -> recordSoftAttempt\(/.test(limiter) &&
+    /USER_REJECTION,\s*PairingAttemptOutcome\.PEER_REJECTION,\s*PairingAttemptOutcome\.APPROVAL_EXPIRED -> recordSoftAttempt\(/.test(limiter) &&
       /internal fun recordSoftAttempt[\s\S]{0,500}?nextAllowedAtMillis/.test(limiter) &&
       !/recordSoftAttempt[\s\S]{0,500}?failures\??\.incrementAndGet/.test(limiter),
   );
@@ -411,9 +420,10 @@ check(
       !/recordSuccess\(/.test(pairingCoordinator),
   );
   check(
-    'every failure path funnels through the classifier',
-    /private fun failed\(code: SessionFailureCode\)[\s\S]{0,200}?attemptOutcome = pairingOutcomeFor\(code\)/.test(pairingCoordinator) &&
-      /attemptOutcome = pairingOutcomeFor\(result\.failure\.code\)/.test(pairingCoordinator),
+    'every failure path funnels through one classifier',
+    /private fun failed\(code: SessionFailureCode\): SecurePairingRunResult\.Failed =\s*failedWith\(code, pairingOutcomeFor\(code\)\)/.test(pairingCoordinator) &&
+      /private fun failedWith\(\s*code: SessionFailureCode,\s*classification: PakeRefusalClass,\s*\)/.test(pairingCoordinator) &&
+      /PakeRefusalClass\.ATTEMPTS_EXHAUSTED -> PairingAttemptOutcome\.ATTEMPT_EXHAUSTED/.test(pairingCoordinator),
   );
   check(
     'an authenticated result is the only outcome recorded as a success',
@@ -462,19 +472,26 @@ function verifyProductionWireVersion() {
     !/SecurePairingTranscript\.create\(/.test(coordinator),
   );
   check(
-    'the selection is derived from both decoded offers, never caller-supplied',
-    /SecurePairingSelectionV2\.select\(initiatorOffer, responderOffer\)/.test(coordinator) &&
-      /when \(val result = SecurePairingSelectionV2\.select\(/.test(coordinator),
+    'the selection is derived with the required-suite policy, never by a general select',
+    /PairingAuthenticationPolicy\.selectRequired\(initiatorOffer, responderOffer\)/.test(coordinator) &&
+      !/\.select\(initiatorOffer/.test(coordinator),
   );
   check(
     'the transcript is built from the V2 offers and the derived selection',
     /SecurePairingTranscriptV2\.build\(initiatorOffer, responderOffer, selection\)/.test(coordinator),
   );
   check(
-    'the exporter and human proof are bound to the V2 transcript digest',
+    'the transcript digest is what the composed path authenticates',
     /transcriptDigest = canonicalDigest/.test(coordinator) &&
-      /established\.export\(PROOF_LABEL, canonicalDigest/.test(coordinator) &&
-      /export\(C2S_KEY_LABEL, transcriptDigest/.test(coordinator),
+      /PakeSessionCoordinator\(/.test(coordinator) &&
+      /transcriptDigest = canonicalDigest,/.test(coordinator) &&
+      !/PROOF_LABEL/.test(coordinator),
+  );
+  check(
+    'the coordinator no longer derives a record layer or writes a confirmation itself',
+    !/SecureRecordLayer\(/.test(coordinator) &&
+      !/SecureKeyConfirmationCodec/.test(coordinator) &&
+      !/fun deriveRecordLayer\(/.test(coordinator),
   );
   check(
     'a legacy MPS1 peer gets a typed incompatible-format result rather than a retry',
@@ -875,11 +892,11 @@ function verifyPairingOwnershipAfterLeaseStop() {
   );
   check(
     'an authenticated result is re-checked against cancellation before the session is installed',
-    /is SecurePairingRunResult\.Authenticated -> \{\s*if \(isCancelled\(\) \|\| !installSecureSession\(/.test(provider),
+    /is SecurePairingRunResult\.Authenticated -> \{[\s\S]{0,900}?if \(isCancelled\(\) \|\| !installSecureSession\(/.test(provider),
   );
   check(
     'a refused installation closes the record layer and the socket rather than leaking them',
-    /pairingResult\.recordLayer\.close\(\)\s*closeSocket\(pairingResult\.secureSocket\)\s*completeFailure\(SessionFailureCode\.OPERATION_CANCELLED\)/.test(provider),
+    /authority\.close\(\)\s*closeSocket\(pairingResult\.secureSocket\)\s*completeFailure\(SessionFailureCode\.OPERATION_CANCELLED\)/.test(provider),
   );
   check(
     'lease stop closes in-flight sockets so blocking pairing work cannot survive it',
@@ -888,11 +905,16 @@ function verifyPairingOwnershipAfterLeaseStop() {
 
   check(
     'the coordinator itself refuses authenticated authority once its owning lease has closed',
-    /if \(interaction\.isCancelled\(\)\) \{\s*return failed\(SessionFailureCode\.OPERATION_CANCELLED\)\s*\}\s*keptSocket = true\s*authenticated = true/.test(pairingCoordinator),
+    /if \(interaction\.isCancelled\(\)\) \{\s*\w+\.authority\.close\(\)\s*return failed\(SessionFailureCode\.OPERATION_CANCELLED\)\s*\}\s*keptSocket = true\s*authenticated = true/.test(pairingCoordinator),
   );
   check(
-    'the coordinator checks cancellation before TLS, before the hello, and during confirmation',
-    (pairingCoordinator.match(/if \(interaction\.isCancelled\(\)\)/g) || []).length >= 4,
+    'the coordinator checks cancellation before TLS, after the handshake, and before authority leaves',
+    (pairingCoordinator.match(/if \(interaction\.isCancelled\(\)\)/g) || []).length >= 3,
+  );
+  check(
+    'the coordinator hands out the authority, never a socket plus a record layer',
+    /class Authenticated\(\s*val secureSocket: SSLSocket,\s*val authority: AuthenticatedControlAuthority,/.test(pairingCoordinator) &&
+      /authenticatedOutcome\.authority/.test(pairingCoordinator),
   );
   check(
     'exactly one terminal outcome is delivered per control session',
@@ -1665,24 +1687,37 @@ function verifyHostileSessionEvidenceStaysTestOnly() {
     (src) => src.replace('throw LegacySecurityFormatException()', 'throw SecureSessionCryptoException()'),
     (src) => src.includes('throw LegacySecurityFormatException()'));
 
-  // Approval must be conditional on the proof comparison, in both hostile and honest harnesses.
+  // The comparison harness is deleted, not merely unused. Its whole contract was SAS approval, and
+  // a live path that cannot generate a proof has nothing for it to compare.
   const controllerPath = join(testRoot, 'kotlin', 'app', 'morsecode', 'transport', 'lan', 'security',
     'ProofComparisonController.kt');
-  check('the proof comparison controller exists in androidTest only', existsSync(controllerPath));
-  const controller = existsSync(controllerPath) ? read(controllerPath) : '';
-  check('approval is gated on the two displayed proofs matching',
-    controller.includes('ownProof == peerProof') &&
-      controller.includes('SecureApprovalDecision.APPROVE') &&
-      controller.includes('SecureApprovalDecision.REJECT'));
-  check('a missing peer proof refuses rather than approving',
-    controller.includes('awaitPeerProof(alias, DECISION_TIMEOUT_SECONDS) ?: return false'));
-  mutation('mutation: an unconditional approval is rejected', controller,
-    (src) => src.replace('if (ownProof == peerProof) {', 'if (true) {'),
-    (src) => src.includes('ownProof == peerProof'));
-  mutation('mutation: approving when the peer proof never arrives is rejected', controller,
-    (src) => src.replace('awaitPeerProof(alias, DECISION_TIMEOUT_SECONDS) ?: return false',
-      'awaitPeerProof(alias, DECISION_TIMEOUT_SECONDS) ?: ownProof'),
-    (src) => src.includes('awaitPeerProof(alias, DECISION_TIMEOUT_SECONDS) ?: return false'));
+  check('the proof comparison controller is gone from every source set',
+    !existsSync(controllerPath) &&
+      !mainSources.some((f) => read(f).includes('ProofComparisonController')) &&
+      !collect(join(ROOT, 'transport-lan', 'src')).some((f) => read(f).includes('ProofComparisonController')));
+
+  // A prompt may only be answered through the challenge the bridge issued, and the production
+  // prompter must answer nothing at all.
+  const bridgePath = join(mainRoot, 'kotlin', 'app', 'morsecode', 'transport', 'lan', 'security',
+    'pairing', 'EnteredCodePairingBridge.kt');
+  const bridge = read(bridgePath);
+  check('a challenge answer is bound to the identity of the prompt that issued it',
+    bridge.includes('if (prompt.challenge !== challenge) return false') &&
+      bridge.includes('if (!challenge.settle()) return false'));
+  check('an unanswered prompt expires rather than approving',
+    bridge.includes('if (remaining <= 0L) return false') &&
+      /if \(!await\(prompt\)\) return null[\s\S]{0,200}?prompt\.decision/.test(bridge) &&
+      !/SecureApprovalDecision\.APPROVE/.test(bridge));
+  mutation('mutation: answering a structurally equal challenge is rejected', bridge,
+    (src) => src.replace('if (prompt.challenge !== challenge) return false', ''),
+    (src) => src.includes('if (prompt.challenge !== challenge) return false'));
+  const providerPathForPrompter = join(ROOT, 'transport-lan', 'src', 'main', 'kotlin', 'app',
+    'morsecode', 'transport', 'lan', 'LanPeerDiscoveryProvider.kt');
+  const productionPrompter = existsSync(providerPathForPrompter) ? read(providerPathForPrompter) : '';
+  check('the production prompter answers no prompt',
+    /object NoInteractionSurfacePrompter : EnteredCodePairingPrompter/.test(productionPrompter) &&
+      !/NoInteractionSurfacePrompter[\s\S]{0,2000}?SecureApprovalDecision\.APPROVE/.test(productionPrompter) &&
+      !/NoInteractionSurfacePrompter[\s\S]{0,2000}?submitDecision/.test(productionPrompter));
 
   // The old unconditional harness must stay deleted.
   const allTestSources = collect(join(ROOT, 'transport-lan', 'src'));

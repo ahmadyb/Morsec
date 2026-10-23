@@ -61,10 +61,12 @@ internal sealed interface PairingAdmission {
  *
  * - [AUTHENTICATED] -- one explicit reset: failure escalation and cooldown clear, start counters do
  *   not. A peer cannot launder a start budget by succeeding once.
- * - [AUTHENTICATION_MISMATCH], [TRANSCRIPT_MISMATCH], [KEY_CONFIRMATION_FAILURE] -- the full
- *   security budget. These are the only outcomes that can invalidate an identity.
- * - [USER_REJECTION], [APPROVAL_EXPIRED] -- a bounded pairing-attempt budget: cooldown applies, but
- *   these never invalidate, because a user declining is not evidence of an attack.
+ * - [AUTHENTICATION_MISMATCH], [TRANSCRIPT_MISMATCH], [KEY_CONFIRMATION_FAILURE],
+ *   [ATTEMPT_EXHAUSTED] -- the full security budget. These are the only outcomes that can
+ *   invalidate an identity: each means the peer defeated, or ran out of guesses at, the exchange.
+ * - [USER_REJECTION], [PEER_REJECTION], [APPROVAL_EXPIRED] -- a bounded pairing-attempt budget:
+ *   cooldown applies, but these never invalidate. A human changing their mind on either side is not
+ *   evidence of an attack, and the remote human's decision says nothing about the remote identity.
  * - [HANDSHAKE_TIMEOUT], [PEER_DISCONNECT] -- a bounded pair/source budget, so a half-open peer
  *   cannot hold a slot indefinitely, but the identity is not condemned for a network drop.
  * - [LOCAL_CANCELLATION], [LOCAL_FAILURE] -- no budget at all. The peer is not penalised for
@@ -73,28 +75,71 @@ internal sealed interface PairingAdmission {
  */
 internal enum class PairingAttemptOutcome {
     AUTHENTICATED,
+
+    /** A proof, tag, approval binding or protocol invariant failed. Charged. */
     AUTHENTICATION_MISMATCH,
+
+    /** The transcript or the negotiated suite was not the required one. Charged. */
     TRANSCRIPT_MISMATCH,
+
+    /** The peer's key confirmation did not verify, or never arrived. Charged. */
     KEY_CONFIRMATION_FAILURE,
-    USER_REJECTION,
+
+    /**
+     * Every attempt the generated code allowed was spent. Charged.
+     *
+     * Separate from [RESOURCE_REFUSED] on purpose: one is the peer's guessing budget running out,
+     * the other is local capacity saying no. Folding them together made an exhausted code
+     * indistinguishable from a full executor, which is exactly the difference the limiter needs.
+     */
+    ATTEMPT_EXHAUSTED,
+
+    /** The intended-peer prompt expired unanswered. A soft attempt: cooldown, never a failure. */
     APPROVAL_EXPIRED,
+
+    /** The local user declined. A soft attempt. */
+    USER_REJECTION,
+
+    /** The remote user declined. A soft attempt, and never held against the peer's identity. */
+    PEER_REJECTION,
+
+    /** The peer stopped answering inside a bounded wait. Costs the pair budget, not the identity. */
     HANDSHAKE_TIMEOUT,
+
+    /** The connection went away during pairing. Costs the pair budget, not the identity. */
     PEER_DISCONNECT,
+
+    /** The local user or the owning lease cancelled. Free. */
     LOCAL_CANCELLATION,
+
+    /** A local provider, clock, entropy or implementation failure. Free. */
     LOCAL_FAILURE,
+
+    /** Local capacity or a lease policy refused before any cryptographic work. Free. */
     RESOURCE_REFUSED,
 }
 
-/** True when the outcome represents the peer defeating or failing the security exchange itself. */
+/** True when the outcome represents the peer defeating the security exchange itself. */
 internal val PairingAttemptOutcome.isSecurityFailure: Boolean
     get() = when (this) {
         PairingAttemptOutcome.AUTHENTICATION_MISMATCH,
         PairingAttemptOutcome.TRANSCRIPT_MISMATCH,
-        PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE -> true
+        PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE,
+        PairingAttemptOutcome.ATTEMPT_EXHAUSTED -> true
         else -> false
     }
 
-/** Maps a produced failure code onto the outcome taxonomy. Total: no code falls through unmapped. */
+/**
+ * Maps a failure code onto the outcome taxonomy, for the failures that happen before the entered-code
+ * exchange has a typed reason of its own -- admission, TLS, the hello and the selection.
+ *
+ * Inside the exchange the code alone is ambiguous: `SECURE_SESSION_LIMIT_REACHED` there means the
+ * attempt budget is spent, while here it means local capacity refused, and only one of those may be
+ * charged. That is why the composed path classifies its own refusals
+ * ([app.morsecode.transport.lan.security.pairing.PakeRefusalClass]) instead of coming through here.
+ *
+ * Total: no code falls through unmapped.
+ */
 internal fun pairingOutcomeFor(code: app.morsecode.core.transfer.session.SessionFailureCode) = when (code) {
     app.morsecode.core.transfer.session.SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID ->
         PairingAttemptOutcome.TRANSCRIPT_MISMATCH
@@ -290,8 +335,10 @@ internal class SecurePairingAttemptLimiter(
             PairingAttemptOutcome.AUTHENTICATED -> recordSuccess(peerIdentityKey, sourceKey)
             PairingAttemptOutcome.AUTHENTICATION_MISMATCH,
             PairingAttemptOutcome.TRANSCRIPT_MISMATCH,
-            PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE -> recordFailure(peerIdentityKey, sourceKey)
+            PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE,
+            PairingAttemptOutcome.ATTEMPT_EXHAUSTED -> recordFailure(peerIdentityKey, sourceKey)
             PairingAttemptOutcome.USER_REJECTION,
+            PairingAttemptOutcome.PEER_REJECTION,
             PairingAttemptOutcome.APPROVAL_EXPIRED -> recordSoftAttempt(peerIdentityKey, sourceKey)
             PairingAttemptOutcome.HANDSHAKE_TIMEOUT,
             PairingAttemptOutcome.PEER_DISCONNECT -> recordPairBudgetFailure(peerIdentityKey, sourceKey)

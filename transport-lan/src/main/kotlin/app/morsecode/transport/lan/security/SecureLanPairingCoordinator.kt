@@ -1,35 +1,75 @@
+/*
+ * The live Part B pairing: TLS, MPS2, MST2, then the proven entered-code path, then authority.
+ *
+ * WHAT CHANGED AND WHY IT IS ONE COMMIT
+ *   The short-authentication-string comparison is gone. Not deprecated, not fallback-disabled: the
+ *   coordinator no longer generates a proof, no longer offers the retired comparison capability,
+ *   and no longer calls the general authentication selector that could have negotiated one. It
+ *   offers exactly `JPAKE_MODP3072_ENTERED_CODE_V1` and refuses anything else with
+ *   `selectRequired`.
+ *
+ *   SAS and the entered-code PAKE cannot both be live. Two live human checks on one connection would
+ *   be two chances to get approval, and the weaker one would be the one an attacker aims at. So the
+ *   switch removes the comparison in the same change that wires in the PAKE; there is no interval
+ *   where the coordinator offers neither, and none where it offers both.
+ *
+ * WHO DOES THE CRYPTOGRAPHIC WORK
+ *   Not this file. Steps one to four are the connection: TLS 1.3, the MPS2 offers, the required-suite
+ *   selection and the MST2 transcript. Everything after that -- the attempt, three J-PAKE rounds,
+ *   both approvals, the record layer, key confirmation in both directions and the single-use
+ *   authority -- is `PakeSessionCoordinator`, which was built and tested inert before this switch.
+ *   Duplicating any of it here would create a second implementation to keep correct, and the point
+ *   of the inert period was that the live path would call the tested one.
+ *
+ * WHAT THIS FILE STILL OWNS
+ *   The socket. The deadline that bounds each phase. The admission permit, and therefore the budget
+ *   charged for an attempt: this is the only place that knows both what the peer did and which
+ *   permit it did it under. And the offer validation that binds the peer's MPS2 fields to the
+ *   already-negotiated control session.
+ *
+ * WHAT IT NO LONGER OWNS
+ *   The record layer. It is derived inside the composed path from the TLS exporter over the
+ *   transcript digest, and it leaves inside the authority. A caller cannot obtain one from this
+ *   coordinator, which is what stops a future caller from pairing a socket with a layer it built
+ *   itself and calling the result authenticated.
+ *
+ * STATUS
+ *   Experimental, project-defined, not independently cryptographically reviewed. The owner waived
+ *   external review for this personal experimental app on 2026-10-19; that waiver permits
+ *   implementation and establishes no security. The authenticated control authority is control-only:
+ *   the payload gate still refuses every session unconditionally.
+ */
+
 package app.morsecode.transport.lan.security
 
+import app.morsecode.core.model.TransportKind
 import app.morsecode.core.transfer.identity.SessionId
-import app.morsecode.core.transfer.session.HumanVerificationCode
+import app.morsecode.core.transfer.session.EncryptionCapability
 import app.morsecode.core.transfer.session.MonotonicClock
 import app.morsecode.core.transfer.session.NegotiatedSession
-import app.morsecode.core.transfer.session.SecureKeyConfirmation
-import app.morsecode.core.transfer.session.SecureKeyConfirmationCodec
-import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
-import app.morsecode.core.transfer.session.SecurePairingResult
-import app.morsecode.core.transfer.session.SecurePairingState
-import app.morsecode.core.model.TransportKind
-import app.morsecode.core.transfer.session.EncryptionCapability
 import app.morsecode.core.transfer.session.PAIRING_V2_HEADER_BYTES
 import app.morsecode.core.transfer.session.PairingAuthenticationCapability
+import app.morsecode.core.transfer.session.PairingAuthenticationPolicy
 import app.morsecode.core.transfer.session.PairingHelloV2Result
 import app.morsecode.core.transfer.session.PairingOfferV2
 import app.morsecode.core.transfer.session.PairingSelectionResult
 import app.morsecode.core.transfer.session.PairingV2HeaderResult
 import app.morsecode.core.transfer.session.PairingWireV2Reject
+import app.morsecode.core.transfer.session.SecureEntropy
 import app.morsecode.core.transfer.session.SecurePairingHelloV2Codec
-import app.morsecode.core.transfer.session.SecurePairingSelectionV2
+import app.morsecode.core.transfer.session.SecurePairingResult
 import app.morsecode.core.transfer.session.SecurePairingTranscriptV2
 import app.morsecode.core.transfer.session.SecurePeerRole
-import app.morsecode.core.transfer.session.SecureRecordAead
-import app.morsecode.core.transfer.session.SecureRecordCodec
-import app.morsecode.core.transfer.session.SecureRecordLayer
-import app.morsecode.core.transfer.session.SecureRecordResult
-import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionLimits
 import app.morsecode.core.transfer.session.SessionFailure
 import app.morsecode.core.transfer.session.SessionFailureCode
+import app.morsecode.transport.lan.security.pairing.EnteredCodePairingInteraction
+import app.morsecode.transport.lan.security.pairing.PairingExchangeBudgets
+import app.morsecode.transport.lan.security.pairing.PakeRefusalClass
+import app.morsecode.transport.lan.security.pairing.PakeSessionCoordinator
+import app.morsecode.transport.lan.security.pairing.PakeSessionOutcome
+import app.morsecode.transport.lan.security.pairing.RecordBudgets
+import app.morsecode.transport.lan.security.pairing.SocketPairingChannel
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
@@ -40,26 +80,19 @@ import javax.net.ssl.SSLSocket
 
 internal sealed interface SecurePairingRunResult {
     /**
-     * A completed pairing. [negotiatedControlSession] is the *control* session and still reports
-     * `ControlOnlyUnauthenticated`: there is no public authenticated-session marker to hand back.
-     * The authority produced here is the pair of opaque, module-internal handles — [secureSocket]
-     * and [recordLayer] — which exist only because a protected write and an authenticated peer
-     * confirmation actually happened.
+     * A completed pairing.
+     *
+     * [authority] is the primitive: it exists only because every step of the chain produced its
+     * evidence, and [AuthenticatedControlAuthority.claim] hands out the control channel exactly
+     * once. This result deliberately carries no record layer: a socket plus a layer is no longer
+     * something a caller can assemble into an authenticated session.
      */
     class Authenticated(
         val secureSocket: SSLSocket,
-        val negotiatedControlSession: NegotiatedSession,
-        val recordLayer: SecureRecordLayer,
-        val expiresAtElapsedMillis: Long,
+        val authority: AuthenticatedControlAuthority,
     ) : SecurePairingRunResult
 
     class Failed(val result: SecurePairingResult.Failed) : SecurePairingRunResult
-}
-
-internal interface PairingInteraction {
-    fun publishApproval(machine: SecureSessionStateMachine, request: SecurePairingApprovalRequest): Boolean
-    fun awaitApproval(machine: SecureSessionStateMachine): Boolean
-    fun isCancelled(): Boolean
 }
 
 /** Executes only after a caller explicitly upgrades an existing selected-peer Part A session. */
@@ -69,10 +102,17 @@ internal class SecureLanPairingCoordinator(
     private val role: SecurePeerRole,
     private val clock: MonotonicClock,
     private val random: SecureRandom,
-    private val interaction: PairingInteraction,
+    /**
+     * The human interaction: a code to display, a code to type, and an intended-peer decision.
+     *
+     * Production passes the bridge held by the control session's entered-code slot. This parameter
+     * is the whole interaction surface of the live path; there is no second, SAS-shaped one, and no
+     * default approval anywhere behind it.
+     */
+    private val interaction: EnteredCodePairingInteraction,
     /**
      * The discovery lease's admission scope. Optional so a caller with no lease still gets the
-     * deadline protection; it is never a substitute for the SAS comparison.
+     * deadline protection; it is never a substitute for the human check.
      *
      * The coordinator receives the lease's exact scope rather than a shared limiter, so closing the
      * lease also closes admission for every pairing that lease started.
@@ -90,13 +130,16 @@ internal class SecureLanPairingCoordinator(
      * of those five operations never touch a socket.
      */
     private val cryptoFactory: PairingCryptoFactory = ConscryptPairingCryptoFactory(random),
+    /**
+     * The entered-code exchange's budgets. Production uses the protocol defaults; a hostile test
+     * shortens them, because waiting out a sixty-second approval deadline once per mutation would
+     * turn a bounded suite into an hour of emulator time without testing anything more.
+     */
+    private val exchangeBudgets: PairingExchangeBudgets = PairingExchangeBudgets.DEFAULT,
+    private val recordBudgets: RecordBudgets = RecordBudgets.DEFAULT,
 ) {
     @Volatile
     private var tls: EstablishedTlsSession? = null
-    @Volatile
-    private var recordLayer: SecureRecordLayer? = null
-    @Volatile
-    private var machine: SecureSessionStateMachine? = null
     @Volatile
     private var keptSocket: Boolean = false
     private var lastObservedNowElapsedMillis: Long = -1L
@@ -135,7 +178,6 @@ internal class SecureLanPairingCoordinator(
         // object, so there is nothing to clear beyond the two arrays.
         var transcriptBytes: ByteArray? = null
         var transcriptDigest: ByteArray? = null
-        var proof: HumanVerificationCode? = null
         try {
             if (interaction.isCancelled()) return failed(SessionFailureCode.OPERATION_CANCELLED)
             rawSocket.soTimeout = SecureSessionLimits.TLS_HANDSHAKE_TIMEOUT_MILLIS
@@ -207,8 +249,11 @@ internal class SecureLanPairingCoordinator(
             val initiatorOffer = if (role == SecurePeerRole.INITIATOR) local else remote
             val responderOffer = if (role == SecurePeerRole.RESPONDER) local else remote
             // The selection is derived from the two decoded offers. Nothing here is
-            // caller-supplied: a peer cannot assert a profile the other side never offered.
-            val selection = when (val result = SecurePairingSelectionV2.select(initiatorOffer, responderOffer)) {
+            // caller-supplied: a peer cannot assert a profile the other side never offered, and a
+            // peer that offers only SAS is refused here, before a single exchange frame is written.
+            val selection = when (
+                val result = PairingAuthenticationPolicy.selectRequired(initiatorOffer, responderOffer)
+            ) {
                 is PairingSelectionResult.Selected -> result.selection
                 is PairingSelectionResult.Rejected ->
                     return failed(SessionFailureCode.SECURE_SESSION_TRANSCRIPT_INVALID)
@@ -219,130 +264,64 @@ internal class SecureLanPairingCoordinator(
             val canonicalDigest = built.second.copyOf()
             transcriptDigest = canonicalDigest
 
-            val proofMaterial = established.export(PROOF_LABEL, canonicalDigest, EXPORTER_BYTES)
-            proof = HumanVerificationCode.fromExporterMaterial(proofMaterial)
-            val pairingMachine = SecureSessionStateMachine(
+            // Everything below is the proven chain. This file chooses nothing cryptographic from
+            // here on: it passes the connection, both offers, the digest and the human interaction,
+            // and reads back either an authority or a typed refusal.
+            val outcome = PakeSessionCoordinator(
+                channel = SocketPairingChannel(established, clock, role),
                 controlSession = controlSession,
-                secureSessionId = local.secureSessionId,
-                localRole = role,
+                role = role,
                 clock = clock,
-                entropy = app.morsecode.core.transfer.session.SecureEntropy { destination ->
-                    random.nextBytes(destination)
-                },
-            )
-            machine = pairingMachine
-            val request = pairingMachine.requestApproval(canonicalDigest, requireNotNull(proof))
-                ?: return failedFromMachine(pairingMachine, SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
-            if (!interaction.publishApproval(pairingMachine, request)) {
-                pairingMachine.cancel()
-                return failedFromMachine(pairingMachine, SessionFailureCode.OPERATION_CANCELLED)
+                entropy = SecureEntropy { destination -> random.nextBytes(destination) },
+                random = random,
+                interaction = interaction,
+                initiatorOffer = initiatorOffer,
+                responderOffer = responderOffer,
+                transcriptDigest = canonicalDigest,
+                recordBudgets = recordBudgets,
+                exchangeBudgets = exchangeBudgets,
+            ).run()
+            if (outcome is PakeSessionOutcome.Refused) {
+                return failedWith(outcome.reason, outcome.classification)
             }
-            if (!interaction.awaitApproval(pairingMachine)) {
-                return failedFromMachine(pairingMachine, SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED)
-            }
-            if (interaction.isCancelled()) {
-                pairingMachine.cancel()
-                return failedFromMachine(pairingMachine, SessionFailureCode.OPERATION_CANCELLED)
-            }
-            if (pairingMachine.state() !in setOf(
-                    SecurePairingState.APPROVED,
-                    SecurePairingState.CONFIRMING,
-                )
-            ) {
-                return failedFromMachine(pairingMachine, SessionFailureCode.SECURE_SESSION_APPROVAL_REJECTED)
-            }
-
-            socket.soTimeout = SecureSessionLimits.TLS_HANDSHAKE_TIMEOUT_MILLIS
-            recordLayer = deriveRecordLayer(established, local.secureSessionId, canonicalDigest, role)
-            val localConfirmation = SecureKeyConfirmation(role, canonicalDigest)
-            val confirmationBytes = try {
-                SecureKeyConfirmationCodec.encode(localConfirmation)
-            } finally {
-                localConfirmation.clearSensitive()
-            }
-            val encodedConfirmation = try {
-                recordLayer!!.protect(SecureRecordType.KEY_CONFIRMATION, confirmationBytes)
-            } finally {
-                confirmationBytes.fill(0)
-            }
-            val firstFrame = (encodedConfirmation as? SecureRecordResult.Encoded)?.frameBytes()
-                ?: return failed(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
-            val incoming = guarded(
-                label = "key-confirmation",
-                socket = socket,
-                budgetMillis = SecureSessionLimits.CONFIRMATION_DEADLINE_MILLIS,
-            ) {
-                try {
-                    output.write(firstFrame)
-                    output.flush()
-                } finally {
-                    firstFrame.fill(0)
-                }
-                val localConfirmationResult = pairingMachine.markLocalConfirmationSentAfterProtectedWrite()
-                if (localConfirmationResult is SecurePairingResult.Failed) {
-                    return SecurePairingRunResult.Failed(localConfirmationResult)
-                }
-                readRecord(input, requireNotNull(recordLayer), local.secureSessionId, role, socket)
-            } ?: return failed(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
-            val record = (incoming as? SecureRecordResult.Decoded)?.record
-                ?: return failed(SessionFailureCode.SECURE_SESSION_RECORD_INVALID)
-            if (record.type != SecureRecordType.KEY_CONFIRMATION) {
-                record.clearSensitive()
-                return failed(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
-            }
-            val peerConfirmationBytes = record.payloadBytes()
-            record.clearSensitive()
-            val peerConfirmation = try {
-                SecureKeyConfirmationCodec.decode(peerConfirmationBytes)
-            } finally {
-                peerConfirmationBytes.fill(0)
-            }
-            if (peerConfirmation == null) {
-                return failed(SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
-            }
-            val completion = pairingMachine.receivePeerConfirmationFromAuthenticatedRecord(peerConfirmation)
-            peerConfirmation.clearSensitive()
-            if (completion !is SecurePairingResult.Authenticated) {
-                return failedFromMachine(pairingMachine, SessionFailureCode.SECURE_SESSION_CONFIRMATION_FAILED)
-            }
-
-            val now = safeNow() ?: return failed(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
+            val authenticatedOutcome = outcome as PakeSessionOutcome.Authenticated
+            // The final round-three tag has validated and both approvals are in, so the remaining
+            // reasons to withhold authority are local ownership and elapsed lifetime. Both are
+            // checked before the authority leaves this frame.
+            val now = safeNow()
             val expiresAt = saturatingAdd(pairStartedAt, SecureSessionLimits.MAX_SESSION_LIFETIME_MILLIS)
-            if (now >= expiresAt) return failed(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
-            // Ownership model A: the discovery lease owns this pairing for its entire life, and
-            // its `closed` flag is what `isCancelled()` reports. The last check above sits before
-            // confirmation, so a lease that stopped during confirmation would otherwise reach here
-            // and hand back a live session. The caller re-checks before installing, but a
-            // coordinator that issues authenticated authority for a closed lease is a hazard for
-            // any second caller that forgets to -- so the refusal belongs here too.
+            if (now == null || now >= expiresAt) {
+                authenticatedOutcome.authority.close()
+                return failed(SessionFailureCode.SECURE_SESSION_LIMIT_REACHED)
+            }
+            // Ownership model A: the discovery lease owns this pairing for its entire life. A lease
+            // that stopped during key confirmation would otherwise hand back live authority; the
+            // caller re-checks before installing, and so does this.
             if (interaction.isCancelled()) {
+                authenticatedOutcome.authority.close()
                 return failed(SessionFailureCode.OPERATION_CANCELLED)
             }
             keptSocket = true
             authenticated = true
             return SecurePairingRunResult.Authenticated(
                 secureSocket = socket,
-                negotiatedControlSession = controlSession,
-                recordLayer = requireNotNull(recordLayer),
-                expiresAtElapsedMillis = expiresAt,
+                authority = authenticatedOutcome.authority,
             )
         } catch (_: LegacySecurityFormatException) {
             return failed(SessionFailureCode.PROTOCOL_VERSION_UNSUPPORTED)
         } catch (_: SocketTimeoutException) {
-            return failedFromMachine(machine, SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
+            return failed(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         } catch (_: IOException) {
-            return failedFromMachine(machine, SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
+            return failed(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         } catch (_: Exception) {
-            return failedFromMachine(machine, SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
+            return failed(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
         } finally {
             val granted = handle
             if (granted != null) {
                 // One outcome, one policy. A local cancellation or local provider failure must not
                 // be charged to the peer, and a genuine transcript mismatch must not be hidden
-                // among them -- which is exactly what the undifferentiated recordFailure did.
-                // One atomic terminal operation: it claims the transition, applies the outcome
-                // and returns the permit. There is no separate release for a concurrent cleanup
-                // path to race against and erase a security result.
+                // among them. One atomic terminal operation: it claims the transition, applies the
+                // outcome and returns the permit.
                 granted.complete(
                     if (authenticated) PairingAttemptOutcome.AUTHENTICATED else attemptOutcome,
                 )
@@ -351,11 +330,9 @@ internal class SecureLanPairingCoordinator(
             remoteOffer?.clearSensitive()
             transcriptBytes?.fill(0)
             transcriptDigest?.fill(0)
-            proof?.clearSensitive()
             val completedTls = tls
             completedTls?.clearFingerprints()
             if (!keptSocket) {
-                recordLayer?.close()
                 try {
                     completedTls?.socket?.close()
                 } catch (_: IOException) {
@@ -363,68 +340,20 @@ internal class SecureLanPairingCoordinator(
                 }
                 closeSocket(rawSocket)
             }
-            recordLayer = null
             tls = null
         }
     }
 
     fun cancel() {
-        machine?.cancel()
+        // The composed path owns nothing that can be cancelled from another thread; the socket is
+        // what unblocks it. The bridge resolves its own pending prompt, so the exchange returns
+        // rather than sitting in an await for the rest of its budget.
         try {
             tls?.socket?.close()
         } catch (_: IOException) {
             // Cancellation always remains redacted and idempotent.
         }
         closeSocket(rawSocket)
-    }
-
-    private fun deriveRecordLayer(
-        established: EstablishedTlsSession,
-        sessionId: SessionId,
-        transcriptDigest: ByteArray,
-        localRole: SecurePeerRole,
-    ): SecureRecordLayer {
-        var c2sKey: ByteArray? = null
-        var c2sIv: ByteArray? = null
-        var s2cKey: ByteArray? = null
-        var s2cIv: ByteArray? = null
-        var clientWrite: SecureRecordAead? = null
-        var serverWrite: SecureRecordAead? = null
-        var handedOff = false
-        try {
-            c2sKey = established.export(C2S_KEY_LABEL, transcriptDigest, SecureSessionLimits.AES_KEY_BYTES)
-            c2sIv = established.export(C2S_IV_LABEL, transcriptDigest, SecureSessionLimits.NONCE_BYTES_FOR_AES_GCM)
-            s2cKey = established.export(S2C_KEY_LABEL, transcriptDigest, SecureSessionLimits.AES_KEY_BYTES)
-            s2cIv = established.export(S2C_IV_LABEL, transcriptDigest, SecureSessionLimits.NONCE_BYTES_FOR_AES_GCM)
-            clientWrite = established.createAead(requireNotNull(c2sKey))
-            serverWrite = established.createAead(requireNotNull(s2cKey))
-            val clientCipher = requireNotNull(clientWrite)
-            val serverCipher = requireNotNull(serverWrite)
-            val sender = if (localRole == SecurePeerRole.INITIATOR) clientCipher else serverCipher
-            val receiver = if (localRole == SecurePeerRole.INITIATOR) serverCipher else clientCipher
-            val sendIv = requireNotNull(if (localRole == SecurePeerRole.INITIATOR) c2sIv else s2cIv)
-            val receiveIv = requireNotNull(if (localRole == SecurePeerRole.INITIATOR) s2cIv else c2sIv)
-            val layer = SecureRecordLayer(
-                sessionId = sessionId,
-                localRole = localRole,
-                sendAead = sender,
-                receiveAead = receiver,
-                sendNonceBase = sendIv,
-                receiveNonceBase = receiveIv,
-                clock = clock,
-            )
-            handedOff = true
-            return layer
-        } finally {
-            c2sKey?.fill(0)
-            c2sIv?.fill(0)
-            s2cKey?.fill(0)
-            s2cIv?.fill(0)
-            if (!handedOff) {
-                try { clientWrite?.close() } catch (_: Exception) { }
-                try { serverWrite?.close() } catch (_: Exception) { }
-            }
-        }
     }
 
     private fun createOffer(
@@ -461,7 +390,9 @@ internal class SecureLanPairingCoordinator(
                 offeredMaxChunkSizeBytes = 0L,
                 offeredResumeSupported = false,
                 offeredEncryption = EncryptionCapability.TLS_1_3,
-                offeredAuthentication = PairingAuthenticationCapability.SAS_25BIT_COMPARISON,
+                // The only authentication this build can perform. A peer that cannot offer it is
+                // refused by `selectRequired` above; it is never offered a comparison instead.
+                offeredAuthentication = PairingAuthenticationCapability.JPAKE_MODP3072_ENTERED_CODE_V1,
                 appVersion = localProfile.appVersion,
                 extensions = emptyList(),
             )
@@ -559,31 +490,6 @@ internal class SecureLanPairingCoordinator(
         } finally {
             headerBytes.fill(0)
             frame?.fill(0)
-        }
-    }
-
-    private fun readRecord(
-        input: DataInputStream,
-        layer: SecureRecordLayer,
-        sessionId: SessionId,
-        localRole: SecurePeerRole,
-        socket: Socket,
-    ): SecureRecordResult? {
-        val headerBytes = ByteArray(SecureRecordCodec.HEADER_SIZE_BYTES)
-        val deadline = readDeadline()
-        var frame: ByteArray? = null
-        try {
-            readExact(input, headerBytes, 0, headerBytes.size, socket, deadline)
-            val expectedDirection = SecureRecordLayer.directionFrom(localRole).opposite
-            val header = SecureRecordCodec.decodeHeader(headerBytes, sessionId, expectedDirection) ?: return null
-            if (header.frameLength > SecureRecordCodec.MAX_FRAME_SIZE_BYTES) return null
-            frame = ByteArray(header.frameLength)
-            headerBytes.copyInto(requireNotNull(frame))
-            readExact(input, requireNotNull(frame), headerBytes.size, header.frameLength - headerBytes.size, socket, deadline)
-            return layer.unprotect(requireNotNull(frame))
-        } finally {
-            frame?.fill(0)
-            headerBytes.fill(0)
         }
     }
 
@@ -687,39 +593,47 @@ internal class SecureLanPairingCoordinator(
     /**
      * Why the admitted attempt ended, for the limiter's budget policy.
      *
-     * Written only from the thread running [run] -- every failure path funnels through [failed] or
-     * [failedFromMachine] on that thread -- and read in the same thread's `finally`. A cancellation
-     * from another thread does not write it here; it makes this thread produce OPERATION_CANCELLED,
-     * which then classifies as a local cancellation and costs the peer nothing.
+     * Written only from the thread running [run] -- every failure path funnels through [failed],
+     * [failedWith] or the composed outcome on that thread -- and read in the same thread's
+     * `finally`.
      */
     private var attemptOutcome: PairingAttemptOutcome = PairingAttemptOutcome.AUTHENTICATION_MISMATCH
 
-    private fun failed(code: SessionFailureCode): SecurePairingRunResult.Failed {
-        attemptOutcome = pairingOutcomeFor(code)
+    private fun failed(code: SessionFailureCode): SecurePairingRunResult.Failed =
+        failedWith(code, pairingOutcomeFor(code))
+
+    private fun failedWith(
+        code: SessionFailureCode,
+        outcome: PairingAttemptOutcome,
+    ): SecurePairingRunResult.Failed {
+        attemptOutcome = outcome
         return SecurePairingRunResult.Failed(SecurePairingResult.Failed(SessionFailure(code)))
     }
 
-    private fun failedFromMachine(
-        stateMachine: SecureSessionStateMachine?,
-        fallback: SessionFailureCode,
-    ): SecurePairingRunResult.Failed {
-        val result = stateMachine?.completion() as? SecurePairingResult.Failed
-            ?: SecurePairingResult.Failed(SessionFailure(fallback))
-        attemptOutcome = pairingOutcomeFor(result.failure.code)
-        return SecurePairingRunResult.Failed(result)
-    }
+    private fun failedWith(
+        code: SessionFailureCode,
+        classification: PakeRefusalClass,
+    ): SecurePairingRunResult.Failed = failedWith(code, attemptOutcomeFor(classification))
+
+    private fun attemptOutcomeFor(classification: PakeRefusalClass): PairingAttemptOutcome =
+        when (classification) {
+            PakeRefusalClass.ATTEMPTS_EXHAUSTED -> PairingAttemptOutcome.ATTEMPT_EXHAUSTED
+            PakeRefusalClass.AUTHENTICATION_FAILURE -> PairingAttemptOutcome.AUTHENTICATION_MISMATCH
+            PakeRefusalClass.KEY_CONFIRMATION_FAILURE -> PairingAttemptOutcome.KEY_CONFIRMATION_FAILURE
+            PakeRefusalClass.TRANSCRIPT_MISMATCH -> PairingAttemptOutcome.TRANSCRIPT_MISMATCH
+            PakeRefusalClass.USER_REJECTION -> PairingAttemptOutcome.USER_REJECTION
+            PakeRefusalClass.PEER_REJECTION -> PairingAttemptOutcome.PEER_REJECTION
+            PakeRefusalClass.LOCAL_CANCELLATION -> PairingAttemptOutcome.LOCAL_CANCELLATION
+            PakeRefusalClass.LOCAL_EXPIRY -> PairingAttemptOutcome.APPROVAL_EXPIRED
+            PakeRefusalClass.PEER_UNRESPONSIVE -> PairingAttemptOutcome.HANDSHAKE_TIMEOUT
+            PakeRefusalClass.PEER_DISCONNECTED -> PairingAttemptOutcome.PEER_DISCONNECT
+            PakeRefusalClass.LOCAL_FAILURE -> PairingAttemptOutcome.LOCAL_FAILURE
+        }
 
     private fun saturatingAdd(value: Long, duration: Long): Long =
         if (value > Long.MAX_VALUE - duration) Long.MAX_VALUE else value + duration
 
     private companion object {
-        const val PROOF_LABEL: String = "EXPORTER-MORSEC-PAIRING-PROOF-V1"
-        const val C2S_KEY_LABEL: String = "EXPORTER-MORSEC-C2S-KEY-V1"
-        const val C2S_IV_LABEL: String = "EXPORTER-MORSEC-C2S-IV-V1"
-        const val S2C_KEY_LABEL: String = "EXPORTER-MORSEC-S2C-KEY-V1"
-        const val S2C_IV_LABEL: String = "EXPORTER-MORSEC-S2C-IV-V1"
-        const val EXPORTER_BYTES: Int = 32
-
         /** Used when a source address cannot be read; it must never be treated as an identity. */
         const val UNKNOWN_SOURCE: String = "unknown-source"
     }

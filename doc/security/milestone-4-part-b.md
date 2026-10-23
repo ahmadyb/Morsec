@@ -6,13 +6,33 @@ it does not provide file transfer, a user-facing pairing flow, trusted-device st
 product-ready LAN feature. `CURRENT_MILESTONE` stays `2`, `TRANSFER_ENGINE` remains gated,
 and payload/resume capabilities are absent after authentication.
 
+**Status of the atomic switch (2026-10-23).** The live pairing path is the entered-code PAKE. The
+coordinator offers only `JPAKE_MODP3072_ENTERED_CODE_V1`, selects with `selectRequired`, builds the
+MST2 transcript and calls the composed `PakeSessionCoordinator`; the short-authentication-string
+comparison is retired and cannot be generated in this build. The construction is **BC J-PAKE with
+`JPAKEPrimeOrderGroups.NIST_3072`**.
+
+What that sentence does and does not mean. It means no live code path offers the retired comparison,
+generates a proof for it, or approves one: `HumanVerificationCode.fromExporterMaterial` is deleted,
+the comparison harness is deleted, and `tools/verify/jpake-production-boundary.mjs` fails if either
+returns or if the coordinator or provider names them. The SAS *types* survive only because the
+control-session listener record still names them, and nothing in this build can construct one. It
+does not mean the composition is reviewed, audited or proven: no independent cryptographic review has
+taken place, the owner waived that gate for this personal experimental app on 2026-10-19, and the
+waiver permits implementation while establishing no security. The authenticated control authority is
+control-only and the payload gate still refuses every session unconditionally.
+
+The sections below were written while the SAS path was still live. They are kept as the record of
+that state, and the claims in them that SAS runs in production are historical.
+
 **Status of the J-PAKE replacement (2026-10-21).** Experimental J-PAKE/MPS3 code now exists in
 production source: suite negotiation (`PairingAuthenticationPolicy`), the MPS3 codec
 (`JpakeMessageCodec`), channel-bound identifiers (`JpakeBinding`) and the entered-code contract in
 `:core-transfer`, plus a MODP round adapter (`ModpJpakeSession`, `ModpJpakeFrames`) in
 `:transport-lan`. **None of it is wired.** No coordinator, state machine, approval or payload path
 can reach it, the SAS production path is still in place, and the payload gate still refuses
-unconditionally.
+unconditionally. (Superseded on 2026-10-23: the coordinator now calls this path and the comparison is
+retired. See the switch status at the top of this document.)
 
 The owner waived the external-review gate for this personal experimental application on 2026-10-19
 ([`owner-risk-waiver-2026-10-19.md`](owner-risk-waiver-2026-10-19.md)). The composition is

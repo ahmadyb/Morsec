@@ -24,20 +24,19 @@ import app.morsecode.core.transfer.session.SecureApprovalHandle
 import app.morsecode.core.transfer.session.SecureApprovalResult
 import app.morsecode.core.transfer.session.SecureControlReceiveResult
 import app.morsecode.core.transfer.session.SecureControlSendResult
-import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
 import app.morsecode.core.transfer.session.SecurePairingResult
-import app.morsecode.core.transfer.session.SecurePairingState
 import app.morsecode.core.transfer.session.SecurePeerRole
-import app.morsecode.core.transfer.session.SecureRecordLayer
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionOperation
-import app.morsecode.transport.lan.security.pairing.EnteredCodePairingBridge
+import app.morsecode.transport.lan.security.AuthenticatedControlAuthority
+import app.morsecode.transport.lan.security.pairing.EnteredCodeChallenge
+import app.morsecode.transport.lan.security.pairing.EnteredCodePairingInteraction
 import app.morsecode.transport.lan.security.pairing.EnteredCodePairingPrompter
 import app.morsecode.transport.lan.security.pairing.EnteredCodePairingSlot
+import app.morsecode.transport.lan.security.pairing.IntendedPeerContext
 import app.morsecode.transport.lan.security.ControlEstablishmentObserver
 import app.morsecode.transport.lan.security.PairingAdmissionScope
 import app.morsecode.transport.lan.security.SecurePairingAttemptLimiter
-import app.morsecode.transport.lan.security.SecureSessionStateMachine
 import app.morsecode.core.transfer.session.DiscoveredPeer
 import app.morsecode.core.transfer.session.DiscoveryDiagnostics
 import app.morsecode.core.transfer.session.DiscoveryLease
@@ -47,6 +46,7 @@ import app.morsecode.core.transfer.session.DiscoveryRequest
 import app.morsecode.core.transfer.session.DiscoveryStartResult
 import app.morsecode.core.transfer.session.EncryptionCapability
 import app.morsecode.core.transfer.session.MonotonicClock
+import app.morsecode.core.transfer.session.EnteredPairingCode
 import app.morsecode.core.transfer.session.PeerAdvertisement
 import app.morsecode.core.transfer.session.PeerDiscoveryProvider
 import app.morsecode.core.transfer.session.PeerInstanceId
@@ -69,7 +69,6 @@ import app.morsecode.core.transfer.session.MAX_DISPLAY_NAME_BYTES
 import app.morsecode.transport.lan.discovery.LanBeacon
 import app.morsecode.transport.lan.discovery.LanBeaconCodec
 import app.morsecode.transport.lan.discovery.LanBeaconDecodeResult
-import app.morsecode.transport.lan.security.PairingInteraction
 import app.morsecode.transport.lan.security.SecureLanControlChannel
 import app.morsecode.transport.lan.security.SecureLanPairingCoordinator
 import app.morsecode.transport.lan.security.SecurePairingRunResult
@@ -92,7 +91,6 @@ import java.security.SecureRandom
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.FutureTask
 import java.util.concurrent.RejectedExecutionException
@@ -1362,10 +1360,10 @@ public class LanPeerDiscoveryProvider(
             /**
              * The entered-code bridge for this session, if one was started.
              *
-             * It shares [pairingStarted] with the legacy SAS operation, so a session cannot be in
-             * both a comparison and an entered-code exchange at once, and it is closed by the same
-             * `close()` that cancels a pairing. Declared after [negotiatedValue] because the slot
-             * binds this session's identifier the moment it is constructed.
+             * Opening it is how `beginSecurePairing` claims this session's single pairing, and it
+             * is closed by the same `close()` that cancels the pairing. Declared after
+             * [negotiatedValue] because the slot binds this session's identifier the moment it is
+             * constructed.
              */
             private val enteredCodePairing = EnteredCodePairingSlot(
                 sessionId = negotiatedValue.attemptId,
@@ -1383,11 +1381,16 @@ public class LanPeerDiscoveryProvider(
                     postSecurePairingFailure(listener, SessionFailureCode.OPERATION_CANCELLED)
                     return NoopSecureSessionOperation
                 }
-                if (!pairingStarted.compareAndSet(false, true)) {
-                    postSecurePairingFailure(listener, SessionFailureCode.SECURE_SESSION_ALREADY_STARTED)
-                    return NoopSecureSessionOperation
-                }
-                val operation = LanSecureSessionOperation(listener)
+                // Opening the bridge *is* claiming this session's single pairing. The slot owns the
+                // shared gate, so one compare-and-set decides between this pairing and any other
+                // one for the same session -- and a refusal costs nothing, because the gate is
+                // taken before a bridge exists.
+                val bridge = enteredCodePairing.open(NoInteractionSurfacePrompter)
+                    ?: run {
+                        postSecurePairingFailure(listener, SessionFailureCode.SECURE_SESSION_ALREADY_STARTED)
+                        return NoopSecureSessionOperation
+                    }
+                val operation = LanSecureSessionOperation(listener, bridge)
                 activePairing.set(operation)
                 if (closed.get() || closedSession.get()) {
                     operation.cancel()
@@ -1397,43 +1400,36 @@ public class LanPeerDiscoveryProvider(
                 return operation
             }
 
-            /**
-             * Opens the entered-code interaction for this session.
-             *
-             * Nothing calls this yet -- the live coordinator still runs the SAS path -- but the
-             * lifecycle it needs is production code: one bridge per control session, bound to this
-             * session's id and role, sharing the pairing gate with the SAS operation, and closed by
-             * the same `close()` that cancels a pairing. A closed, closing or already-paired
-             * session returns null rather than a bridge nobody can answer.
-             */
-            internal fun beginEnteredCodePairing(prompter: EnteredCodePairingPrompter): EnteredCodePairingBridge? =
-                enteredCodePairing.open(prompter)
-
             fun expireSecureSessionIfNeeded(nowElapsedMillis: Long) {
                 val expiresAt = secureExpiresAtElapsedMillis ?: return
                 if (nowElapsedMillis >= expiresAt) close()
             }
 
+            /**
+             * Installs the claimed control channel, or refuses.
+             *
+             * The parameter is the channel a single-use authority handed out, not a socket plus a
+             * record layer: there is no way to call this with a pair a caller assembled itself, so
+             * "installed" and "authenticated" cannot drift apart.
+             */
             @Synchronized
             private fun installSecureSession(
                 owner: LanSecureSessionOperation,
                 socket: Socket,
-                negotiated: app.morsecode.core.transfer.session.NegotiatedSession,
-                recordLayer: SecureRecordLayer,
-                expiresAtElapsedMillis: Long,
+                claimed: AuthenticatedControlAuthority.AuthenticatedControlChannel,
             ): Boolean {
                 if (closed.get() || closedSession.get() || activePairing.get() !== owner || owner.isCancelled()) {
                     return false
                 }
                 activeSocket = socket
-                secureExpiresAtElapsedMillis = expiresAtElapsedMillis
-                negotiatedValue = negotiated
+                secureExpiresAtElapsedMillis = claimed.expiresAtElapsedMillis
+                negotiatedValue = claimed.controlSession
                 secureControlChannel = SecureLanControlChannel(
                     socket = socket,
-                    recordLayer = recordLayer,
+                    recordLayer = claimed.recordLayer,
                     role = role,
                     clock = clock,
-                    expiresAtElapsedMillis = expiresAtElapsedMillis,
+                    expiresAtElapsedMillis = claimed.expiresAtElapsedMillis,
                     onTerminal = { close() },
                 )
                 return true
@@ -1488,22 +1484,22 @@ public class LanPeerDiscoveryProvider(
 
             private inner class LanSecureSessionOperation(
                 private val listener: app.morsecode.core.transfer.session.SecurePairingListener,
-            ) : SecureSessionOperation, PairingInteraction {
+                /**
+                 * The bridge this pairing asks its questions through.
+                 *
+                 * Held, not created per run: it is bound to this session's id and role, and it is
+                 * the object `close()` shuts down when the session or the lease goes away.
+                 */
+                private val bridge: EnteredCodePairingInteraction,
+            ) : SecureSessionOperation {
                 private val cancelled = AtomicBoolean(false)
                 private val completed = AtomicBoolean(false)
-                private val approvalDecisionLatch = CountDownLatch(1)
 
                 @Volatile
                 private var task: FutureTask<Unit>? = null
 
                 @Volatile
                 private var coordinator: SecureLanPairingCoordinator? = null
-
-                @Volatile
-                private var stateMachine: SecureSessionStateMachine? = null
-
-                @Volatile
-                private var approvalRequest: SecurePairingApprovalRequest? = null
 
                 override fun isCancelled(): Boolean = cancelled.get() || closedSession.get() || closed.get()
 
@@ -1529,83 +1525,26 @@ public class LanPeerDiscoveryProvider(
                     }
                 }
 
+                /**
+                 * Always stale.
+                 *
+                 * A decision now travels through the bridge's challenge, which only the prompt that
+                 * issued it can answer. There is no handle this operation could have issued, so
+                 * there is nothing an old handle could still apply to.
+                 */
                 override fun decide(
                     handle: SecureApprovalHandle,
                     decision: SecureApprovalDecision,
-                ): SecureApprovalResult {
-                    if (completed.get() || isCancelled()) return SecureApprovalResult.Stale
-                    val machine = stateMachine ?: return SecureApprovalResult.NotReady
-                    val result = machine.decide(handle, decision)
-                    if (machine.state() != SecurePairingState.AWAITING_LOCAL_APPROVAL) {
-                        approvalDecisionLatch.countDown()
-                    }
-                    return result
-                }
+                ): SecureApprovalResult = SecureApprovalResult.Stale
 
                 override fun cancel() {
                     if (completed.get() || !cancelled.compareAndSet(false, true)) return
-                    stateMachine?.cancel()
-                    approvalDecisionLatch.countDown()
                     coordinator?.cancel()
                     task?.cancel(true)
                     this@LanControlSession.close()
                     finish(
                         SecurePairingResult.Failed(SessionFailure(SessionFailureCode.OPERATION_CANCELLED)),
                         closeSession = false,
-                    )
-                }
-
-                override fun publishApproval(
-                    machine: SecureSessionStateMachine,
-                    request: SecurePairingApprovalRequest,
-                ): Boolean {
-                    stateMachine = machine
-                    approvalRequest = request
-                    if (isCancelled()) return false
-                    return postCallback(
-                        action = {
-                            if (isCancelled()) {
-                                cancel()
-                            } else if (machine.expireIfNeeded() != null ||
-                                machine.state() != SecurePairingState.AWAITING_LOCAL_APPROVAL
-                            ) {
-                                approvalDecisionLatch.countDown()
-                            } else {
-                                listener.onApprovalRequired(request)
-                            }
-                        },
-                        onFailure = { cancel() },
-                    )
-                }
-
-                override fun awaitApproval(machine: SecureSessionStateMachine): Boolean {
-                    stateMachine = machine
-                    val request = approvalRequest ?: return false
-                    val now = try {
-                        nowElapsedMillis()
-                    } catch (_: RuntimeException) {
-                        machine.fail(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED)
-                        return false
-                    }
-                    val waitMillis = (request.expiresAtElapsedMillis - now).coerceAtLeast(0L)
-                    val decided = try {
-                        approvalDecisionLatch.await(waitMillis, TimeUnit.MILLISECONDS)
-                    } catch (_: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        machine.cancel()
-                        return false
-                    }
-                    if (!decided) {
-                        machine.expireIfNeeded()
-                        if (machine.completion() == null) {
-                            machine.fail(SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED)
-                        }
-                        return false
-                    }
-                    machine.expireIfNeeded()
-                    return !isCancelled() && machine.state() in setOf(
-                        SecurePairingState.APPROVED,
-                        SecurePairingState.CONFIRMING,
                     )
                 }
 
@@ -1621,7 +1560,7 @@ public class LanPeerDiscoveryProvider(
                             role = role,
                             clock = clock,
                             random = SecureRandom(),
-                            interaction = this,
+                            interaction = bridge,
                             attemptLimiter = admissionScope,
                             peerIdentityKey = negotiatedValue.remoteProfile.peerInstanceId.value,
                             sourceKey = pairingSourceKey(activeSocket),
@@ -1637,15 +1576,24 @@ public class LanPeerDiscoveryProvider(
                         when (pairingResult) {
                             is SecurePairingRunResult.Failed -> finish(pairingResult.result)
                             is SecurePairingRunResult.Authenticated -> {
+                                val authority = pairingResult.authority
+                                // Exactly one claim. A session that cannot install the channel must
+                                // spend the authority rather than leave a live encrypted connection
+                                // behind an operation nobody owns.
+                                val claimed = authority.claim()
+                                if (claimed == null) {
+                                    authority.close()
+                                    closeSocket(pairingResult.secureSocket)
+                                    completeFailure(SessionFailureCode.INTERNAL_TRANSPORT_FAILURE)
+                                    return
+                                }
                                 if (isCancelled() || !installSecureSession(
                                         owner = this,
                                         socket = pairingResult.secureSocket,
-                                        negotiated = pairingResult.negotiatedControlSession,
-                                        recordLayer = pairingResult.recordLayer,
-                                        expiresAtElapsedMillis = pairingResult.expiresAtElapsedMillis,
+                                        claimed = claimed,
                                     )
                                 ) {
-                                    pairingResult.recordLayer.close()
+                                    authority.close()
                                     closeSocket(pairingResult.secureSocket)
                                     completeFailure(SessionFailureCode.OPERATION_CANCELLED)
                                 } else {
@@ -1669,9 +1617,7 @@ public class LanPeerDiscoveryProvider(
                     closeSession: Boolean = result is SecurePairingResult.Failed,
                 ) {
                     if (!completed.compareAndSet(false, true)) return
-                    approvalDecisionLatch.countDown()
                     activePairing.compareAndSet(this, null)
-                    approvalRequest = null
                     if (closeSession) this@LanControlSession.close()
                     val delivered = postCallback(
                         action = { listener.onCompleted(result) },
@@ -1682,6 +1628,31 @@ public class LanPeerDiscoveryProvider(
                     }
                 }
             }
+        }
+
+        /**
+         * The prompter production uses while the app has no pairing screen.
+         *
+         * It shows nothing and answers nothing. That is the honest behaviour: a code nobody can
+         * read and a peer nobody can confirm are exactly the situation, so the challenge stays
+         * outstanding until its own deadline and the bridge resolves it as "no answer". There is
+         * deliberately no approval here -- not a default, not a debug branch, not a flag -- because
+         * an automatic answer would turn the human check into no check at all.
+         *
+         * A screen added in a later milestone replaces this object, not the protocol: it receives
+         * the same [EnteredCodeChallenge] and answers through the same bridge.
+         */
+        private object NoInteractionSurfacePrompter : EnteredCodePairingPrompter {
+            override fun onGeneratedCode(challenge: EnteredCodeChallenge, code: EnteredPairingCode) = Unit
+
+            override fun onEnteredCodeRequired(challenge: EnteredCodeChallenge, attemptOrdinal: Int) = Unit
+
+            override fun onIntendedPeerApprovalRequired(
+                challenge: EnteredCodeChallenge,
+                context: IntendedPeerContext,
+            ) = Unit
+
+            override fun onPairingClosed() = Unit
         }
 
         private object NoopSecureSessionOperation : SecureSessionOperation {

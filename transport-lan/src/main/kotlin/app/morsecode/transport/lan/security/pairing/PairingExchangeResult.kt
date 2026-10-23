@@ -64,8 +64,17 @@ internal enum class PairingExchangeFailure {
     /** The peer said it will not retry. */
     ABORTED_BY_PEER,
 
-    /** A human, locally or remotely, said this is not the intended peer. */
+    /** The local human said this is not the intended peer. */
     APPROVAL_REJECTED,
+
+    /**
+     * The peer's approval record said this is not the intended peer.
+     *
+     * Kept apart from [APPROVAL_REJECTED] because the two are different events for the admission
+     * budgets: a local refusal is the local user changing their mind, while the remote record is
+     * the peer's answer and must not be charged to the local user's account either.
+     */
+    PEER_APPROVAL_REJECTED,
 
     /** The local approval question was not answered before its deadline. */
     APPROVAL_TIMEOUT,
@@ -117,6 +126,53 @@ internal sealed interface PairingExchangeResult {
         override fun toString(): String =
             "PairingExchangeResult.Failed(reason=${reason.name}, attemptsCharged=$attemptsCharged)"
     }
+}
+
+/**
+ * What a refusal means for the admission budgets, in the terms the limiter charges.
+ *
+ * The pairing exchange knows why it stopped; the limiter only knows whether the peer defeated the
+ * security exchange. Rather than re-derive the second from a coarse failure code -- which cannot
+ * tell an exhausted attempt budget from a capacity refusal, or a local timeout from a proof
+ * failure -- the coordinator classifies once, where the reason is still known, and the live path
+ * maps the class to an outcome. Every member names who pays for the attempt.
+ *
+ * Deliberately not a wire type: none of this crosses the connection, and the peer learns only
+ * `RETRY` or `ABORT`.
+ */
+internal enum class PakeRefusalClass {
+    /** The attempt budget for this code is spent. Charged: this is what a guessing peer costs. */
+    ATTEMPTS_EXHAUSTED,
+
+    /** A proof, tag, approval binding or protocol invariant failed. Charged. */
+    AUTHENTICATION_FAILURE,
+
+    /** The peer's key confirmation did not verify, or was absent. Charged. */
+    KEY_CONFIRMATION_FAILURE,
+
+    /** The transcript, suite or profile the two sides agreed on is not the required one. Charged. */
+    TRANSCRIPT_MISMATCH,
+
+    /** The local human declined. Not charged: a change of mind is not an attack. */
+    USER_REJECTION,
+
+    /** The remote human declined. Not charged, and not evidence against the peer's identity. */
+    PEER_REJECTION,
+
+    /** The local user or the owning lease cancelled. Not charged. */
+    LOCAL_CANCELLATION,
+
+    /** A local prompt or code window expired unanswered. Not charged. */
+    LOCAL_EXPIRY,
+
+    /** The peer stopped answering inside a bounded wait. Not charged to the identity. */
+    PEER_UNRESPONSIVE,
+
+    /** The peer's connection went away mid-exchange. Not charged to the identity. */
+    PEER_DISCONNECTED,
+
+    /** A local provider, transport or invariant failed. Not charged: the peer did not cause it. */
+    LOCAL_FAILURE,
 }
 
 /**

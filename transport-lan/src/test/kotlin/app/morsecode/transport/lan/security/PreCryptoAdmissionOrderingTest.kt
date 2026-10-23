@@ -8,12 +8,15 @@ import app.morsecode.core.transfer.session.NegotiatedCapabilities
 import app.morsecode.core.transfer.session.NegotiatedSession
 import app.morsecode.core.transfer.session.PeerInstanceId
 import app.morsecode.core.transfer.session.ProtocolRange
-import app.morsecode.core.transfer.session.SecurePairingApprovalRequest
+import app.morsecode.core.transfer.session.EnteredPairingCode
+import app.morsecode.core.transfer.session.SecureApprovalDecision
 import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SessionCapabilities
 import app.morsecode.core.transfer.session.SessionFailureCode
 import app.morsecode.core.transfer.session.SessionFeature
 import app.morsecode.core.transfer.session.SessionPeerProfile
+import app.morsecode.transport.lan.security.pairing.EnteredCodePairingInteraction
+import app.morsecode.transport.lan.security.pairing.IntendedPeerContext
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.Socket
@@ -162,18 +165,28 @@ public class PreCryptoAdmissionOrderingTest {
     /** Reports cancelled, and optionally holds the permit inside run() so concurrency is observable. */
     private class SpyInteraction(
         private val gate: CountDownLatch? = null,
-    ) : PairingInteraction {
-        val approvalsPublished = AtomicInteger(0)
+    ) : EnteredCodePairingInteraction {
+        val promptsPublished = AtomicInteger(0)
         val entered = AtomicInteger(0)
-        override fun publishApproval(
-            machine: SecureSessionStateMachine,
-            request: SecurePairingApprovalRequest,
-        ): Boolean {
-            approvalsPublished.incrementAndGet()
-            return true
+
+        override fun publishGeneratedCode(code: EnteredPairingCode, expiresAtElapsedMillis: Long): Boolean {
+            promptsPublished.incrementAndGet()
+            return false
         }
 
-        override fun awaitApproval(machine: SecureSessionStateMachine): Boolean = false
+        override fun requestEnteredCode(attemptOrdinal: Int, expiresAtElapsedMillis: Long): EnteredPairingCode? {
+            promptsPublished.incrementAndGet()
+            return null
+        }
+
+        override fun requestIntendedPeerApproval(
+            context: IntendedPeerContext,
+            expiresAtElapsedMillis: Long,
+        ): SecureApprovalDecision? {
+            promptsPublished.incrementAndGet()
+            return null
+        }
+
         override fun isCancelled(): Boolean {
             entered.incrementAndGet()
             gate?.await(10, TimeUnit.SECONDS)
@@ -183,19 +196,29 @@ public class PreCryptoAdmissionOrderingTest {
 
     /**
      * Never cancelled, so a run actually reaches the cryptographic work instead of returning at the
-     * coordinator's first cancellation check. Approval is still refused, so nothing can be issued.
+     * coordinator's first cancellation check. It cannot answer a prompt, so nothing can be issued.
      */
-    private class PermittingInteraction : PairingInteraction {
-        val approvalsPublished = AtomicInteger(0)
-        override fun publishApproval(
-            machine: SecureSessionStateMachine,
-            request: SecurePairingApprovalRequest,
-        ): Boolean {
-            approvalsPublished.incrementAndGet()
+    private class PermittingInteraction : EnteredCodePairingInteraction {
+        val promptsPublished = AtomicInteger(0)
+
+        override fun publishGeneratedCode(code: EnteredPairingCode, expiresAtElapsedMillis: Long): Boolean {
+            promptsPublished.incrementAndGet()
             return true
         }
 
-        override fun awaitApproval(machine: SecureSessionStateMachine): Boolean = false
+        override fun requestEnteredCode(attemptOrdinal: Int, expiresAtElapsedMillis: Long): EnteredPairingCode? {
+            promptsPublished.incrementAndGet()
+            return null
+        }
+
+        override fun requestIntendedPeerApproval(
+            context: IntendedPeerContext,
+            expiresAtElapsedMillis: Long,
+        ): SecureApprovalDecision? {
+            promptsPublished.incrementAndGet()
+            return null
+        }
+
         override fun isCancelled(): Boolean = false
     }
 
@@ -260,7 +283,7 @@ public class PreCryptoAdmissionOrderingTest {
             assertEquals("$label: zero cryptographic operations in total", 0, crypto.totalCryptoCalls())
             // Additional, not substitute: no socket stream was acquired either.
             assertEquals("$label: no stream was ever acquired", 0, socket.cryptoTouches())
-            assertEquals("$label: no approval was published", 0, interaction.approvalsPublished.get())
+            assertEquals("$label: no prompt was published", 0, interaction.promptsPublished.get())
         } finally {
             runCatching { socket.close() }
         }
@@ -496,7 +519,7 @@ public class PreCryptoAdmissionOrderingTest {
             // acquired -- which is itself the ordering property: admission precedes crypto.
             assertEquals(SessionFailureCode.OPERATION_CANCELLED, codeOf(result))
             assertEquals("admission must precede any stream acquisition", 0, socket.cryptoTouches())
-            assertEquals("exactly one approval path was never reached", 0, interaction.approvalsPublished.get())
+            assertEquals("the approval path was never reached", 0, interaction.promptsPublished.get())
             assertEquals("exactly one permit was taken and released", 0, scope.concurrentPairings())
         } finally {
             runCatching { socket.close() }

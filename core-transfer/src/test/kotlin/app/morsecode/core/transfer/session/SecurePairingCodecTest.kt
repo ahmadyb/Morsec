@@ -200,29 +200,6 @@ public class SecurePairingCodecTest {
     }
 
     @Test
-    public fun shortAuthenticationCodeUsesExporterBitsAndWipesInput() {
-        val exporter = ByteArray(32).also {
-            it[0] = 0xAB.toByte()
-            it[1] = 0xCD.toByte()
-            it[2] = 0xE0.toByte()
-        }
-        val proof = HumanVerificationCode.fromExporterMaterial(exporter)
-
-        // AB CD E0 00 -> 10101011 11001101 11100000 0 -> 10101 01111 00110 11100 00010
-        // indices 21, 15, 6, 28, 2 -> P H 8 Y 2. Derived by hand, not pasted from a run.
-        assertEquals("PH8Y2", proof.displayText())
-        assertTrue(exporter.all { it == 0.toByte() })
-        assertEquals("HumanVerificationCode([redacted])", proof.toString())
-        proof.clearSensitive()
-        assertEquals("", proof.displayText())
-
-        val zeroProof = HumanVerificationCode.fromExporterMaterial(ByteArray(32))
-        // All-zero exporter material maps to value 0, which is alphabet[0] repeated.
-        assertEquals("22222", zeroProof.displayText())
-        zeroProof.clearSensitive()
-    }
-
-    @Test
     public fun keyConfirmationCodecHasFixedRoleAndTranscriptBoundLayout() {
         val digest = ByteArray(32) { it.toByte() }
         val message = SecureKeyConfirmation(SecurePeerRole.INITIATOR, digest)
