@@ -275,6 +275,15 @@ is new is everything the switch will need, and none of it is called by productio
    uses five-second exchange budgets that still dwarf an in-memory exchange, and every worker thread
    is a daemon so a stuck case fails its own annotation instead of starving the run.
 
+5. The first device run of this path found a framing bug that no JVM case could have seen. The
+   exchange reads its frames over the socket through `SocketPairingExchangeIo`, and the prefix read
+   asked for the whole four-byte prefix at offset one of a four-byte array: `prefix[1]` was written,
+   then four more bytes were requested starting at index one. A stock `InputStream` rejects that
+   request outright and the TLS provider raises it from inside its own read path, so the pairing
+   failed before its first round with `IndexOutOfBoundsException`. The call now asks for the three
+   bytes that are actually outstanding, and a loopback-socket JVM case drives the same class so the
+   arithmetic is exercised without a device.
+
 **Tests.** JVM: `PakeSessionCoordinatorTest` (17 cases — honest run, single-use authority, payload
 still refused after control authentication, wrong code then retry, exhaustion, local and remote
 rejection, unanswered approval, record-key mismatch, an AEAD-refused record, a replayed confirmation
@@ -289,7 +298,10 @@ and a settled attempt. The handover type is `internal` and its only source is th
 synthesis question is a visibility fact rather than something reflection can assert: `internal`
 classes are public in bytecode, and a case that claimed otherwise failed for exactly that reason),
 `EnteredCodePairingBridgeTest`
-(10) and `EnteredCodePairingSlotTest` (5). API 23: `PakeSessionApi23Test` runs the full chain over a
+(10), `EnteredCodePairingSlotTest` (5) and `SocketPairingExchangeIoTest` (5 cases over a loopback
+socket: a frame crosses intact, two frames arrive in order, a frame dribbled a byte at a time still
+arrives whole, silence is a deadline rather than an empty frame, and a clean close is an end of
+stream). API 23: `PakeSessionApi23Test` runs the full chain over a
 real Conscrypt TLS 1.3 connection on loopback — the exporter material both sides derive is the TLS
 one, and both key confirmations cross a real encrypted stream — then asserts single-use authority and
 the payload refusal on the device.

@@ -160,7 +160,8 @@ internal class SocketPairingExchangeIo(
             }
             if (first < 0) return PairingFrameRead.EndOfStream
             prefix[0] = first.toByte()
-            if (readFully(input, prefix, 1, prefix.size, deadline) != ReadOutcome.DONE) {
+            // The first byte is already in the prefix; only the rest of it is still outstanding.
+            if (readFully(input, prefix, 1, prefix.size - 1, deadline) != ReadOutcome.DONE) {
                 return failedRead(deadline)
             }
             val length = PairingExchangeWire.declaredLength(prefix) ?: return PairingFrameRead.Invalid
@@ -214,6 +215,14 @@ internal class SocketPairingExchangeIo(
 
     private enum class ReadOutcome { DONE, EOF, EXPIRED }
 
+    /**
+     * Fills `buffer[offset until offset + length]` from [input], or says why it could not.
+     *
+     * The caller owns the arithmetic: `offset + length` must fit in [buffer], because an
+     * `InputStream.read` past the end of its array is an `IndexOutOfBoundsException` on every
+     * platform, thrown from inside the provider where it looks like a transport fault rather than
+     * the caller's mistake. The first frame of a pairing is where that shows up.
+     */
     private fun readFully(
         input: InputStream,
         buffer: ByteArray,
