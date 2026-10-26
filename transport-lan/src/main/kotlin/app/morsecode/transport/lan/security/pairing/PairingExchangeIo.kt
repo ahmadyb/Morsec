@@ -130,6 +130,12 @@ internal object PairingExchangeWire {
  * by counting down the slices. A peer that dribbles one byte at a time therefore runs out of its
  * own slice, not out of the connection.
  *
+ * A slice that expires part-way through a frame is the one thing this design cannot treat as "no
+ * frame yet": the bytes already taken are kept and the next call continues the same frame. Losing
+ * them would make the rest of that frame look like a new length prefix, which is a permanent
+ * desynchronisation of a stream the peer wrote correctly. What bounds a peer is therefore the
+ * exchange's total budget for the frame, not any single slice.
+ *
  * The socket is not owned by this class. [close] closes it because a frame transport that outlives
  * its connection is useless, but the coordinator closes the same socket on its own cleanup path and
  * both calls are idempotent.
@@ -141,41 +147,82 @@ internal class SocketPairingExchangeIo(
 
     private val closed = AtomicBoolean(false)
 
+    /**
+     * The frame currently being assembled, prefix first.
+     *
+     * WHY STATE SURVIVES A CALL
+     *   The exchange polls this transport in short slices so it can notice cancellation between
+     *   them. A slice can therefore expire after two of the four length bytes, or after the prefix
+     *   and half the payload, have been taken off the stream. Returning "nothing yet" and starting
+     *   the next call at a fresh length prefix would then read the rest of that frame *as* a prefix:
+     *   the stream desynchronises permanently, and the peer sees a protocol refusal for a frame it
+     *   sent correctly. The bytes already consumed are kept here and the next call continues the
+     *   same frame, so a deadline costs time and never data. The [PairingRecordIo] sibling in
+     *   `PairingChannel.kt` documents the same rule and treats a half frame as fatal; this class can
+     *   do better because it is polled, so it keeps the progress instead of discarding it.
+     */
+    private var assembling: ByteArray? = null
+
+    /** Bytes of [assembling] already filled. */
+    private var assembled: Int = 0
+
+    /** Declared payload length, or -1 until the prefix has been read and validated. */
+    private var declaredLength: Int = -1
+
     override fun readFrame(label: String, budgetMillis: Long): PairingFrameRead {
         if (closed.get() || budgetMillis <= 0L) return PairingFrameRead.TimedOut
         val deadline = MonotonicSocketDeadline(label, socket, budgetMillis, clock::nowMillis)
         try {
             val input = socket.getInputStream()
-            val prefix = ByteArray(PairingExchangeWire.LENGTH_PREFIX_BYTES)
-            // Read the first byte on its own so a clean close is unambiguous: a peer that closed
-            // before sending anything produced EndOfStream, while a peer that closed after two
-            // bytes produced Invalid.
-            if (!armReadTimeout(deadline)) return PairingFrameRead.TimedOut
-            val first = try {
-                input.read()
-            } catch (_: SocketTimeoutException) {
-                return PairingFrameRead.TimedOut
-            } catch (_: IOException) {
-                return if (deadline.isExpired()) PairingFrameRead.TimedOut else PairingFrameRead.Invalid
+            var buffer = assembling ?: ByteArray(PairingExchangeWire.LENGTH_PREFIX_BYTES).also {
+                assembling = it
+                assembled = 0
+                declaredLength = -1
             }
-            if (first < 0) return PairingFrameRead.EndOfStream
-            prefix[0] = first.toByte()
-            // The first byte is already in the prefix; only the rest of it is still outstanding.
-            if (readFully(input, prefix, 1, prefix.size - 1, deadline) != ReadOutcome.DONE) {
-                return failedRead(deadline)
+            // Phase one: the four-byte length prefix.
+            if (declaredLength < 0) {
+                when (fill(input, buffer, deadline, cleanEofWhenEmpty = assembled == 0)) {
+                    Fill.END_OF_STREAM -> {
+                        discardAssembly()
+                        return PairingFrameRead.EndOfStream
+                    }
+                    Fill.TIMED_OUT -> return PairingFrameRead.TimedOut
+                    Fill.INVALID -> {
+                        discardAssembly()
+                        return PairingFrameRead.Invalid
+                    }
+                    Fill.DONE -> Unit
+                }
+                val length = PairingExchangeWire.declaredLength(buffer) ?: run {
+                    discardAssembly()
+                    return PairingFrameRead.Invalid
+                }
+                val whole = ByteArray(PairingExchangeWire.LENGTH_PREFIX_BYTES + length)
+                buffer.copyInto(whole, 0)
+                buffer.fill(0)
+                buffer = whole
+                assembling = whole
+                // The prefix is already in the new buffer; only the payload is outstanding.
+                assembled = PairingExchangeWire.LENGTH_PREFIX_BYTES
+                declaredLength = length
             }
-            val length = PairingExchangeWire.declaredLength(prefix) ?: return PairingFrameRead.Invalid
-            val payload = ByteArray(length)
-            if (readFully(input, payload, 0, length, deadline) != ReadOutcome.DONE) {
-                return failedRead(deadline)
+            // Phase two: the declared payload.
+            when (fill(input, buffer, deadline, cleanEofWhenEmpty = false)) {
+                Fill.TIMED_OUT -> return PairingFrameRead.TimedOut
+                // A frame that was begun and not finished is never a clean close: reporting it as
+                // one would let a truncated frame read as an orderly peer that had finished.
+                Fill.END_OF_STREAM, Fill.INVALID -> {
+                    discardAssembly()
+                    return PairingFrameRead.Invalid
+                }
+                Fill.DONE -> Unit
             }
-            val frame = ByteArray(prefix.size + payload.size)
-            prefix.copyInto(frame, 0)
-            payload.copyInto(frame, prefix.size)
-            prefix.fill(0)
-            payload.fill(0)
-            return PairingFrameRead.Frame(frame)
+            // The completed frame is handed over, so it is released without being wiped: wiping
+            // here would zero the very bytes the caller is about to read.
+            releaseAssembly()
+            return PairingFrameRead.Frame(buffer)
         } catch (_: IOException) {
+            discardAssembly()
             return if (deadline.isExpired()) PairingFrameRead.TimedOut else PairingFrameRead.Invalid
         } finally {
             deadline.complete()
@@ -204,6 +251,7 @@ internal class SocketPairingExchangeIo(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        discardAssembly()
         try {
             socket.close()
         } catch (_: IOException) {
@@ -213,39 +261,57 @@ internal class SocketPairingExchangeIo(
 
     override fun toString(): String = "SocketPairingExchangeIo(closed=${closed.get()})"
 
-    private enum class ReadOutcome { DONE, EOF, EXPIRED }
+    private enum class Fill { DONE, TIMED_OUT, END_OF_STREAM, INVALID }
 
     /**
-     * Fills `buffer[offset until offset + length]` from [input], or says why it could not.
+     * Fills the frame under construction, recording progress in [assembled] whatever the outcome.
      *
-     * The caller owns the arithmetic: `offset + length` must fit in [buffer], because an
-     * `InputStream.read` past the end of its array is an `IndexOutOfBoundsException` on every
-     * platform, thrown from inside the provider where it looks like a transport fault rather than
-     * the caller's mistake. The first frame of a pairing is where that shows up.
+     * The caller owns no arithmetic here: the fill position is the field, so a slice that expires
+     * mid-frame leaves the next call exactly where this one stopped. `read` is bounded by the
+     * remaining budget for every attempt, which is why an unresponsive peer costs a deadline and not
+     * a hung worker.
      */
-    private fun readFully(
+    private fun fill(
         input: InputStream,
         buffer: ByteArray,
-        offset: Int,
-        length: Int,
         deadline: MonotonicSocketDeadline,
-    ): ReadOutcome {
-        var position = offset
-        val end = offset + length
-        while (position < end) {
-            val remaining = deadline.remainingMillis()
-            if (remaining <= 0L) return ReadOutcome.EXPIRED
-            armReadTimeout(deadline)
+        cleanEofWhenEmpty: Boolean,
+    ): Fill {
+        while (assembled < buffer.size) {
+            if (!armReadTimeout(deadline)) return Fill.TIMED_OUT
             val read = try {
-                input.read(buffer, position, end - position)
+                input.read(buffer, assembled, buffer.size - assembled)
             } catch (_: SocketTimeoutException) {
-                return ReadOutcome.EXPIRED
+                return Fill.TIMED_OUT
+            } catch (_: IOException) {
+                return if (deadline.isExpired()) Fill.TIMED_OUT else Fill.INVALID
             }
-            if (read < 0) return ReadOutcome.EOF
+            if (read < 0) {
+                return when {
+                    // Nothing of this frame has been taken, so the peer is allowed to have closed.
+                    assembled == 0 && cleanEofWhenEmpty -> Fill.END_OF_STREAM
+                    assembled == 0 -> Fill.TIMED_OUT
+                    // A frame that was begun and not finished: never a clean close.
+                    else -> Fill.INVALID
+                }
+            }
             if (read == 0) continue
-            position += read
+            assembled += read
         }
-        return ReadOutcome.DONE
+        return Fill.DONE
+    }
+
+    /** Drops a refused or abandoned frame, wiping whatever was read into it. */
+    private fun discardAssembly() {
+        assembling?.fill(0)
+        releaseAssembly()
+    }
+
+    /** Forgets the frame under construction without touching its bytes. */
+    private fun releaseAssembly() {
+        assembling = null
+        assembled = 0
+        declaredLength = -1
     }
 
     /**
@@ -260,7 +326,4 @@ internal class SocketPairingExchangeIo(
         socket.soTimeout = remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1)
         return true
     }
-
-    private fun failedRead(deadline: MonotonicSocketDeadline): PairingFrameRead =
-        if (deadline.isExpired()) PairingFrameRead.TimedOut else PairingFrameRead.Invalid
 }

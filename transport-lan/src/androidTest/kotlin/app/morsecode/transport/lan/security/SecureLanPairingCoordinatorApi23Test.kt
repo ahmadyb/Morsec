@@ -138,7 +138,7 @@ public class SecureLanPairingCoordinatorApi23Test {
         )
         try {
             assertTrue(
-                "a wrong code followed by the right one must authenticate, got ${pairing.initiatorResult}",
+                "a wrong code followed by the right one must authenticate; ${pairing.describeOutcome()}",
                 pairing.initiatorResult is SecurePairingRunResult.Authenticated,
             )
             assertTrue(pairing.responderResult is SecurePairingRunResult.Authenticated)
@@ -280,6 +280,7 @@ public class SecureLanPairingCoordinatorApi23Test {
                 pairing.initiatorResult is SecurePairingRunResult.Authenticated,
             )
             assertEquals(
+                "silence must expire rather than approve; ${pairing.describeOutcome()}",
                 SessionFailureCode.SECURE_SESSION_APPROVAL_EXPIRED,
                 pairing.initiatorFailureCode(),
             )
@@ -512,9 +513,9 @@ public class SecureLanPairingCoordinatorApi23Test {
             board = board,
         )
         val initiator = pairing.initiatorResult as? SecurePairingRunResult.Authenticated
-            ?: throw AssertionError("the initiator did not authenticate: ${pairing.initiatorResult}")
+            ?: throw AssertionError("the initiator did not authenticate; ${pairing.describeOutcome()}")
         val responder = pairing.responderResult as? SecurePairingRunResult.Authenticated
-            ?: throw AssertionError("the responder did not authenticate: ${pairing.responderResult}")
+            ?: throw AssertionError("the responder did not authenticate; ${pairing.describeOutcome()}")
         // The pair's executor is done; the sockets and authorities are handed to the caller.
         pairing.executor.shutdown()
         return AuthenticatedPair(initiator, responder)

@@ -164,6 +164,8 @@ internal class Api23Pairing(
     val board: Api23CodeBoard,
     val executor: ExecutorService,
     val responderFuture: Future<SecurePairingRunResult>,
+    /** True when the responder had not finished inside the harness's own wait. */
+    val responderTimedOut: Boolean = false,
 ) {
     fun initiatorFailureCode(): app.morsecode.core.transfer.session.SessionFailureCode? =
         (initiatorResult as? SecurePairingRunResult.Failed)?.result?.failure?.code
@@ -178,6 +180,28 @@ internal class Api23Pairing(
         runCatching { responderSocket?.close() }
         executor.shutdownNow()
     }
+}
+
+/**
+ * A redacted one-line account of both endpoints, for an assertion message.
+ *
+ * Typed failure codes and counters only: no identifier, address, certificate, proof, key, frame
+ * content or raw exception. A failed device run has no other evidence to offer -- only the plain
+ * run log survives the emulator -- so the message has to carry the diagnosis itself.
+ */
+internal fun Api23Pairing.describeOutcome(): String =
+    "initiator=${describeSide(initiatorResult, initiatorHuman)} " +
+        "responder=" +
+        (if (responderTimedOut) "timedOut" else describeSide(responderResult, responderHuman)) +
+        " boardShown=${board.shownCount}"
+
+private fun describeSide(result: SecurePairingRunResult, human: Api23Human): String {
+    val outcome = when (result) {
+        is SecurePairingRunResult.Authenticated -> "authenticated"
+        is SecurePairingRunResult.Failed -> "failed(${result.result.failure.code.id})"
+    }
+    return "$outcome prompts=${human.promptsShown} codes=${human.enteredCodeRequests} " +
+        "approvals=${human.approvalPrompts}"
 }
 
 internal fun api23Session(localId: String, remoteId: String): NegotiatedSession = NegotiatedSession(
@@ -260,9 +284,13 @@ internal fun api23RunPairing(
         exchangeBudgets = api23Budgets(),
         recordBudgets = api23RecordBudgets(),
     ).run()
+    var responderTimedOut = false
     val responderResult = try {
         responderFuture.get(initializerBudgetSeconds, TimeUnit.SECONDS)
     } catch (_: Exception) {
+        // The harness's own wait, not the pairing's: recorded as such so a failing assertion does
+        // not read this placeholder as the responder's answer.
+        responderTimedOut = true
         SecurePairingRunResult.Failed(
             app.morsecode.core.transfer.session.SecurePairingResult.Failed(
                 app.morsecode.core.transfer.session.SessionFailure(
@@ -282,5 +310,6 @@ internal fun api23RunPairing(
         board = board,
         executor = executor,
         responderFuture = responderFuture,
+        responderTimedOut = responderTimedOut,
     )
 }

@@ -89,6 +89,65 @@ internal class SocketPairingExchangeIoTest {
         }
     }
 
+    /**
+     * The shape the exchange actually produces: one frame read in short slices.
+     *
+     * The exchange polls in slices so it can notice cancellation, so a slice routinely expires
+     * part-way through a frame. That progress has to survive the call. Losing it would make the
+     * rest of the frame look like a new length prefix -- a permanent desync of a stream the peer
+     * wrote correctly, which on a device showed up as a protocol refusal of an honest pairing.
+     */
+    @Test(timeout = 20_000L)
+    fun aFrameInterruptedByASliceDeadlineIsFinishedRatherThanRestarted() {
+        withSocketPair { reader, writer ->
+            val sent = frame(payloadSize = 300, marker = 0x41)
+            // The peer writes the prefix and the first bytes, then pauses for longer than a slice
+            // before the rest. Both pauses are inside the frame, so a reader that drops what it has
+            // read cannot recover.
+            val pauseMillis = 150L
+            val split = 2
+            val dribbler = Thread {
+                val output = writer.getOutputStream()
+                output.write(sent, 0, split)
+                output.flush()
+                Thread.sleep(pauseMillis)
+                output.write(sent, split, 4 - split)
+                output.flush()
+                Thread.sleep(pauseMillis)
+                output.write(sent, 4, sent.size - 4)
+                output.flush()
+            }.apply {
+                isDaemon = true
+                start()
+            }
+
+            val io = SocketPairingExchangeIo(reader, clock)
+            var read: PairingFrameRead = PairingFrameRead.TimedOut
+            var calls = 0
+            // The same contract the exchange follows: poll in 50 ms slices against a total budget.
+            val deadline = System.nanoTime() + 10_000_000_000L
+            while (System.nanoTime() < deadline) {
+                calls += 1
+                read = io.readFrame("sliced", 50L)
+                if (read !is PairingFrameRead.TimedOut) break
+            }
+            dribbler.join(5_000L)
+
+            assertTrue("expected a frame, got $read after $calls calls", read is PairingFrameRead.Frame)
+            assertArrayEquals(sent, (read as PairingFrameRead.Frame).bytes)
+            assertTrue("the slice deadline must have been hit, took $calls calls", calls > 1)
+
+            // And the stream is still in step: the next frame is read from its own prefix.
+            val next = frame(payloadSize = 40, marker = 0x42)
+            val output = writer.getOutputStream()
+            output.write(next)
+            output.flush()
+            val second = io.readFrame("after-slices", 5_000L)
+            assertTrue("expected the following frame, got $second", second is PairingFrameRead.Frame)
+            assertArrayEquals(next, (second as PairingFrameRead.Frame).bytes)
+        }
+    }
+
     @Test(timeout = 20_000L)
     fun silenceIsADeadlineAndNotAnEmptyFrame() {
         withSocketPair { reader, _ ->
