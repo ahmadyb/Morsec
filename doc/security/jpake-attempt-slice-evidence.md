@@ -374,6 +374,24 @@ local provider or implementation failure, resource refusal and a rejection by ei
 Peer rejection has its own non-security outcome (`PEER_APPROVAL_REJECTED` and `PEER_REJECTION`) so a
 remote decision is never billed to the local user.
 
+**Green run, 2026-10-26.** `986debd9c7c57e66ad9d655d50a1f2eb4d13ea4f`, run `40361026904`: 3,193 JVM
+tests with none failed and none skipped, 67 API 23 instrumentation tests with none failed, lint at
+zero errors and 48 unchanged warnings, both APKs assembled, every governance verifier clean, Room
+schema v1/v2 byte-identical. `EXPERIMENTAL PART B COMPLETE — PAYLOAD REMAINS DISABLED`.
+
+The three runs before it were not clean, and what they found is part of the record rather than a
+footnote. The first stopped at a compile error: an ownership check had stopped being an interface
+member and kept an `override`. The second found two unit tests written against the outcome policy
+this switch replaced, and a hostile-mutation case that was no longer exhaustive. The third compiled,
+passed the whole JVM suite — and then failed three device tests, one of them reporting
+`SECURE_SESSION_RECORD_INVALID` for an honest pairing. The cause was in the frame transport: the
+exchange polls reads in 50 ms slices so it can notice cancellation, and a slice that expired
+part-way through a frame threw away the bytes it had already read, so the next call read the rest of
+that frame as a new length prefix. A stream the peer wrote correctly was desynchronised, permanently,
+by nothing more than a scheduling pause. The transport now keeps the frame under construction across
+calls, and a loopback test writes one frame in three parts with 150 ms pauses and reads it in 50 ms
+slices: it fails without the fix and passes with it.
+
 Device evidence, same source tree: the API 23 suite drives `SecureLanPairingCoordinator.run()` on both
 endpoints over a real Conscrypt TLS 1.3 loopback connection. Honest pairing authenticates, the
 authority is claimed exactly once, a control record round-trips and the payload gate refuses; a wrong

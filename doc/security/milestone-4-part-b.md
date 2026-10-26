@@ -12,6 +12,13 @@ MST2 transcript and calls the composed `PakeSessionCoordinator`; the short-authe
 comparison is retired and cannot be generated in this build. The construction is **BC J-PAKE with
 `JPAKEPrimeOrderGroups.NIST_3072`**.
 
+**Verified on a device, 2026-10-26.** `986debd9c7c57e66ad9d655d50a1f2eb4d13ea4f`, run `40361026904`:
+3,193 JVM tests (none failed, none skipped), 67 API 23 instrumentation tests (none failed), lint at
+zero errors, both APKs assembled, every governance verifier clean, Room schema v1/v2 unchanged. That
+run is the gate for the statement `EXPERIMENTAL PART B COMPLETE — PAYLOAD REMAINS DISABLED`. The gate
+covers the switch; it is not a security review, and the permanent statement below still applies
+unchanged.
+
 What that sentence does and does not mean. It means no live code path offers the retired comparison,
 generates a proof for it, or approves one: `HumanVerificationCode.fromExporterMaterial` is deleted,
 the comparison harness is deleted, and `tools/verify/jpake-production-boundary.mjs` fails if either
