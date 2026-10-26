@@ -549,39 +549,99 @@ class SecurePairingAttemptLimiterTest {
     @Test
     fun `a peer declining costs the local user no attempt`() {
         val clock = StepClock()
-        val limiter = SecurePairingAttemptLimiter(clock::read)
+        // The start budgets are raised so this test observes the outcome policy alone: three
+        // outcomes against one identity/source pair would otherwise hit the pair's start budget
+        // first, and the assertion would be measuring admission rather than the charge.
+        val limiter = SecurePairingAttemptLimiter(
+            clock::read,
+            SecurePairingAttemptLimiter.Limits(
+                maxStartsPerIdentity = 100,
+                maxStartsPerSource = 100,
+                maxStartsPerPair = 100,
+            ),
+        )
+        val pauses = ArrayList<Long>(3)
         // Three remote refusals in a row: the peer's answer, not the local user's, so no code is
-        // spent and the identity is not condemned.
-        repeat(3) {
-            assertTrue(granted(limiter.tryStart("peer-refused", "src-refused")))
+        // spent, the identity is not condemned, and the pair is only paused.
+        repeat(3) { attempt ->
+            assertTrue(
+                "attempt ${attempt + 1} was refused a start",
+                granted(limiter.tryStart("peer-refused", "src-refused")),
+            )
             limiter.recordOutcome("peer-refused", "src-refused", PairingAttemptOutcome.PEER_REJECTION)
             limiter.releaseConcurrency()
-            clock.advance(120_000)
+            val during = limiter.tryStart("peer-refused", "src-refused")
+            assertEquals(
+                "a declined approval must pause the pair, attempt ${attempt + 1}",
+                PairingAdmission.RefusalReason.COOLDOWN_ACTIVE,
+                reason(during),
+            )
+            val pause = (during as PairingAdmission.Refused).retryAfterMillis
+            assertTrue("the pause must be positive, attempt ${attempt + 1}", pause > 0L)
+            pauses += pause
+            clock.advance(pause)
         }
+        assertTrue(
+            "the pause must grow with each declined pairing, observed $pauses",
+            pauses[2] > pauses[0],
+        )
         assertFalse(
             "the peer declining is not evidence against the peer's identity",
             limiter.isIdentityInvalidated("peer-refused"),
         )
-        assertEquals(
-            "the pair budget is a retry bound, not a security charge",
-            PairingAdmission.RefusalReason.PAIR_INVALIDATED,
-            reason(limiter.tryStart("peer-refused", "src-refused")),
+        assertTrue(
+            "a declined pairing is a pause, never a charge: the pair may try again",
+            granted(limiter.tryStart("peer-refused", "src-refused")),
         )
+        limiter.releaseConcurrency()
     }
 
     @Test
     fun `an exhausted code is charged exactly like a mismatch`() {
         val clock = StepClock()
-        val limiter = SecurePairingAttemptLimiter(clock::read)
+        // Raised start budgets, so each of the three outcomes can actually be recorded: with the
+        // production pair budget the third start is refused before it can be charged.
+        fun freshLimiter(): SecurePairingAttemptLimiter = SecurePairingAttemptLimiter(
+            clock::read,
+            SecurePairingAttemptLimiter.Limits(
+                maxStartsPerIdentity = 100,
+                maxStartsPerSource = 100,
+                maxStartsPerPair = 100,
+                // The pair's own failure budget is raised too, so the pair is never the thing that
+                // dies first: this test is about the identity charge.
+                maxFailuresPerPair = 100,
+            ),
+        )
+
+        val exhausted = freshLimiter()
         repeat(3) {
-            assertTrue(granted(limiter.tryStart("peer-guess", "src-guess")))
-            limiter.recordOutcome("peer-guess", "src-guess", PairingAttemptOutcome.ATTEMPT_EXHAUSTED)
-            limiter.releaseConcurrency()
-            clock.advance(120_000)
+            assertTrue(granted(exhausted.tryStart("peer-guess", "src-guess")))
+            exhausted.recordOutcome("peer-guess", "src-guess", PairingAttemptOutcome.ATTEMPT_EXHAUSTED)
+            exhausted.releaseConcurrency()
+            clock.advance(120_000L)
         }
         assertTrue(
             "spending the whole guessing budget is what the identity budget is for",
-            limiter.isIdentityInvalidated("peer-guess"),
+            exhausted.isIdentityInvalidated("peer-guess"),
+        )
+
+        // The same three attempts classified as plain mismatches must leave the identity in
+        // exactly the same state: an exhausted code is never the softer charge.
+        val mismatch = freshLimiter()
+        repeat(3) {
+            assertTrue(granted(mismatch.tryStart("peer-guess", "src-guess")))
+            mismatch.recordOutcome(
+                "peer-guess",
+                "src-guess",
+                PairingAttemptOutcome.AUTHENTICATION_MISMATCH,
+            )
+            mismatch.releaseConcurrency()
+            clock.advance(120_000L)
+        }
+        assertEquals(
+            "an exhausted code must be charged exactly like a mismatch",
+            mismatch.isIdentityInvalidated("peer-guess"),
+            exhausted.isIdentityInvalidated("peer-guess"),
         )
     }
 }

@@ -145,6 +145,18 @@ internal class HostilePairingCryptoFactory(
             nonce = ByteArray(offer.nonceBytes().size).also { random.nextBytes(it) },
         )
         HostileMutation.APP_VERSION_CHANGED -> copy(offer, appVersion = "9.9.9-hostile")
+        // The three capability mutations change no other field. One advertises the retired
+        // comparison, one advertises "no authentication", and one omits the field entirely --
+        // which is a different wire shape from advertising NONE, and refused for the same reason.
+        HostileMutation.AUTHENTICATION_SAS_ONLY -> copy(
+            offer,
+            offeredAuthentication = PairingAuthenticationCapability.SAS_25BIT_COMPARISON,
+        )
+        HostileMutation.AUTHENTICATION_NONE -> copy(
+            offer,
+            offeredAuthentication = PairingAuthenticationCapability.NONE,
+        )
+        HostileMutation.AUTHENTICATION_ABSENT -> copy(offer, offeredAuthentication = null)
         HostileMutation.NONE, HostileMutation.LEGACY_MPS1_HELLO -> offer
     }
 
