@@ -621,4 +621,249 @@ never share a key stream and never share a sequence space.
 The next slice must settle these before any record is encrypted: who owns and constructs the payload
 authority, how a single reader dispatches between `MSR1` and `MPL1` on one stream, how writes are
 serialized with control messages taking priority, whether the control session's 300-second lifetime
-also bounds an active transfer, and the exact exporter labels and key separation.
+also bounds an active transfer, and the exact exporter labels and key separation. §14 works through
+all five as recommendations, none of them adopted.
+
+---
+
+## 14. Decisions the payload keys depend on (proposed; unresolved)
+
+Section 13 ends with five questions. They are answered here as **recommendations for the owner to
+accept, correct or reject** — not as settled design, and not as work in progress. Nothing in this
+section changed a line of code: it was written from the state of the tree at
+`35ac93974963140b9ecb3b71bcf2c1c78fe99db4`, and every claim below names the file and line it was read
+from so a later reader can check it rather than trust it.
+
+Each question gets the same shape: what exists today, the constraint that makes it a decision, the
+options considered, the recommendation, and the property a test would have to prove.
+
+Status of everything here: experimental, project-defined, not independently cryptographically
+reviewed. The owner accepted that risk on 2026-10-19 for this personal application; see
+[`security/owner-risk-waiver-2026-10-19.md`](security/owner-risk-waiver-2026-10-19.md). The profile of
+record for pairing is **BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072`**.
+
+### 14.1 Who owns and constructs the payload authority
+
+**What exists.** `AuthenticatedControlAuthority` is `internal`, has a private constructor, and is
+obtainable only through `issue`, which takes concrete evidence — a `CONFIRMED` MODP session that is
+identity-equal to the attempt's, an `APPROVE` decision on both sides, a matching transcript, an
+unsettled attempt and a live clock (`AuthenticatedControlAuthority.kt:182` for `issue`, returning at `:248`). `claim()`
+(`:103`) hands out the channel exactly once through an `AtomicBoolean`; there is deliberately no
+test-only constructor. `LanPeerDiscoveryProvider.installSecureSession` (`:1416`) is the only place a
+claimed channel is installed, and it takes the claimed channel type rather than a socket plus a
+record layer, so "installed" and "authenticated" cannot drift apart. Separately,
+`PayloadTransferGate.evaluate` returns `Refused` for every session and `PayloadTransferDecision`
+has no other branch at all (`SessionContracts.kt:451`).
+
+**The constraint.** An authority that can be built from booleans, or copied, or read twice, is not
+authority. Part B made "authenticated" a one-shot value rather than a status flag, and the payload
+side has to inherit that property or it silently reopens what was closed. The static rule that backs
+it — `PayloadTransferDecision` declares only `Refused`, no production source negotiates
+`FILE_PAYLOAD` into a capability set — is in `tools/verify/secure-authority-surface.mjs`
+(sections 2 and 7).
+
+**Options.**
+
+- **A — a second single-use type.** `AuthenticatedPayloadAuthority`, issued *by*
+  `PakeSessionCoordinator` next to the control authority, holding the two payload AEADs and the two
+  sequence bases, `internal`, private constructor, one `claim()`.
+- **B — reuse the control authority with a capability flag.** Rejected: it is the status flag the
+  current design deletes, a flag can be read twice and acted on twice, and it contradicts the
+  documented control-only property that the Part B verification rests on.
+- **C — derive payload keys at claim time from the exporter.** Rejected on two facts: the exporter
+  belongs to `PairingChannel`, and `ConnectionRelease` (`PakeSessionCoordinator.kt:549`) closes the
+  channel when the authority closes; and the transcript digest that is the exporter's context is
+  wiped in `SecureLanPairingCoordinator` (`:331`–`:332`) when pairing ends. After pairing neither
+  the exporter nor its context is alive.
+
+**Recommendation: A**, with the issuing site being the coordinator for the same reason C is
+rejected — that is the only place the exporter and the digest are alive at the same instant.
+`LanPeerDiscoveryProvider` should never construct one; it should receive a claimed payload channel
+the way it receives a claimed control channel. The payload authority must be claimed *separately*
+from the control claim, not returned by the same call: two grants, so a payload capability cannot be
+acquired by neglecting to refuse something.
+
+**What would prove it.** A verifier section that allows the new type in its own file and its tests
+only, asserts the constructor is private, asserts `claim` is guarded by one atomic transition, and
+asserts no production file outside the coordinator names the issuing entry point. Plus a unit test
+that a second `claim()` returns null and that `close()` before a claim makes it null.
+
+### 14.2 One reader, two formats, one TLS stream
+
+**What exists.** `SecureLanControlChannel.receive()` (`:144`) allocates a 33-byte header buffer, reads
+it exactly (`readExact`, `:255`), decodes it with the expected direction, sizes the frame from the
+decoded header, and reads the rest under one absolute deadline; a deadline closes the socket. During
+pairing a different reader — `SocketPairingRecordIo` (`PairingChannel.kt:80`) — does the reading, and
+`ConnectionRelease` closes it. **After pairing, nothing calls `receiveSecureControlRecord`**: the
+interface declares it (`SessionContracts.kt:421`), the provider overrides it (`:1450`), and there is
+no caller. So today's reader model is "one reader per phase, chosen by phase", not "one reader for
+two formats".
+
+**The constraint.** The two formats are both fixed-header and both length-prefixed, but the headers
+are 33 and 34 bytes and the magics share no byte: `MSR1` and `MPL1` differ in all four. A reader that
+reads 33 bytes first has already consumed 33 of a 34-byte MPL1 header before it can tell what it is
+holding, and a reader that "resynchronises" by scanning forward for the next magic hands an attacker
+a parse restart at a byte offset of the attacker's choosing.
+
+**Options.**
+
+- **A — read four bytes, decide, continue.** Exactly four bytes; `MPL1` → read the remaining 30 and
+  hand to the MPL1 decoder; `MSR1` → read the remaining 29 and hand to `SecureRecordCodec`; anything
+  else → fatal, close, no scanning. One stream, one reader, one order.
+- **B — a second TLS connection for payload.** Rejected in §13.1: it does not inherit the pairing
+  transcript binding, so it re-runs pairing or authenticates nothing.
+- **C — an outer envelope that wraps both formats.** Rejected: the outer envelope needs its own
+  authentication to be worth anything, at which point the inner tags are doing the same job twice.
+
+**Recommendation: A.** It also settles a size problem for free: an MPL1 body reaches 65,772 bytes
+(65,822 on the wire), far above the largest control record at 4,145, so the reader sizes its body
+allocation from a header that has already been bounded — which both decoders already do — and four
+bytes is the smallest read that can carry the discriminant.
+
+**Consequence to record.** This changes `SecureLanControlChannel.receive()`, which is a Part B
+component. That is why this belongs to the slice that owns the reader and not to a key-handling
+slice: relaxing a proven reader is exactly the change that needs the full evidence burden the switch
+had. It also removes the "no caller" state above, which is itself evidence that no payload path is
+live.
+
+**What would prove it.** A loopback test on a real socket pair over the composed TLS path: write an
+`MSR1` `PING`, then an `MPL1` record, then an `MSR1` `PONG`, and assert the reader returns three
+records in order with the right format and types. Then a test that a stream whose first four bytes are
+neither magic is refused fatally and that the reader consumed exactly four bytes, not a window it
+searched.
+
+### 14.3 Serialized writes, and control taking priority
+
+**What exists.** `send()` (`:59`) takes `writeLock`, and inside it: seal the record through
+`SecureRecordLayer.protect` (`SecureRecordLayer.kt:214`), arm one absolute write deadline
+(`CONTROL_RECORD_WRITE_DEADLINE_MILLIS`, 5 s), write the whole frame, flush, and treat a write that
+finishes just as the deadline fires as a failure. `protect` is `@Synchronized` and increments
+`sendSequence` (`:253`) as part of sealing. A maximal MPL1 record is 65,822 bytes; the largest
+possible control record is 4,145 (33 + 4,096 + 16), so one payload record is sixteen times the largest
+control record.
+
+**The constraint.** Two facts collide. First, sealing consumes a sequence number: once `protect`
+returns, the record exists in the sender's nonce space and re-sending it would reuse a nonce, so an
+abandoned record must terminate the connection rather than be retried. Second, a single 65,822-byte
+write against a peer that has stopped reading can block for the whole 5-second deadline, and a
+`SESSION_CLOSE` or `PING` queued behind it is late by exactly that long. The channel also documents
+that it has **no internal worker pool and creates no detached task** (`:37`–`:42`), so "add a writer
+thread with a priority queue" is not a small change; it deletes a stated property.
+
+**Options.**
+
+- **A — one writer lock plus a bounded priority queue and a writer thread.** Rejected for now: it
+  introduces a thread and a queue into a component whose documentation promises neither, and a queue
+  is a place for a control record to wait — which is the problem, not the fix.
+- **B — one writer lock, sliced writes, resumable between slices.** Write the sealed record in
+  bounded pieces (for example 4 KiB), re-checking between pieces whether a control record is pending;
+  if one is, finish the payload piece boundary, write the control record, resume. Each lock hold is
+  bounded by a piece rather than by a record. A payload write that cannot finish inside its deadline
+  closes the socket, because the sequence was already consumed.
+- **C — payload writes never hold the lock; control writes preempt by closing the connection.**
+  Simplest failure mode, worst throughput, and it makes every concurrent control write a killed
+  transfer.
+
+**Recommendation: B**, with one sentence stated in the implementing slice and pinned by a test: *a
+sealed record that cannot be written to completion is a connection failure, never a retry.* Option C
+is the fallback if B's slicing turns out to complicate the deadline accounting more than it is worth.
+
+**What would prove it.** A socket-pair test with a deliberately small peer receive buffer: write a
+maximal payload record while a control record is queued, assert the control record arrives inside the
+control write deadline, and assert that a peer which stops reading ends in a terminated connection
+with a timeout failure rather than in a stream the peer can still parse.
+
+### 14.4 Does the 300-second control session bound an active transfer
+
+**What exists.** `MAX_SESSION_LIFETIME_MILLIS = 300_000` is measured from the **start of pairing**
+(`AuthenticatedControlAuthority.kt:202`), carried as `expiresAtElapsedMillis` into the channel
+(`SecureLanControlChannel.kt:49`), enforced on every send and every receive by `unavailableFailure()`
+(`:277`), and enforced independently by `LanPeerDiscoveryProvider.expireSecureSessionIfNeeded`
+(`:1403`), which closes the session at the same instant. The control layer's other ceilings —
+4,096 bytes per record, 4,096 records per direction, 16 MiB per direction
+(`SecureSessionContracts.kt:30`–`:32`) — are a control budget that the payload layer can neither use
+nor extend.
+
+**The constraint.** 300 seconds is absolute, not an inactivity timer, and that is what makes it
+worth having. It is also short for a large file: at 5 MB/s, 300 s is 1.5 GB; at 200 KB/s it is 60 MB,
+minus the pairing time already spent. So either the bound is relaxed for payload, or a transfer must
+fit inside it, or a transfer must survive across sessions.
+
+**Options.**
+
+- **A — extend the lifetime while a transfer is active, with a hard cap.** Rejected as a first
+  answer: it converts an absolute bound into a sliding one, and the sliding bound is the weaker
+  property.
+- **B — a transfer must complete inside the session's remaining lifetime.** The gate can consult the
+  remaining budget before the first record, refuse a transfer that cannot fit, and leave the rest to
+  resume (§5). Every existing property is kept; the effective file-size ceiling becomes a function of
+  measured throughput.
+- **C — the payload authority grants its own lifetime**, derived from declared size over a floor
+  throughput and capped, independent of the control lifetime, so the control channel may expire while
+  a payload continues. Cleanest long term; needs numbers nobody has measured on this stack.
+
+**Recommendation: B for the first slice that moves bytes**, and record C as the eventual answer if
+measured API 23 throughput makes B's ceiling embarrassing. Do not settle C now. The only real
+numbers this project has are the J-PAKE phase timings from the API 23 harness — median honest total
+around 689 ms — and they measure pairing, not transfer.
+
+**What would prove it.** A unit test on the budget arithmetic (remaining lifetime, bytes that fit at a
+declared floor throughput, refusal before the first record), and, once C is considered, a device
+measurement — not an estimate — of sustained throughput on the oldest supported device.
+
+### 14.5 Exporter labels and key separation
+
+**What exists.** The control layer makes four exporter calls — `EXPORTER-MORSEC-C2S-KEY-V1`,
+`…-C2S-IV-V1`, `…-S2C-KEY-V1`, `…-S2C-IV-V1` (`PakeSessionCoordinator.kt:568`–`:571`) — each with the
+transcript digest as context (`:454`), through `EstablishedTlsSession.export`
+(`ConscryptSecureSessionEngine.kt:261`), which requires a context of exactly 32 bytes and a length of
+1 to 64. Keys are wiped as soon as the AEADs own them (`:434`–`:435`). One further output, the pairing
+proof value, is taken at `:178`.
+
+**A discrepancy worth recording, and not fixing here.** The four calls are at `:428`–`:431`. Two
+comments in the same file say *eight* exporter outputs — the header block at `:31`–`:34` and the KDoc
+above `deriveRecordLayer` at `:421`–`:425`. The count in the prose is wrong, not the code: four calls
+with four distinct labels is exactly what the separation argument needs. It is recorded rather than
+corrected because correcting a comment in a Part B file is a code change and this section changed
+none; whichever later slice next touches that file for its own reasons should make the number four
+while it is there.
+
+**The constraint.** AAD does not create separation. Two AEADs keyed from the same key, with the same
+nonce base and overlapping sequence ranges, are a nonce reuse whether or not their headers differ —
+and the two formats do differ in header length (33 against 34), which makes the mistake easier to
+miss. Reusing one exporter output split into halves makes the halves share the exporter's internal
+chaining, which is why the control layer already spends four labels instead of two.
+
+**Decision.** Four more outputs, labels distinct from the control set and from `PROOF_LABEL`, for
+example `EXPORTER-MORSEC-PAYLOAD-C2S-KEY-V1`, `…-PAYLOAD-C2S-IV-V1`, `…-PAYLOAD-S2C-KEY-V1`,
+`…-PAYLOAD-S2C-IV-V1`, derived in the same step as the control keys so both layers share one
+derivation instant and one digest lifetime. Both are required together: **distinct keys** and
+**distinct sequence spaces**. Either alone is insufficient; the recommendation is both.
+
+**What would prove it.** A test that all nine labels are pairwise distinct; a test that the same
+plaintext sealed by the two layers produces different ciphertext under the same nonce; a test that
+neither layer accepts the other's record even when the plaintext lengths match; and a wipe test that
+the payload keys are zeroed once the AEADs hold them.
+
+### 14.6 Ordering, and what a slice may do without these answers
+
+They are not independent. 14.5 is fixed by the code that already exists and can be decided now.
+14.1 follows from 14.5 (the keys exist only during pairing, so the authority must be built there).
+14.2 and 14.3 are about the live channel and change Part B components; each needs its own evidence
+burden. 14.4 is a policy question that can wait until a byte actually moves.
+
+That ordering suggests three slices rather than one, and this is a recommendation, not authorized
+work:
+
+1. **Payload key schedule and single-record sealing**, in the payload package, with keys supplied by
+   the caller. No socket, no coordinator, no authority: the MPL1 codec from Slice 1 plus a
+   seal/open step, tested against fixed vectors and against its own refusals.
+2. **The payload authority** (14.1, 14.5 wired): issued in the coordinator, claimable once, still
+   unreachable from the gate, still refusing.
+3. **The reader and writer** (14.2, 14.3): the only slice that changes Part B components, and
+   therefore the one that needs socket-backed tests over the composed TLS path before it is pushed.
+
+Nothing in this section authorizes any of it. `PayloadTransferGate` still refuses every session,
+`CURRENT_MILESTONE` is still 2 and `TRANSFER_ENGINE` is still gated: readiness is raised by an
+implementation that passes its tests, never by a document. No part of the framing in §13 is
+authenticated, reviewed or safe to rely on.
