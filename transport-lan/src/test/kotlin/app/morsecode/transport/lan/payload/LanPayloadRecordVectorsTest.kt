@@ -32,7 +32,7 @@ class LanPayloadRecordVectorsTest {
 
     // --- fixed vectors ---------------------------------------------------------------------------
 
-    @Test fun `fixed vector: sequence zero, initiator to responder, empty body`() {
+    @Test fun `fixed vector -- sequence zero, initiator to responder, empty body`() {
         val encoded = LanPayloadRecordCodec.encode(
             record(sequence = 0L, direction = SecureRecordDirection.INITIATOR_TO_RESPONDER, body = ByteArray(0)),
         )
@@ -46,7 +46,7 @@ class LanPayloadRecordVectorsTest {
         )
     }
 
-    @Test fun `fixed vector: the largest signed sequence, responder to initiator, sixteen byte body`() {
+    @Test fun `fixed vector -- the largest signed sequence, responder to initiator, sixteen byte body`() {
         val encoded = LanPayloadRecordCodec.encode(
             record(
                 sequence = Long.MAX_VALUE,
@@ -66,7 +66,7 @@ class LanPayloadRecordVectorsTest {
         )
     }
 
-    @Test fun `fixed vector: a small body in the initiator direction`() {
+    @Test fun `fixed vector -- a small body in the initiator direction`() {
         val encoded = LanPayloadRecordCodec.encode(
             record(
                 sequence = 0L,
