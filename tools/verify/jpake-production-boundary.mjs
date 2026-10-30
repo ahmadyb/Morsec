@@ -18,11 +18,17 @@
  *      open a payload path.
  *   4. The androidTest feasibility harness still exists and still cannot be selected by production.
  *   5. Milestone 2, the transfer-engine gate, the payload refusal and the manifest are unchanged.
+ *   6. The payload record framing (MPL1) exists only inside the two files below, imports nothing
+ *      from the rest of the module, derives no key, opens no socket and is named by no production
+ *      caller. Its five pinned limits are checked on both sides -- the Kotlin constants and the
+ *      numbers published in doc/transfer-protocol.md -- and the Room exports are digest-pinned, so
+ *      a framing slice cannot move a schema by accident.
  *
  * It makes no claim about protocol security. The construction is experimental and unreviewed; see
  * doc/security/owner-risk-waiver-2026-10-19.md.
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
@@ -88,6 +94,49 @@ const AUTHORIZED_MPS3_FILES = new Set([
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeFrames.kt',
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/jpake/ModpJpakeSession.kt',
 ]);
+
+/* ------------------------------------------------------------------ *
+ * The payload framing surface. Proposed and inert: a codec with no caller.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Every production file that may name the payload record format.
+ *
+ * The list is short on purpose. MPL1 is framing, not policy: if it starts appearing in the
+ * coordinator, the provider, the engine or the app, then a payload path is being assembled outside
+ * the authority that is supposed to gate it, and this check should fail before a compiler sees it.
+ */
+const PAYLOAD_FORMAT_PATH =
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/payload/LanPayloadRecordFormat.kt';
+const PAYLOAD_CODEC_PATH =
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/payload/LanPayloadRecordCodec.kt';
+const AUTHORIZED_MPL1_FILES = new Set([PAYLOAD_FORMAT_PATH, PAYLOAD_CODEC_PATH]);
+
+/** The one document allowed to describe the format. */
+const AUTHORIZED_MPL1_DOCS = new Set(['doc/transfer-protocol.md']);
+
+/**
+ * The five numbers this build is approved to use, with the form the document spells them in.
+ *
+ * They are written here rather than derived from the source: a check that recomputes whatever the
+ * source says can only prove the source agrees with itself. The JVM suite separately proves the
+ * body ceiling is the largest MSC1 frame the core actually encodes at the LAN chunk size.
+ */
+const PAYLOAD_LIMITS = [
+  ['LAN_PAYLOAD_CHUNK_BYTES', 65536, '65,536'],
+  ['MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES', 65772, '65,772'],
+  ['PAYLOAD_RECORD_HEADER_BYTES', 34, '34'],
+  ['PAYLOAD_RECORD_TAG_BYTES', 16, '16'],
+  ['MAX_PAYLOAD_RECORD_WIRE_BYTES', 65822, '65,822'],
+];
+
+/** The Room exports are frozen until a migration is approved. */
+const ROOM_SCHEMA_DIGESTS = [
+  ['core-data/schemas/app.morsecode.core.data.db.MorseDatabase/1.json',
+    'b0bca4243d2f0ba4631e3338e611d3bcaff8ba456de83b79ea0106ae187ac488'],
+  ['core-data/schemas/app.morsecode.core.data.db.MorseDatabase/2.json',
+    '7e6acfd9c03b0214dcaddc2f5d1ceb175588f5cfcf93cca5437617be24b2b074'],
+];
 
 /* ------------------------------------------------------------------ *
  * Pure predicates. Each is exercised by the self-test, so a mutation
@@ -198,6 +247,79 @@ function noSasGenerationAnywhere(text) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Payload framing (MPL1). Framing only: no key, no socket, no caller.
+ * ------------------------------------------------------------------ */
+
+/** Matches the payload record format by magic or by type name. */
+const MPL1_TOKEN = /MPL1|LanPayloadRecord/;
+
+function filesMentioningMpl1(files) {
+  return files.filter((f) => MPL1_TOKEN.test(f.text)).map((f) => f.path);
+}
+
+/** Every file that names MPL1 must be explicitly authorized. */
+function unauthorizedMpl1Files(files, allowed) {
+  return filesMentioningMpl1(files).filter((path) => !allowed.has(path));
+}
+
+/**
+ * The framing package must stay inert.
+ *
+ * The codec turns bytes into a typed decision. A transport, a cipher, a key handle, a persistence
+ * call, a log line or an authority reference inside it means the slice grew past framing, and the
+ * growth is what is reported rather than the intention behind it. The patterns are the concrete
+ * identifiers a real implementation would have to use, not a style rule.
+ */
+function payloadFramingIsInert(text) {
+  const transport = /\bSocket\b|SSLSocket|getOutputStream|getInputStream|DataInputStream|DataOutputStream/;
+  const crypto = /\bCipher\b|\bAES\b|\bGCM\b|SecretKey|KeyGenerator|SecretKeyFactory|MessageDigest/;
+  const persistence = /\bRoom\b|\bDao\b|SharedPreferences|openFileOutput|getExternalFilesDir/;
+  const logging = /\bLog\.[diwev]\s*\(|println\s*\(/;
+  const authority = /PayloadTransferGate|AuthenticatedControlAuthority|\bTransferEngine\b/;
+  return !transport.test(text) && !crypto.test(text) && !persistence.test(text) &&
+    !logging.test(text) && !authority.test(text);
+}
+
+/** A pinned integer constant, compared by value so a digit separator cannot hide a change. */
+function declaresIntConstant(source, name, value) {
+  const match = source.match(new RegExp(`\\b${name}\\s*:\\s*Int\\s*=\\s*([0-9_]+)`));
+  return match !== null && Number(match[1].replaceAll('_', '')) === value;
+}
+
+/** The document row for one constant, and whether it carries the approved figure. */
+function docRowStates(docText, name, formattedValue) {
+  const row = docText.split('\n').find((line) => line.startsWith(`| \`${name}\``));
+  return row !== undefined && row.includes(formattedValue);
+}
+
+/**
+ * The payload gate has exactly one outcome and no authorising branch.
+ *
+ * `Refused` must still be what the body returns, and no `PayloadTransferDecision.Authorized` may
+ * exist anywhere in the file, so re-opening the gate is a visible edit to this predicate's subject
+ * rather than something a caller can arrange by satisfying a condition somewhere else.
+ */
+function payloadGateRefusesOnly(contractsText) {
+  const gate = contractsText.match(/object PayloadTransferGate\s*\{[\s\S]*?\n\}/);
+  if (gate === null) return false;
+  if (/PayloadTransferDecision\.Authorized/.test(contractsText)) return false;
+  return /return PayloadTransferDecision\.Refused\(\s*SessionFailure\(\s*SessionFailureCode\.SECURE_SESSION_REQUIRED/.test(
+    gate[0],
+  );
+}
+
+/** Milestone 2 and the gated transfer engine, pinned to their exact declarations. */
+function milestonePinsHold(featureReadiness) {
+  return /CURRENT_MILESTONE\s*:\s*Int\s*=\s*2\b/.test(featureReadiness) &&
+    /TRANSFER_ENGINE\("transfer_engine",\s*5\)/.test(featureReadiness);
+}
+
+/** One file's bytes against one digest. */
+function digestMatches(bytes, expectedHex) {
+  return createHash('sha256').update(bytes).digest('hex') === expectedHex;
+}
+
+/* ------------------------------------------------------------------ *
  * Self-test: mutate, then assert the guard caught it.
  * ------------------------------------------------------------------ */
 
@@ -289,6 +411,85 @@ function selfTest() {
     !harnessLogsOnlyBoundedValues('Log.i("MorsecJpakePhase", "k=$keyingMaterial")'));
   check('self-test: an untagged log is caught',
     !harnessLogsOnlyBoundedValues('Log.i("Other", "phase=x")'));
+
+  const allowedPayload = new Set(['transport-lan/src/main/kotlin/X.kt']);
+  check('self-test: a payload file inside the approved set is not reported',
+    unauthorizedMpl1Files(
+      [{ path: 'transport-lan/src/main/kotlin/X.kt', text: 'const val M = "MPL1"' }],
+      allowedPayload,
+    ).length === 0);
+  check('self-test: MPL1 outside the approved set is caught',
+    unauthorizedMpl1Files(
+      [{ path: 'app/src/main/kotlin/Y.kt', text: 'val codec = LanPayloadRecordCodec' }],
+      allowedPayload,
+    ).length === 1);
+  check('self-test: a file that never names the format is not reported',
+    unauthorizedMpl1Files([{ path: 'app/src/main/kotlin/Y.kt', text: 'class Y' }], allowedPayload).length === 0);
+
+  check('self-test: an inert framing package passes',
+    payloadFramingIsInert('val header = ByteArray(34)\nval length = header.size\n'));
+  check('self-test: a socket inside the framing package is caught',
+    !payloadFramingIsInert('val link: Socket = connect()\n'));
+  check('self-test: a cipher inside the framing package is caught',
+    !payloadFramingIsInert('val c = Cipher.getInstance("AES/GCM/NoPadding")\n'));
+  check('self-test: a key handle inside the framing package is caught',
+    !payloadFramingIsInert('val key = SecretKeySpec(bytes, "AES")\n'));
+  check('self-test: a log line inside the framing package is caught',
+    !payloadFramingIsInert('Log.d("payload", "wrote a record")\n'));
+  check('self-test: persistence inside the framing package is caught',
+    !payloadFramingIsInert('@Dao interface Records { }\n'));
+  check('self-test: the payload gate inside the framing package is caught',
+    !payloadFramingIsInert('val decision = PayloadTransferGate.evaluate(session)\n'));
+
+  check('self-test: a pinned constant with the approved value passes',
+    declaresIntConstant(
+      'const val MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES: Int = 65_772',
+      'MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES',
+      65772,
+    ));
+  check('self-test: a pinned constant with a different value is caught',
+    !declaresIntConstant(
+      'const val MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES: Int = 65_773',
+      'MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES',
+      65772,
+    ));
+
+  check('self-test: a documented row carrying the approved figure passes',
+    docRowStates('| `PAYLOAD_RECORD_HEADER_BYTES` | 34 | fixed header |', 'PAYLOAD_RECORD_HEADER_BYTES', '34'));
+  check('self-test: a documented row carrying a different figure is caught',
+    !docRowStates('| `PAYLOAD_RECORD_HEADER_BYTES` | 32 | fixed header |', 'PAYLOAD_RECORD_HEADER_BYTES', '34'));
+  check('self-test: a missing documented row is caught',
+    !docRowStates('| `OTHER` | 34 | x |', 'PAYLOAD_RECORD_HEADER_BYTES', '34'));
+
+  const refusingGate = 'object PayloadTransferGate {\n' +
+    '    return PayloadTransferDecision.Refused(SessionFailure(SessionFailureCode.SECURE_SESSION_REQUIRED))\n' +
+    '}\n';
+  check('self-test: a gate with one refusing outcome passes', payloadGateRefusesOnly(refusingGate));
+  check('self-test: a gate with an authorising branch is caught',
+    !payloadGateRefusesOnly(refusingGate + 'PayloadTransferDecision.Authorized(failure)\n'));
+  check('self-test: a gate that returns a different failure is caught',
+    !payloadGateRefusesOnly(
+      'object PayloadTransferGate {\n' +
+      '    return PayloadTransferDecision.Refused(SessionFailure(SessionFailureCode.OTHER))\n' +
+      '}\n',
+    ));
+
+  check('self-test: milestone 2 and the gated engine pass',
+    milestonePinsHold(
+      'public object FeatureReadiness {\n' +
+      '    public const val CURRENT_MILESTONE: Int = 2\n' +
+      '    TRANSFER_ENGINE("transfer_engine", 5),\n' +
+      '}\n',
+    ));
+  check('self-test: a bumped milestone is caught',
+    !milestonePinsHold('public const val CURRENT_MILESTONE: Int = 3\nTRANSFER_ENGINE("transfer_engine", 5)'));
+  check('self-test: an enabled transfer engine is caught',
+    !milestonePinsHold('public const val CURRENT_MILESTONE: Int = 2\nTRANSFER_ENGINE("transfer_engine", 2)'));
+
+  check('self-test: a digest matches its own bytes',
+    digestMatches(Buffer.from('payload'), createHash('sha256').update('payload').digest('hex')));
+  check('self-test: a digest mismatch is caught',
+    !digestMatches(Buffer.from('payload'), createHash('sha256').update('payload2').digest('hex')));
 
   console.log('\nJ-PAKE production boundary self-test');
   console.log(checks.join('\n'));
@@ -411,6 +612,124 @@ function verify() {
     /PayloadTransferDecision\.Refused\(\s*SessionFailure\(\s*SessionFailureCode\.SECURE_SESSION_REQUIRED/.test(
       allProduction,
     ));
+
+  // 6b. The payload framing is inert, confined, and still attached to nothing.
+  //
+  //     Slice 1 adds a codec and a specification. The checks below are what keep it a codec: the
+  //     package may hold exactly two files, no other production file may name the format or import
+  //     the package, those two files may not acquire a socket, a cipher, a key handle, a log call or
+  //     an authority reference, and the five approved numbers must read the same in the source and
+  //     in the document. The Room exports are digest-pinned here as well, so a framing change that
+  //     quietly dragged a schema with it fails on this verifier rather than in a later migration.
+  const payloadDir = join(
+    ROOT,
+    'transport-lan',
+    'src',
+    'main',
+    'kotlin',
+    'app',
+    'morsecode',
+    'transport',
+    'lan',
+    'payload',
+  );
+  const payloadPaths = existsSync(payloadDir)
+    ? collect(payloadDir).map((f) => relative(ROOT, f).replaceAll('\\', '/'))
+    : [];
+  check(
+    'the payload framing package holds exactly the two approved files',
+    payloadPaths.length === 2 && payloadPaths.every((path) => AUTHORIZED_MPL1_FILES.has(path)),
+    payloadPaths.join(', ') || 'package missing',
+  );
+
+  const mpl1Leaks = unauthorizedMpl1Files(production, AUTHORIZED_MPL1_FILES);
+  check(
+    'MPL1 appears in production only inside the approved framing files',
+    mpl1Leaks.length === 0,
+    mpl1Leaks.join(', '),
+  );
+
+  const docs = collect(join(ROOT, 'doc'))
+    .filter((f) => f.endsWith('.md'))
+    .map((f) => ({ path: relative(ROOT, f).replaceAll('\\', '/'), text: readFileSync(f, 'utf8') }));
+  const mpl1DocLeaks = unauthorizedMpl1Files(docs, AUTHORIZED_MPL1_DOCS);
+  check(
+    'MPL1 is documented only in the transfer protocol document',
+    mpl1DocLeaks.length === 0,
+    mpl1DocLeaks.join(', '),
+  );
+
+  const framing = [...AUTHORIZED_MPL1_FILES].map((path) => ({
+    path,
+    text: readFileSync(join(ROOT, path), 'utf8'),
+  }));
+  const framingOffenders = framing.filter((f) => !payloadFramingIsInert(f.text)).map((f) => f.path);
+  check(
+    'the payload framing derives no key, opens no socket, persists nothing and logs nothing',
+    framingOffenders.length === 0,
+    framingOffenders.join(', '),
+  );
+
+  const formatSource = framing.find((f) => f.path === PAYLOAD_FORMAT_PATH)?.text ?? '';
+  const constantMisses = PAYLOAD_LIMITS
+    .filter(([name, value]) => !declaresIntConstant(formatSource, name, value))
+    .map(([name, value]) => `${name}=${value}`);
+  check(
+    'the payload framing pins the five approved limits',
+    constantMisses.length === 0,
+    constantMisses.join(', ') || `${PAYLOAD_LIMITS.length} constants agree`,
+  );
+
+  const docText = readFileSync(join(ROOT, 'doc', 'transfer-protocol.md'), 'utf8');
+  const docMisses = PAYLOAD_LIMITS
+    .filter(([name, , formatted]) => !docRowStates(docText, name, formatted))
+    .map(([name, , formatted]) => `${name} (${formatted})`);
+  check(
+    'doc/transfer-protocol.md publishes the same five numbers',
+    docMisses.length === 0,
+    docMisses.join(', ') || 'all rows agree',
+  );
+
+  const callers = production
+    .filter((f) => !AUTHORIZED_MPL1_FILES.has(f.path))
+    .filter((f) => /app\.morsecode\.transport\.lan\.payload/.test(f.text))
+    .map((f) => f.path);
+  check(
+    'no production file imports the payload framing package',
+    callers.length === 0,
+    callers.join(', '),
+  );
+  check(
+    'the format file constructs no record and calls no codec entry point',
+    !/LanPayloadRecordCodec\./.test(formatSource) && !/LanPayloadRecord\(/.test(formatSource),
+  );
+
+  const contractsText = readFileSync(
+    join(ROOT, 'core-transfer', 'src', 'main', 'kotlin', 'app', 'morsecode', 'core', 'transfer',
+      'session', 'SessionContracts.kt'),
+    'utf8',
+  );
+  check(
+    'the payload gate still has exactly one, refusing outcome',
+    payloadGateRefusesOnly(contractsText),
+  );
+
+  const readiness = readFileSync(
+    join(ROOT, 'core-model', 'src', 'main', 'kotlin', 'app', 'morsecode', 'core', 'model',
+      'FeatureReadiness.kt'),
+    'utf8',
+  );
+  check('the milestone and the transfer-engine gate are unmoved', milestonePinsHold(readiness));
+
+  const schemaProblems = ROOM_SCHEMA_DIGESTS
+    .filter(([path, digest]) =>
+      !existsSync(join(ROOT, path)) || !digestMatches(readFileSync(join(ROOT, path)), digest))
+    .map(([path]) => path);
+  check(
+    'the Room v1 and v2 exports are byte identical to their pinned digests',
+    schemaProblems.length === 0,
+    schemaProblems.join(', '),
+  );
 
   // 7. The owner-risk waiver travels with the code, because the code is unreviewed.
   check('the owner-risk waiver is present',

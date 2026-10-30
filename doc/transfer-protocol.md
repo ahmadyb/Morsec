@@ -3,7 +3,9 @@
 The original file-transfer wire protocol and engine were delivered by Milestone 3. The
 Milestone 4 Part A discovery/control envelope and Part B authenticated control-session
 upgrade are documented separately in §11; neither changes the existing 44-byte
-transfer-frame format or adds a payload path.
+transfer-frame format or adds a payload path. §13 specifies a proposed payload record
+layer for authenticated LAN sessions. It is framing only: code exists, nothing in
+production emits or accepts one of its records, and payload transfer remains disabled.
 
 Everything described in the transfer-engine sections lives in `:core-transfer`, a
 **Kotlin/JVM** module: no Android class, Room, Hilt, coroutine, socket, system clock, or
@@ -465,3 +467,158 @@ work; they add no Android or Room dependency to the pure core.
 `FeatureReadiness.CURRENT_MILESTONE` remains intentionally 2 and `TRANSFER_ENGINE` remains
 unavailable. The Part A discovery and Part B secure-control foundations are not product
 integration and do not provide a usable file-sharing feature.
+
+---
+
+## 13. Payload transfer: the MPL1 record layer (proposed, inert)
+
+**Status: proposed and inert.** This section specifies framing that exists as a bounded codec and
+nothing else. No production code constructs, encodes, decodes, sends or accepts an MPL1 record;
+there is no key schedule, no payload authority, no socket path, no storage call and no user-facing
+transfer. `PayloadTransferGate` still refuses every session with `SECURE_SESSION_REQUIRED`,
+`TRANSFER_ENGINE` is still gated, and payload transfer remains disabled in this build.
+
+The protocol this envelope will eventually carry is experimental, project-defined and not
+independently cryptographically reviewed. The owner accepted that risk on 2026-10-19 for this
+personal application; the waiver permits the code to exist and establishes no security. See
+[`security/owner-risk-waiver-2026-10-19.md`](security/owner-risk-waiver-2026-10-19.md). The profile of
+record for pairing is **BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072`**.
+
+### 13.1 Why a second record layer, and why it lives in `:transport-lan`
+
+The authenticated control layer (`MSR1`, §11) carries at most 4,096 bytes of plaintext per record
+and 16 MiB per direction, and its four record types are control types only. Those numbers are a
+control budget, not a transfer budget: file bytes do not fit, and reusing the layer would mean the
+"control-only" property that the whole Part B verification rests on stops being true.
+
+The alternative considered and rejected was a second authenticated connection. A second connection
+would not inherit the pairing transcript binding, so it would either have to re-run pairing for
+every transfer or authenticate nothing. Reusing TLS and deriving separate payload keys from the
+same session keeps one authenticated channel and one authority chain.
+
+The envelope therefore lives in `:transport-lan`:
+
+| File | Contents |
+| --- | --- |
+| `transport-lan/.../payload/LanPayloadRecordFormat.kt` | magic, version, header size, offsets, the five pinned limits, session-id encoding |
+| `transport-lan/.../payload/LanPayloadRecordCodec.kt` | header encode/decode, whole-record encode/decode, typed refusals |
+| `transport-lan/src/test/.../payload/LanPayloadRecordCodecTest.kt` | behaviour, one refusal per test |
+| `transport-lan/src/test/.../payload/LanPayloadRecordVectorsTest.kt` | fixed wire vectors, cross-format refusal, the two ceiling derivations |
+
+The MSC1 frame and the transfer-domain limits stay in `:core-transfer`. MPL1 is a LAN byte-stream
+concern, so it does not add a rule the transport-neutral core has to enforce.
+
+### 13.2 Layout
+
+All multi-byte values are **big-endian**. The header is fixed at 34 bytes.
+
+| Offset | Size | Field | Notes |
+| --- | --- | --- | --- |
+| 0 | 4 | magic | `MPL1` (`0x4D 0x50 0x4C 0x31`) |
+| 4 | 1 | version | 1 is the only value this build writes or reads |
+| 5 | 16 | session id | the secure session id, as raw bytes |
+| 21 | 1 | direction | 1 initiator → responder, 2 responder → initiator |
+| 22 | 8 | sequence | signed 64-bit, non-negative |
+| 30 | 4 | declared body length | **unsigned 32-bit** |
+| 34 | *n* | body | exactly one MSC1 frame |
+| 34 + *n* | 16 | authentication tag | always present, even for an empty body |
+
+`4 + 1 + 16 + 1 + 8 + 4 = 34`.
+
+There is deliberately **no outer record type byte**. The body is one MSC1 frame and that frame
+already carries its own type; a second type field could disagree with it, and the disagreement would
+be settled by whichever layer read last.
+
+### 13.3 Why the length field is four bytes
+
+A 64 KiB chunk with three maximum-length identifiers is a 65,772-byte MSC1 frame, and 65,772 does
+not fit an unsigned 16-bit field. The control layer next door uses two bytes because its plaintext
+ceiling is 4,096; copying that width here would have capped the body just under 65,536 — and a
+decoder that narrowed a declared 65,772 into sixteen bits would have accepted a length it could not
+reassemble.
+
+The reader parses the four bytes into a `Long`, compares it against the fixed maximum, and only then
+narrows it for arithmetic or allocation. A declared `0xFFFFFFFF` is a refusal, never `-1` and never
+an allocation.
+
+### 13.4 Limits
+
+These constants are declared in `LanPayloadRecordFormat`. `tools/verify/jpake-production-boundary.mjs`
+fails the build if either the source or this table stops saying the numbers below, and a JVM test
+proves the derivation by encoding a real maximal MSC1 frame at the LAN chunk size.
+
+| Constant | Value | Why |
+| --- | --- | --- |
+| `LAN_PAYLOAD_CHUNK_BYTES` | 65,536 (64 KiB) | the chunk the LAN payload profile offers; inside `MIN_CHUNK_SIZE_BYTES`…`MAX_CHUNK_SIZE_BYTES` and equal to the core's default |
+| `MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES` | 65,772 | `44 + (3 × 64) + 65,536`: the largest MSC1 frame at that chunk size, with maximum-length identifiers |
+| `PAYLOAD_RECORD_HEADER_BYTES` | 34 | `4 + 1 + 16 + 1 + 8 + 4` |
+| `PAYLOAD_RECORD_TAG_BYTES` | 16 | the tag field that follows the body |
+| `MAX_PAYLOAD_RECORD_WIRE_BYTES` | 65,822 | `34 + 65,772 + 16` |
+
+`MAX_CHUNK_SIZE_BYTES` remains 262,144 in `:core-transfer`: the LAN profile chooses 64 KiB, it does
+not change what the engine is allowed to carry on another transport.
+
+### 13.5 One record, one frame, one allocation
+
+The body is exactly one MSC1 frame, and the envelope does not parse it. A zero-length body is
+structurally valid at this layer even though no meaningful MSC1 frame is empty; refusing that is the
+frame decoder's job, and the two responsibilities are kept apart on purpose. A test asserts both
+halves: an empty envelope decodes, and `FrameCodec.decode` refuses an empty buffer.
+
+The largest allocation the codec makes is bounded by a frame the caller already holds. A record
+whose received size exceeds `MAX_PAYLOAD_RECORD_WIRE_BYTES` is refused before any field is read; a declared body is
+bounded before any array is sized from it.
+
+### 13.6 Refusals
+
+The decoder returns a typed reason and never throws on wire input. It refuses:
+
+- fewer bytes than a header and a tag (`TRUNCATED`), and every truncation of the header itself;
+- wrong magic, wrong version, unknown direction;
+- a session id that is not this session's (`SESSION_MISMATCH`);
+- a record travelling the other way (`DIRECTION_MISMATCH`) — reflection is not a feature;
+- a sequence at or above 2^63, which arrives as a negative `Long` (`SEQUENCE_OUT_OF_RANGE`), and any
+  sequence other than the one expected (`UNEXPECTED_SEQUENCE`);
+- a declared length above 65,772 (`LENGTH_ABOVE_MAXIMUM`);
+- a declared body or tag the frame does not fully contain (`LENGTH_INCONSISTENT`);
+- a byte the header did not account for (`TRAILING_BYTES`);
+- a frame larger than any this layer produces (`WIRE_SIZE_ABOVE_MAXIMUM`).
+
+Sequence policy: non-negative signed 64-bit, checked for exact equality with the expected value. It
+never wraps, because values at or above 2^63 are not representable and are refused rather than
+masked. How many records one direction may carry is a question for the payload session that owns the
+keys; this layer guarantees only that the number is never negative and never silently differs from
+the expected one.
+
+The two formats cannot be confused. `MPL1` and `MSR1` differ in all four magic bytes and in header
+size, and tests drive each decoder with the other's bytes: a control header presented to the payload
+decoder is refused as `WRONG_MAGIC`, and a payload record presented to `SecureRecordCodec` returns
+null.
+
+### 13.7 The tag and the associated data
+
+The 16 tag bytes are carried, not verified. Authentication begins only when a later slice supplies
+the key schedule and the payload authority that gates access to it.
+
+When that slice exists, the **whole 34-byte header** will be the associated data for the AEAD, for
+the same reason `MSR1` uses its header that way: the session id, direction, sequence and declared
+length all have to be covered, or an attacker can move a valid body to a different sequence, a
+different direction or a different session and the ciphertext will still decrypt. Keys and IVs will
+be derived per direction from the TLS session through new exporter labels, so control and payload
+never share a key stream and never share a sequence space.
+
+### 13.8 What does not exist yet
+
+- No key derivation, no AEAD, no tag verification.
+- No payload authority: nothing can be claimed, consumed or serialized.
+- No socket, no stream reader or writer, no framing on the wire.
+- No production call site. The package is `internal`, and a verifier fails the build if a referenced
+  file outside it mentions the codec or the format.
+- No file, chunk, resume, scheduler, storage or UI work.
+- No Room change: the schema stays v1/v2, byte-identical.
+- `PayloadTransferGate` unchanged; `CURRENT_MILESTONE` still 2; `TRANSFER_ENGINE` still gated.
+
+The next slice must settle these before any record is encrypted: who owns and constructs the payload
+authority, how a single reader dispatches between `MSR1` and `MPL1` on one stream, how writes are
+serialized with control messages taking priority, whether the control session's 300-second lifetime
+also bounds an active transfer, and the exact exporter labels and key separation.
