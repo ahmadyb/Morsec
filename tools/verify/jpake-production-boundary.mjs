@@ -106,14 +106,72 @@ const AUTHORIZED_MPS3_FILES = new Set([
  * coordinator, the provider, the engine or the app, then a payload path is being assembled outside
  * the authority that is supposed to gate it, and this check should fail before a compiler sees it.
  */
-const PAYLOAD_FORMAT_PATH =
-  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/payload/LanPayloadRecordFormat.kt';
-const PAYLOAD_CODEC_PATH =
-  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/payload/LanPayloadRecordCodec.kt';
-const AUTHORIZED_MPL1_FILES = new Set([PAYLOAD_FORMAT_PATH, PAYLOAD_CODEC_PATH]);
+const PAYLOAD_PACKAGE = 'transport-lan/src/main/kotlin/app/morsecode/transport/lan/payload/';
+const PAYLOAD_FORMAT_PATH = `${PAYLOAD_PACKAGE}LanPayloadRecordFormat.kt`;
+const PAYLOAD_CODEC_PATH = `${PAYLOAD_PACKAGE}LanPayloadRecordCodec.kt`;
+const PAYLOAD_LABELS_PATH = `${PAYLOAD_PACKAGE}LanPayloadExporterLabels.kt`;
+const PAYLOAD_SCHEDULE_PATH = `${PAYLOAD_PACKAGE}LanPayloadKeySchedule.kt`;
+const PAYLOAD_LAYER_PATH = `${PAYLOAD_PACKAGE}LanPayloadRecordLayer.kt`;
+
+/** Every file the payload package may contain. A sixth is a review, not a refactor. */
+const PAYLOAD_PACKAGE_FILES = new Set([
+  PAYLOAD_FORMAT_PATH,
+  PAYLOAD_CODEC_PATH,
+  PAYLOAD_LABELS_PATH,
+  PAYLOAD_SCHEDULE_PATH,
+  PAYLOAD_LAYER_PATH,
+]);
+
+/**
+ * The only production files outside the package that may name payload state.
+ *
+ * Three, and each for one reason. The coordinator derives the schedule; the authority owns and
+ * binds it; the control channel holds it dormant. The discovery provider passes `claimed.payload`
+ * without naming the type, so it does not appear here -- which is the shape wanted: the fewer files
+ * that can name a capability, the fewer that can claim one.
+ */
+const PAYLOAD_COORDINATOR_PATH =
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/pairing/PakeSessionCoordinator.kt';
+const PAYLOAD_AUTHORITY_PATH =
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/AuthenticatedControlAuthority.kt';
+const PAYLOAD_CONTROL_CHANNEL_PATH =
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/SecureLanControlChannel.kt';
+const PAYLOAD_CHAIN_FILES = new Set([
+  PAYLOAD_COORDINATOR_PATH,
+  PAYLOAD_AUTHORITY_PATH,
+  PAYLOAD_CONTROL_CHANNEL_PATH,
+]);
+
+/** Every production file that may mention payload state at all. */
+const AUTHORIZED_PAYLOAD_PRODUCTION_FILES = new Set([
+  ...PAYLOAD_PACKAGE_FILES,
+  ...PAYLOAD_CHAIN_FILES,
+]);
 
 /** The one document allowed to describe the format. */
 const AUTHORIZED_MPL1_DOCS = new Set(['doc/transfer-protocol.md']);
+
+/**
+ * The payload exporter labels, as exact strings.
+ *
+ * Written here rather than parsed for the same reason the limits are: a check that reads whatever
+ * the source says can only prove the source agrees with itself. The control labels are here too,
+ * because the interesting failure is not a typo in a payload label -- it is a payload label that
+ * equals a control one, which would key two layers from one output.
+ */
+const PAYLOAD_LABELS = [
+  'EXPORTER-MORSEC-PAYLOAD-C2S-KEY-V1',
+  'EXPORTER-MORSEC-PAYLOAD-C2S-IV-V1',
+  'EXPORTER-MORSEC-PAYLOAD-S2C-KEY-V1',
+  'EXPORTER-MORSEC-PAYLOAD-S2C-IV-V1',
+];
+const CONTROL_LABELS = [
+  'EXPORTER-MORSEC-C2S-KEY-V1',
+  'EXPORTER-MORSEC-C2S-IV-V1',
+  'EXPORTER-MORSEC-S2C-KEY-V1',
+  'EXPORTER-MORSEC-S2C-IV-V1',
+  'EXPORTER-MORSEC-PAIRING-PROOF-V1',
+];
 
 /**
  * The five numbers this build is approved to use, with the form the document spells them in.
@@ -247,19 +305,70 @@ function noSasGenerationAnywhere(text) {
 }
 
 /* ------------------------------------------------------------------ *
- * Payload framing (MPL1). Framing only: no key, no socket, no caller.
+ * Payload framing and payload state.
+ *
+ * Since the payload-key slice, the package holds more than framing: a label table, a key schedule
+ * and an AEAD record layer. The guards therefore split into three questions rather than one.
+ *
+ *   1. Where may payload state be named at all? Only in the package and three chain files.
+ *   2. Is the framing still inert? The format and codec must stay free of sockets, ciphers, keys,
+ *      storage, logs and authority references. The layer is where a cipher legitimately lives, so
+ *      it is guarded by its own predicate instead.
+ *   3. Can anything use it? Only the coordinator derives material, only the coordinator constructs
+ *      a schedule, and nothing in production claims one.
  * ------------------------------------------------------------------ */
 
-/** Matches the payload record format by magic or by type name. */
-const MPL1_TOKEN = /MPL1|LanPayloadRecord/;
+/** Matches any payload state by wire magic or by type name. */
+const MPL1_TOKEN = /MPL1|LanPayload/;
+
+/** Matches only the wire format, not the capability or the layer type. */
+const PAYLOAD_WIRE_TOKEN = /MPL1|LanPayloadRecordCodec|LanPayloadRecordFormat/;
 
 function filesMentioningMpl1(files) {
   return files.filter((f) => MPL1_TOKEN.test(f.text)).map((f) => f.path);
 }
 
-/** Every file that names MPL1 must be explicitly authorized. */
+/** Every file that names payload state must be explicitly authorized. */
 function unauthorizedMpl1Files(files, allowed) {
   return filesMentioningMpl1(files).filter((path) => !allowed.has(path));
+}
+
+/**
+ * The AEAD layer is dormant: no socket, no persistence, no logging, no gate, no authority.
+ *
+ * It is allowed to name its own AEAD interface, and nothing else that could carry a byte or a key
+ * somewhere this slice did not approve. `\bFile\b` is deliberately absent: `LanPayloadRecordFormat`
+ * is a type name, not a file handle, and a pattern that fired on it would be turned off rather than
+ * fixed.
+ */
+function payloadLayerIsDormant(text) {
+  const transport = /\bSocket\b|SSLSocket|getOutputStream|getInputStream|DataInputStream|DataOutputStream|java\.io\.File|FileOutputStream/;
+  const persistence = /\bRoom\b|\bDao\b|SharedPreferences|openFileOutput|getExternalFilesDir|SQLite/;
+  const logging = /\bLog\.[diwev]\s*\(|println\s*\(|System\.out|System\.err/;
+  const authority = /PayloadTransferGate|AuthenticatedControlAuthority|\bTransferEngine\b/;
+  return !transport.test(text) && !persistence.test(text) && !logging.test(text) &&
+    !authority.test(text);
+}
+
+/**
+ * A label present as an exact string literal.
+ *
+ * Deliberately not a parser: the question is whether these exact bytes reach the exporter, and a
+ * substring test on the quoted literal answers exactly that. The four-label count below catches the
+ * other half -- a fifth label dragged in beside them.
+ */
+function declaresLabel(source, label) {
+  return source.includes(`"${label}"`);
+}
+
+/** How many payload exporter labels a source declares, right or wrong. */
+function countPayloadLabelLiterals(source) {
+  return (source.match(/EXPORTER-MORSEC-PAYLOAD-[A-Z0-9-]+/g) ?? []).length;
+}
+
+/** True when two label sets share a member. */
+function labelSetsCollide(left, right) {
+  return left.some((label) => right.includes(label));
 }
 
 /**
@@ -282,7 +391,9 @@ function payloadFramingIsInert(text) {
 
 /** A pinned integer constant, compared by value so a digit separator cannot hide a change. */
 function declaresIntConstant(source, name, value) {
-  const match = source.match(new RegExp(`\\b${name}\\s*:\\s*Int\\s*=\\s*([0-9_]+)`));
+  // Int or Long: the record ceiling is a Long because sequences are, and a parser that only knew
+  // `: Int` would silently stop checking the one bound that keeps a nonce space from being spent.
+  const match = source.match(new RegExp(`\\b${name}\\s*:\\s*(?:Int|Long)\\s*=\\s*([0-9_]+)`));
   return match !== null && Number(match[1].replaceAll('_', '')) === value;
 }
 
@@ -441,6 +552,36 @@ function selfTest() {
   check('self-test: the payload gate inside the framing package is caught',
     !payloadFramingIsInert('val decision = PayloadTransferGate.evaluate(session)\n'));
 
+  check('self-test: a dormant payload layer passes',
+    payloadLayerIsDormant('secureRecordAead.encrypt(nonce, header, plaintext)\n'));
+  check('self-test: a payload layer holding a socket is caught',
+    !payloadLayerIsDormant('val link: Socket = accept()\n'));
+  check('self-test: a payload layer writing a stream is caught',
+    !payloadLayerIsDormant('socket.getOutputStream().write(record)\n'));
+  check('self-test: a payload layer persisting a record is caught',
+    !payloadLayerIsDormant('@Dao interface Records { }\n'));
+  check('self-test: a payload layer logging a key is caught',
+    !payloadLayerIsDormant('Log.d("payload", keyHex)\n'));
+  check('self-test: a payload layer naming the gate is caught',
+    !payloadLayerIsDormant('val d = PayloadTransferGate.evaluate(s)\n'));
+  check('self-test: a payload mention outside the authorized set is caught',
+    unauthorizedMpl1Files([{ path: 'app/src/main/kotlin/X.kt', text: 'val s = LanPayloadKeySchedule\n' }],
+      new Set(['transport-lan/src/main/kotlin/app/morsecode/transport/lan/payload/LanPayloadKeySchedule.kt']))
+      .length === 1);
+  check('self-test: a payload mention inside the authorized set is not reported',
+    unauthorizedMpl1Files([{ path: 'a.kt', text: 'val s = LanPayloadKeySchedule\n' }], new Set(['a.kt']))
+      .length === 0);
+  check('self-test: the four approved labels are declared',
+    PAYLOAD_LABELS.every((label) => declaresLabel(PAYLOAD_LABELS.map((l) => `"${l}"`).join('\n'), label)));
+  check('self-test: a renamed payload label is caught',
+    !declaresLabel('"EXPORTER-MORSEC-PAYLOAD-C2S-KEY-V2"', PAYLOAD_LABELS[0]));
+  check('self-test: a fifth payload label changes the count',
+    countPayloadLabelLiterals(PAYLOAD_LABELS.map((l) => `"${l}"`).join('\n') + '"EXPORTER-MORSEC-PAYLOAD-X-V1"') === 5);
+  check('self-test: a label collision is caught',
+    labelSetsCollide(['a', 'b'], ['b', 'c']));
+  check('self-test: disjoint labels are not a collision',
+    !labelSetsCollide(PAYLOAD_LABELS, CONTROL_LABELS));
+
   check('self-test: a pinned constant with the approved value passes',
     declaresIntConstant(
       'const val MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES: Int = 65_772',
@@ -452,6 +593,19 @@ function selfTest() {
       'const val MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES: Int = 65_773',
       'MAX_PAYLOAD_RECORD_PLAINTEXT_BYTES',
       65772,
+    ));
+
+  check('self-test: a Long constant with underscores parses',
+    declaresIntConstant(
+      'const val MAX_PAYLOAD_RECORDS_PER_DIRECTION: Long = 1_048_576L',
+      'MAX_PAYLOAD_RECORDS_PER_DIRECTION',
+      1048576,
+    ));
+  check('self-test: a Long constant with a different value is caught',
+    !declaresIntConstant(
+      'const val MAX_PAYLOAD_RECORDS_PER_DIRECTION: Long = 2_097_152L',
+      'MAX_PAYLOAD_RECORDS_PER_DIRECTION',
+      1048576,
     ));
 
   check('self-test: a documented row carrying the approved figure passes',
@@ -613,14 +767,15 @@ function verify() {
       allProduction,
     ));
 
-  // 6b. The payload framing is inert, confined, and still attached to nothing.
+  // 6b. Payload state is confined, inert, and not yet claimed by anything.
   //
-  //     Slice 1 adds a codec and a specification. The checks below are what keep it a codec: the
-  //     package may hold exactly two files, no other production file may name the format or import
-  //     the package, those two files may not acquire a socket, a cipher, a key handle, a log call or
-  //     an authority reference, and the five approved numbers must read the same in the source and
-  //     in the document. The Room exports are digest-pinned here as well, so a framing change that
-  //     quietly dragged a schema with it fails on this verifier rather than in a later migration.
+  //     Slice 1 added a codec and a specification; this slice adds labels, a key schedule and an
+  //     AEAD layer. The guards below are what keep that a dormant capability rather than a payload
+  //     path: the package may hold exactly five files, payload state may be named in exactly three
+  //     production files outside it, the framing stays free of sockets and ciphers, the layer stays
+  //     free of sockets and persistence, only the coordinator derives material or builds a
+  //     schedule, and nothing in production claims one. The Room exports and readiness constants
+  //     are pinned here too, so none of this can be reached by moving a gate instead of a byte.
   const payloadDir = join(
     ROOT,
     'transport-lan',
@@ -636,30 +791,32 @@ function verify() {
   const payloadPaths = existsSync(payloadDir)
     ? collect(payloadDir).map((f) => relative(ROOT, f).replaceAll('\\', '/'))
     : [];
+  const unexpectedPackageFiles = payloadPaths.filter((path) => !PAYLOAD_PACKAGE_FILES.has(path));
+  const missingPackageFiles = [...PAYLOAD_PACKAGE_FILES].filter((path) => !payloadPaths.includes(path));
   check(
-    'the payload framing package holds exactly the two approved files',
-    payloadPaths.length === 2 && payloadPaths.every((path) => AUTHORIZED_MPL1_FILES.has(path)),
-    payloadPaths.join(', ') || 'package missing',
+    'the payload package holds exactly the five approved files',
+    unexpectedPackageFiles.length === 0 && missingPackageFiles.length === 0,
+    [...unexpectedPackageFiles, ...missingPackageFiles.map((path) => `${path} (missing)`)].join(', '),
   );
 
-  const mpl1Leaks = unauthorizedMpl1Files(production, AUTHORIZED_MPL1_FILES);
+  const payloadLeaks = unauthorizedMpl1Files(production, AUTHORIZED_PAYLOAD_PRODUCTION_FILES);
   check(
-    'MPL1 appears in production only inside the approved framing files',
-    mpl1Leaks.length === 0,
-    mpl1Leaks.join(', '),
+    'payload state is named in production only inside the approved files',
+    payloadLeaks.length === 0,
+    payloadLeaks.join(', '),
   );
 
   const docs = collect(join(ROOT, 'doc'))
     .filter((f) => f.endsWith('.md'))
     .map((f) => ({ path: relative(ROOT, f).replaceAll('\\', '/'), text: readFileSync(f, 'utf8') }));
-  const mpl1DocLeaks = unauthorizedMpl1Files(docs, AUTHORIZED_MPL1_DOCS);
+  const payloadDocLeaks = unauthorizedMpl1Files(docs, AUTHORIZED_MPL1_DOCS);
   check(
-    'MPL1 is documented only in the transfer protocol document',
-    mpl1DocLeaks.length === 0,
-    mpl1DocLeaks.join(', '),
+    'payload state is documented only in the transfer protocol document',
+    payloadDocLeaks.length === 0,
+    payloadDocLeaks.join(', '),
   );
 
-  const framing = [...AUTHORIZED_MPL1_FILES].map((path) => ({
+  const framing = [PAYLOAD_FORMAT_PATH, PAYLOAD_CODEC_PATH].map((path) => ({
     path,
     text: readFileSync(join(ROOT, path), 'utf8'),
   }));
@@ -668,6 +825,12 @@ function verify() {
     'the payload framing derives no key, opens no socket, persists nothing and logs nothing',
     framingOffenders.length === 0,
     framingOffenders.join(', '),
+  );
+
+  const layerSource = readFileSync(join(ROOT, PAYLOAD_LAYER_PATH), 'utf8');
+  check(
+    'the payload record layer opens no socket, persists nothing, logs nothing and names no gate',
+    payloadLayerIsDormant(layerSource),
   );
 
   const formatSource = framing.find((f) => f.path === PAYLOAD_FORMAT_PATH)?.text ?? '';
@@ -680,6 +843,12 @@ function verify() {
     constantMisses.join(', ') || `${PAYLOAD_LIMITS.length} constants agree`,
   );
 
+  check(
+    'the payload record ceiling is pinned at 1,048,576 per direction',
+    declaresIntConstant(formatSource, 'MAX_PAYLOAD_RECORDS_PER_DIRECTION', 1_048_576) &&
+      readFileSync(join(ROOT, 'doc', 'transfer-protocol.md'), 'utf8').includes('1,048,576'),
+  );
+
   const docText = readFileSync(join(ROOT, 'doc', 'transfer-protocol.md'), 'utf8');
   const docMisses = PAYLOAD_LIMITS
     .filter(([name, , formatted]) => !docRowStates(docText, name, formatted))
@@ -690,18 +859,129 @@ function verify() {
     docMisses.join(', ') || 'all rows agree',
   );
 
-  const callers = production
-    .filter((f) => !AUTHORIZED_MPL1_FILES.has(f.path))
-    .filter((f) => /app\.morsecode\.transport\.lan\.payload/.test(f.text))
+  const importingFiles = production
+    .filter((f) => !PAYLOAD_PACKAGE_FILES.has(f.path))
+    .filter((f) => /import app\.morsecode\.transport\.lan\.payload\./.test(f.text))
     .map((f) => f.path);
+  const unauthorizedImporters = importingFiles.filter((path) => !PAYLOAD_CHAIN_FILES.has(path));
   check(
-    'no production file imports the payload framing package',
-    callers.length === 0,
-    callers.join(', '),
+    'only the coordinator, the authority and the control channel import the payload package',
+    unauthorizedImporters.length === 0,
+    unauthorizedImporters.join(', ') || importingFiles.map((p) => p.replace(/^.*\//, '')).join(', '),
+  );
+
+  // The labels: exactly four, the right four, distinct, and not the control layer's.
+  const labelsSource = readFileSync(join(ROOT, PAYLOAD_LABELS_PATH), 'utf8');
+  const coordinatorSource = readFileSync(join(ROOT, PAYLOAD_COORDINATOR_PATH), 'utf8');
+  const labelMisses = PAYLOAD_LABELS.filter((label) => !declaresLabel(labelsSource, label));
+  check(
+    'the four payload exporter labels are exactly the approved strings',
+    labelMisses.length === 0 && countPayloadLabelLiterals(labelsSource) === PAYLOAD_LABELS.length,
+    labelMisses.join(', ') ||
+      `${countPayloadLabelLiterals(labelsSource)} label literal(s) in the file`,
   );
   check(
-    'the format file constructs no record and calls no codec entry point',
-    !/LanPayloadRecordCodec\./.test(formatSource) && !/LanPayloadRecord\(/.test(formatSource),
+    'the four payload labels are pairwise distinct',
+    new Set(PAYLOAD_LABELS).size === PAYLOAD_LABELS.length,
+  );
+  check(
+    'no payload label collides with a control, proof or channel-binding label',
+    !labelSetsCollide(PAYLOAD_LABELS, CONTROL_LABELS),
+  );
+  const controlLabelMisses = CONTROL_LABELS.filter((label) => !declaresLabel(coordinatorSource, label));
+  check(
+    'the control layer still derives from its own five labels',
+    controlLabelMisses.length === 0,
+    controlLabelMisses.join(', '),
+  );
+
+  // Derivation and construction: one file each, and it is the same file.
+  const derivations = production
+    .filter((f) => /LanPayloadExporterLabels\.[A-Z0-9_]+/.test(f.text))
+    .map((f) => f.path)
+    .filter((path) => path !== PAYLOAD_LABELS_PATH);
+  check(
+    'only the coordinator derives payload exporter material',
+    derivations.length === 1 && derivations[0] === PAYLOAD_COORDINATOR_PATH,
+    derivations.join(', ') || 'no derivation found',
+  );
+  const constructions = production
+    .filter((f) => f.path !== PAYLOAD_SCHEDULE_PATH)
+    .filter((f) => /LanPayloadKeySchedule\.create\(/.test(f.text))
+    .map((f) => f.path);
+  check(
+    'only the coordinator constructs a payload key schedule',
+    constructions.length === 1 && constructions[0] === PAYLOAD_COORDINATOR_PATH,
+    constructions.join(', ') || 'no construction found',
+  );
+
+  // Claims: the seam exists, and no production file uses it.
+  // The channel's own seam is the one place allowed to forward a claim, and it must stay a single
+  // forwarding call: a second site would mean a second path to the same capability.
+  const controlChannelSource = readFileSync(join(ROOT, PAYLOAD_CONTROL_CHANNEL_PATH), 'utf8');
+  const claimSites = production
+    .filter((f) => f.path !== PAYLOAD_SCHEDULE_PATH && f.path !== PAYLOAD_CONTROL_CHANNEL_PATH)
+    .filter((f) => /\.claimRecordLayer\(/.test(f.text))
+    .map((f) => f.path);
+  const dispatchSites = production
+    .filter((f) => f.path !== PAYLOAD_CONTROL_CHANNEL_PATH)
+    .filter((f) => /\.claimPayloadLayer\(/.test(f.text))
+    .map((f) => f.path);
+  const seamForwards = (controlChannelSource.match(/\.claimRecordLayer\(\)/g) ?? []).length;
+  check(
+    'no production caller claims the payload capability',
+    claimSites.length === 0 && dispatchSites.length === 0 && seamForwards === 1 &&
+      /internal fun claimPayloadLayer\(\): LanPayloadRecordLayer\?/.test(controlChannelSource),
+    [...claimSites, ...dispatchSites].join(', ') || `seam forwards: ${seamForwards}`,
+  );
+
+  // The capability cannot leave the module, and cannot be serialized or compared by value.
+  const scheduleSource = readFileSync(join(ROOT, PAYLOAD_SCHEDULE_PATH), 'utf8');
+  check(
+    'the payload capability has a private constructor and no serializer',
+    /internal class LanPayloadKeySchedule private constructor\(/.test(scheduleSource) &&
+      !/Serializable|Parcelable|writeToParcel|toByteArray\(\): ByteArray/.test(scheduleSource) &&
+      !/data class LanPayloadKeySchedule/.test(scheduleSource),
+  );
+
+  // No socket-owning or storage-owning file may touch the wire format yet.
+  const wireFiles = production
+    .filter((f) => !PAYLOAD_PACKAGE_FILES.has(f.path))
+    .filter((f) => PAYLOAD_WIRE_TOKEN.test(f.text))
+    .map((f) => f.path);
+  check(
+    'no file outside the payload package references the MPL1 wire format',
+    wireFiles.length === 0,
+    wireFiles.join(', '),
+  );
+  const socketFiles = production
+    .filter((f) => /\bSocket\b|SSLSocket|getInputStream|getOutputStream/.test(f.text))
+    .filter((f) => PAYLOAD_WIRE_TOKEN.test(f.text))
+    .map((f) => f.path);
+  check(
+    'no socket-bearing file parses or produces an MPL1 record',
+    socketFiles.length === 0,
+    socketFiles.join(', '),
+  );
+  const storageWire = production
+    .filter((f) => /^(core-storage|core-data|app)\//.test(f.path))
+    .filter((f) => PAYLOAD_WIRE_TOKEN.test(f.text))
+    .map((f) => f.path);
+  check(
+    'no storage, database or app source references the MPL1 wire format',
+    storageWire.length === 0,
+    storageWire.join(', '),
+  );
+
+  // The package logs nothing and persists nothing, whatever each file is allowed to do.
+  const secretLeaks = [...PAYLOAD_PACKAGE_FILES]
+    .map((path) => ({ path, text: readFileSync(join(ROOT, path), 'utf8') }))
+    .filter((f) => /\bLog\.[diwev]\s*\(|println\s*\(|SharedPreferences|\bRoom\b|\bDao\b/.test(f.text))
+    .map((f) => f.path);
+  check(
+    'no payload source logs or persists anything',
+    secretLeaks.length === 0,
+    secretLeaks.join(', '),
   );
 
   const contractsText = readFileSync(

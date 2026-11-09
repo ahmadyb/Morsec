@@ -29,10 +29,15 @@
  *      chain disagrees with the connection.
  *
  * KEYS AND LABELS
- *   Record keys and IVs are eight separate exporter outputs with distinct labels, split by direction,
+ *   Record keys and IVs are four separate exporter outputs with distinct labels, split by direction,
  *   so the two directions can never share a nonce sequence. They are wiped as soon as the AEADs own
  *   them. Nothing here derives a key from the entered code directly: that happens inside the PAKE
  *   library, and this file never sees it.
+ *
+ *   Four more labels derive the payload schedule, in the same step and from the same digest, so both
+ *   layers share one derivation instant and one lifetime. The payload material is dormant: it is
+ *   handed to the authority, which hands it to the claimed channel, and nothing claims it in this
+ *   slice.
  *
  * STATUS
  *   Experimental, project-defined, not independently cryptographically reviewed. The owner accepted
@@ -52,11 +57,14 @@ import app.morsecode.core.transfer.session.SecureEntropy
 import app.morsecode.core.transfer.session.SecureKeyConfirmation
 import app.morsecode.core.transfer.session.SecureKeyConfirmationCodec
 import app.morsecode.core.transfer.session.SecurePeerRole
+import app.morsecode.core.transfer.session.SecureRecordAead
 import app.morsecode.core.transfer.session.SecureRecordLayer
 import app.morsecode.core.transfer.session.SecureRecordResult
 import app.morsecode.core.transfer.session.SecureRecordType
 import app.morsecode.core.transfer.session.SecureSessionLimits
 import app.morsecode.core.transfer.session.SessionFailureCode
+import app.morsecode.transport.lan.payload.LanPayloadExporterLabels
+import app.morsecode.transport.lan.payload.LanPayloadKeySchedule
 import app.morsecode.transport.lan.security.AuthenticatedControlAuthority
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -138,6 +146,15 @@ internal class PakeSessionCoordinator(
 
     private var activeRecords: PairingRecordIo? = null
 
+    /**
+     * Payload material this frame still owns.
+     *
+     * Non-null only between derivation and the authority taking it. Every refusal runs through
+     * [releaseAfterFailure], so a failure after derivation destroys the schedule rather than
+     * dropping it.
+     */
+    private var activePayloadKeys: LanPayloadKeySchedule? = null
+
     /** One run. Returns a typed outcome; never throws for anything the peer can cause. */
     fun run(): PakeSessionOutcome {
         if (channel.protocol != REQUIRED_TLS_PROTOCOL) {
@@ -218,6 +235,16 @@ internal class PakeSessionCoordinator(
             null
         } ?: return refused(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED, PakeRefusalClass.LOCAL_FAILURE)
         activeLayer = layer
+        // The payload schedule is derived here, at the last moment the exporter and the transcript
+        // digest are both alive: the digest is wiped when this function returns and the exporter
+        // dies with the connection. Failing to derive is failing to authenticate -- pairing closes
+        // and no authority is issued.
+        val payloadKeys = try {
+            derivePayloadKeys()
+        } catch (_: RuntimeException) {
+            null
+        } ?: return refused(SessionFailureCode.SECURE_SESSION_HANDSHAKE_FAILED, PakeRefusalClass.LOCAL_FAILURE)
+        activePayloadKeys = payloadKeys
         val recordIo = channel.recordIo()
         activeRecords = recordIo
         val beforeAuthority = confirmKeys(layer, recordIo)
@@ -238,6 +265,7 @@ internal class PakeSessionCoordinator(
                 controlSession = controlSession,
                 tlsProtocol = channel.protocol,
                 transcriptDigest = transcriptDigest,
+                payloadKeys = payloadKeys,
                 attempt = attempt,
                 pakeSession = confirmed.session,
                 localDecision = transition.localDecision,
@@ -267,6 +295,9 @@ internal class PakeSessionCoordinator(
         handedOffAttempt = null
         activeLayer = null
         activeRecords = null
+        // The authority answers for the schedule from here. Clearing it keeps a later release from
+        // closing material another object now owns.
+        activePayloadKeys = null
         return PakeSessionOutcome.Authenticated(authority, layer, PakePairingState.AUTHENTICATED)
     }
 
@@ -420,7 +451,7 @@ internal class PakeSessionCoordinator(
     /**
      * Derives the record layer from the TLS exporter.
      *
-     * Eight independent exporter calls -- a key and an IV per direction -- rather than one longer
+     * Four independent exporter calls -- a key and an IV per direction -- rather than one longer
      * output split in two: splitting one output would make the two directions share the exporter's
      * internal chaining, and separate labels cost nothing.
      */
@@ -445,6 +476,52 @@ internal class PakeSessionCoordinator(
                 clock = clock,
             )
         } finally {
+            c2sIv.fill(0)
+            s2cIv.fill(0)
+        }
+    }
+
+    /**
+     * Derives the dormant payload schedule from the TLS exporter.
+     *
+     * Four labels, four independent outputs, the same transcript context as the control keys, and
+     * the same derivation instant -- so the two layers share a lifetime and share no key. The AEADs
+     * are built here, before the keys are wiped, because the exporter is the only thing that can
+     * produce them and it does not outlive the connection.
+     *
+     * Returns null rather than throwing when any step fails; the caller refuses the pairing.
+     */
+    private fun derivePayloadKeys(): LanPayloadKeySchedule? {
+        val c2sKey = exporter(LanPayloadExporterLabels.C2S_KEY, SecureSessionLimits.AES_KEY_BYTES)
+        val c2sIv = exporter(LanPayloadExporterLabels.C2S_IV, SecureSessionLimits.NONCE_BYTES_FOR_AES_GCM)
+        val s2cKey = exporter(LanPayloadExporterLabels.S2C_KEY, SecureSessionLimits.AES_KEY_BYTES)
+        val s2cIv = exporter(LanPayloadExporterLabels.S2C_IV, SecureSessionLimits.NONCE_BYTES_FOR_AES_GCM)
+        var ownedC2s: SecureRecordAead? = null
+        var ownedS2c: SecureRecordAead? = null
+        try {
+            val c2sAead = channel.createAead(c2sKey.copyOf())
+            ownedC2s = c2sAead
+            val s2cAead = channel.createAead(s2cKey.copyOf())
+            ownedS2c = s2cAead
+            return LanPayloadKeySchedule.create(
+                sessionId = initiatorOffer.secureSessionId,
+                localRole = role,
+                transcriptDigest = transcriptDigest,
+                initiatorToResponderAead = c2sAead,
+                initiatorToResponderIv = c2sIv,
+                responderToInitiatorAead = s2cAead,
+                responderToInitiatorIv = s2cIv,
+                pairStartedElapsedMillis = startedAtMillis,
+                clock = clock,
+            )
+        } catch (_: RuntimeException) {
+            // Whichever AEADs were built belong to nobody yet, so they are destroyed here.
+            runCatching { ownedC2s?.close() }
+            runCatching { ownedS2c?.close() }
+            return null
+        } finally {
+            c2sKey.fill(0)
+            s2cKey.fill(0)
             c2sIv.fill(0)
             s2cIv.fill(0)
         }
@@ -536,6 +613,8 @@ internal class PakeSessionCoordinator(
         activeRecords = null
         activeLayer?.let { runCatching { it.close() } }
         activeLayer = null
+        activePayloadKeys?.let { runCatching { it.close() } }
+        activePayloadKeys = null
     }
 
     /**

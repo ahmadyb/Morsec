@@ -36,6 +36,10 @@ import app.morsecode.core.transfer.session.SecureSessionLimits
 import app.morsecode.core.transfer.session.SessionCapabilities
 import app.morsecode.core.transfer.session.SessionFeature
 import app.morsecode.core.transfer.session.SessionPeerProfile
+import app.morsecode.transport.lan.payload.LanPayloadLayerFailure
+import app.morsecode.transport.lan.payload.LanPayloadProtectResult
+import app.morsecode.transport.lan.payload.LanPayloadRefusal
+import app.morsecode.transport.lan.payload.LanPayloadUnprotectResult
 import app.morsecode.transport.lan.security.ConscryptSecureSessionEngine
 import app.morsecode.transport.lan.security.EstablishedTlsSession
 import java.net.InetAddress
@@ -46,7 +50,9 @@ import java.security.SecureRandom
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -91,13 +97,78 @@ public class PakeSessionApi23Test {
                 ?: throw AssertionError("the responder did not authenticate: $serverOutcome")
             assertEquals(PakePairingState.AUTHENTICATED, initiator.state)
             assertEquals(PakePairingState.AUTHENTICATED, responder.state)
-            assertNotNull(initiator.authority.claim())
+
+            val initiatorClaim = initiator.authority.claim()
+            assertNotNull("the initiator's control channel must be claimable", initiatorClaim)
             assertNull("a control authority is single use", initiator.authority.claim())
+            val responderClaim = responder.authority.claim()
+            assertNotNull("the responder's control channel must be claimable", responderClaim)
 
             // The gate takes the session the authority was issued for, not an offer: an offer is a
             // claim, and the gate's refusal must not depend on a claim.
             val decision = PayloadTransferGate.evaluate(initiator.authority.authenticatedControlSession)
             assertTrue(decision is PayloadTransferDecision.Refused)
+
+            // --- payload material, derived by the real exporter over the real handshake ----------
+            //
+            // Pairing succeeding is itself the proof that all four payload labels derived: a failed
+            // export closes the pairing and issues no authority. What is asserted here is that the
+            // material is bound, dormant, and that two devices which each ran that derivation can
+            // exchange a record in both directions. Both records are produced and opened in memory:
+            // the layer has no socket, and it is the boundary verifier -- not this test -- that
+            // proves no production file owning a socket may even name the wire format.
+            val initiatorPayload = requireNotNull(initiatorClaim?.payload) {
+                "the authenticated chain must carry payload material"
+            }
+            val responderPayload = requireNotNull(responderClaim?.payload) {
+                "the authenticated chain must carry payload material"
+            }
+            assertFalse("the capability is handed over dormant", initiatorPayload.isClaimed())
+            assertFalse("the capability is handed over dormant", responderPayload.isClaimed())
+
+            val initiatorLayer = requireNotNull(initiatorPayload.claimRecordLayer())
+            val responderLayer = requireNotNull(responderPayload.claimRecordLayer())
+            val body = ByteArray(64) { (it * 7).toByte() }
+
+            val fromInitiator = initiatorLayer.protect(body)
+            assertTrue(
+                "the initiator must protect a record: $fromInitiator",
+                fromInitiator is LanPayloadProtectResult.Protected,
+            )
+            val opened = responderLayer.unprotect(
+                (fromInitiator as LanPayloadProtectResult.Protected).wireRecord,
+            )
+            assertTrue("the responder must open it: $opened", opened is LanPayloadUnprotectResult.Opened)
+            assertArrayEquals(body, (opened as LanPayloadUnprotectResult.Opened).body)
+
+            val fromResponder = responderLayer.protect(body)
+            assertTrue(
+                "the responder must protect a record: $fromResponder",
+                fromResponder is LanPayloadProtectResult.Protected,
+            )
+            val back = initiatorLayer.unprotect(
+                (fromResponder as LanPayloadProtectResult.Protected).wireRecord,
+            )
+            assertTrue("the initiator must open it: $back", back is LanPayloadUnprotectResult.Opened)
+            assertArrayEquals(body, (back as LanPayloadUnprotectResult.Opened).body)
+
+            // A record cannot be reflected: the responder's own layer receives initiator traffic,
+            // so its own second record is refused as a direction mismatch before its tag is tried.
+            val reflected = responderLayer.protect(body)
+            assertTrue(reflected is LanPayloadProtectResult.Protected)
+            val refused = responderLayer.unprotect(
+                (reflected as LanPayloadProtectResult.Protected).wireRecord,
+            )
+            assertTrue("a reflected record must be refused: $refused", refused is LanPayloadUnprotectResult.Refused)
+            val reflectedRefusal = (refused as LanPayloadUnprotectResult.Refused).refusal
+            assertEquals(LanPayloadLayerFailure.MALFORMED_RECORD, reflectedRefusal.failure)
+            assertEquals(LanPayloadRefusal.DIRECTION_MISMATCH, reflectedRefusal.codecReason)
+
+            // Closing the control channel closes the payload layer it owned, because the schedule
+            // the layer came from is closed with the channel.
+            initiatorPayload.close()
+            assertFalse("the payload layer dies with its capability", initiatorLayer.isOpen())
+            responderLayer.close()
         } finally {
             executor.shutdownNow()
             runCatching { server.close() }

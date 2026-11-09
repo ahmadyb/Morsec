@@ -101,6 +101,7 @@ public class SlowDripReceiveTest {
                 role = SecurePeerRole.INITIATOR,
                 clock = clock,
                 expiresAtElapsedMillis = Long.MAX_VALUE,
+                payloadKeys = null,
                 onTerminal = { terminal.countDown() },
             )
 

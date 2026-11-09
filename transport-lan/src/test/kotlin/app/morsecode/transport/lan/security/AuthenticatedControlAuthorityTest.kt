@@ -27,6 +27,8 @@ import app.morsecode.core.transfer.session.SessionCapabilities
 import app.morsecode.core.transfer.session.SessionFeature
 import app.morsecode.core.transfer.session.SessionPeerProfile
 import app.morsecode.core.transfer.session.SessionSecurityState
+import app.morsecode.transport.lan.payload.LanPayloadExporterLabels
+import app.morsecode.transport.lan.payload.LanPayloadKeySchedule
 import app.morsecode.transport.lan.security.jpake.ModpJpakeSession
 import java.io.Closeable
 import java.lang.reflect.Constructor
@@ -223,6 +225,91 @@ internal class AuthenticatedControlAuthorityTest {
         )
     }
 
+    // --- the dormant payload capability ---------------------------------------------------
+
+    @Test
+    fun aClaimedChannelCarriesThePayloadScheduleExactlyOnce() {
+        val fixture = fixture()
+        val schedule = payloadSchedule(fixture)
+        val authority = requireNotNull(issue(fixture, payloadKeys = schedule))
+        val claimed = requireNotNull(authority.claim())
+        assertEquals(schedule, claimed.payload)
+        assertNull("the channel is handed out once", authority.claim())
+
+        // The capability itself is single use, independently of the channel.
+        val layer = requireNotNull(claimed.payload?.claimRecordLayer()) { "the first claim must produce a layer" }
+        assertNull("a payload capability is claimed exactly once", claimed.payload?.claimRecordLayer())
+        layer.close()
+        authority.close()
+    }
+
+    @Test
+    fun closingTheAuthorityBeforeAClaimDestroysThePayloadCapability() {
+        val fixture = fixture()
+        val schedule = payloadSchedule(fixture)
+        val authority = requireNotNull(issue(fixture, payloadKeys = schedule))
+        authority.close()
+        assertTrue("the parent's close reaches the schedule", schedule.isClosed())
+        assertNull("a destroyed schedule produces no layer", schedule.claimRecordLayer())
+    }
+
+    @Test
+    fun closingTheScheduleAfterAClaimClosesThePayloadLayer() {
+        val fixture = fixture()
+        val schedule = payloadSchedule(fixture)
+        val authority = requireNotNull(issue(fixture, payloadKeys = schedule))
+        val claimed = requireNotNull(authority.claim())
+        val layer = requireNotNull(claimed.payload?.claimRecordLayer())
+        assertTrue(layer.isOpen())
+        schedule.close()
+        assertFalse("closing the schedule closes the layer it issued", layer.isOpen())
+    }
+
+    @Test
+    fun payloadMaterialForAnotherSessionRoleOrTranscriptIsRefused() {
+        val fixture = fixture()
+        val elsewhere = SessionId("fedcba9876543210fedcba9876543210")
+        assertNull(
+            "payload material keyed to another session must not authenticate this one",
+            issue(fixture, payloadKeys = payloadSchedule(fixture, sessionId = elsewhere)),
+        )
+        assertNull(
+            "payload material for the other role must not authenticate this one",
+            issue(fixture, payloadKeys = payloadSchedule(fixture, role = SecurePeerRole.RESPONDER)),
+        )
+        assertNull(
+            "payload material over another transcript must not authenticate this one",
+            issue(
+                fixture,
+                payloadKeys = payloadSchedule(
+                    fixture,
+                    transcriptDigest = ByteArray(SecureSessionLimits.TRANSCRIPT_HASH_BYTES) { 0x5A },
+                ),
+            ),
+        )
+        assertNull(
+            "payload material from another pairing start must not authenticate this one",
+            issue(fixture, payloadKeys = payloadSchedule(fixture, pairStartedElapsedMillis = NOW + 1L)),
+        )
+        assertNull(
+            "a spent payload capability cannot be handed out again",
+            issue(fixture, payloadKeys = payloadSchedule(fixture).also { it.close() }),
+        )
+    }
+
+    @Test
+    fun thePayloadScheduleNeverPrintsOrComparesItsMaterial() {
+        val fixture = fixture()
+        val schedule = payloadSchedule(fixture)
+        val text = schedule.toString()
+        assertTrue("the schedule must be redacted: $text", text.contains("[redacted]"))
+        assertFalse("no key hex may appear: $text", text.contains(LanPayloadExporterLabels.C2S_KEY))
+        val layer = requireNotNull(schedule.claimRecordLayer())
+        assertTrue(layer.toString().contains("[redacted]"))
+        layer.close()
+        schedule.close()
+    }
+
     // --- fixture ------------------------------------------------------------------------
 
     private fun issue(
@@ -236,12 +323,20 @@ internal class AuthenticatedControlAuthorityTest {
         role: SecurePeerRole = SecurePeerRole.INITIATOR,
         pairStartedElapsedMillis: Long = NOW,
         nowElapsedMillis: Long = NOW,
+        payloadKeys: LanPayloadKeySchedule = payloadSchedule(
+            fixture,
+            sessionId = fixture.recordLayer.sessionId,
+            role = SecurePeerRole.INITIATOR,
+            transcriptDigest = fixture.transcriptDigest,
+            pairStartedElapsedMillis = NOW,
+        ),
     ): AuthenticatedControlAuthority? = AuthenticatedControlAuthority.issue(
         channel = fixture.channel,
         recordLayer = fixture.recordLayer,
         controlSession = fixture.controlSession,
         tlsProtocol = tlsProtocol,
         transcriptDigest = transcriptDigest,
+        payloadKeys = payloadKeys,
         attempt = attempt,
         pakeSession = pakeSession,
         localDecision = localDecision,
@@ -252,6 +347,30 @@ internal class AuthenticatedControlAuthorityTest {
     )
 
     private fun fixture(): Fixture = buildFixture()
+
+    /**
+     * Payload material bound to the fixture's session, role, transcript and pairing start.
+     *
+     * Built through the same factory the coordinator uses. The keys are fixed literal bytes because
+     * nothing here is testing key agreement -- the API 23 suite does that against a real exporter.
+     */
+    private fun payloadSchedule(
+        fixture: Fixture,
+        sessionId: SessionId = fixture.recordLayer.sessionId,
+        role: SecurePeerRole = SecurePeerRole.INITIATOR,
+        transcriptDigest: ByteArray = fixture.transcriptDigest,
+        pairStartedElapsedMillis: Long = NOW,
+    ): LanPayloadKeySchedule = LanPayloadKeySchedule.create(
+        sessionId = sessionId,
+        localRole = role,
+        transcriptDigest = transcriptDigest,
+        initiatorToResponderAead = JcaAesGcmAead(ByteArray(32) { 0x11 }),
+        initiatorToResponderIv = ByteArray(SecureSessionLimits.NONCE_BYTES_FOR_AES_GCM) { 0x21 },
+        responderToInitiatorAead = JcaAesGcmAead(ByteArray(32) { 0x12 }),
+        responderToInitiatorIv = ByteArray(SecureSessionLimits.NONCE_BYTES_FOR_AES_GCM) { 0x22 },
+        pairStartedElapsedMillis = pairStartedElapsedMillis,
+        clock = TestClock(),
+    )
 
     /** A fixture nobody shares, for the one test that settles the attempt. */
     private fun isolatedFixture(): Fixture = buildFixture()

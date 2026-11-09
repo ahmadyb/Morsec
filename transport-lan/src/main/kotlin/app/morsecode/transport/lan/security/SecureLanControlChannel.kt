@@ -17,6 +17,8 @@ import app.morsecode.core.transfer.session.SecureSessionLimits
 import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SessionFailure
 import app.morsecode.core.transfer.session.SessionFailureCode
+import app.morsecode.transport.lan.payload.LanPayloadKeySchedule
+import app.morsecode.transport.lan.payload.LanPayloadRecordLayer
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.IOException
@@ -47,6 +49,14 @@ internal class SecureLanControlChannel(
     private val role: SecurePeerRole,
     private val clock: MonotonicClock,
     private val expiresAtElapsedMillis: Long,
+    /**
+     * The dormant payload capability this channel owns.
+     *
+     * Null in the control-only fixtures, which is every test and every path in this slice except an
+     * authenticated production pairing. Holding it enables nothing: the socket below has no payload
+     * read or write site, and [claimPayloadLayer] has no caller in production.
+     */
+    private val payloadKeys: LanPayloadKeySchedule?,
     private val onTerminal: () -> Unit,
 ) : AutoCloseable {
     private val closed = AtomicBoolean(false)
@@ -250,7 +260,29 @@ internal class SecureLanControlChannel(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         recordLayer.close()
+        releasePayloadKeys()
         closeSocket()
+    }
+
+    /**
+     * The one way a later slice may take the payload capability out of this channel.
+     *
+     * Package-internal, single-use, and deliberately uncalled in production: the payload
+     * dispatcher that will own it does not exist, and adding a caller is the reviewable edit that
+     * Slice 2B makes. Until then this method is the seam, not a path.
+     *
+     * Returns null when the channel never carried payload material, is already closed, or the
+     * capability has already been claimed -- including by a failed attempt, because the schedule
+     * stays claimed once it has produced a layer.
+     */
+    internal fun claimPayloadLayer(): LanPayloadRecordLayer? {
+        if (closed.get()) return null
+        return payloadKeys?.claimRecordLayer()
+    }
+
+    private fun releasePayloadKeys() {
+        val keys = payloadKeys ?: return
+        runCatching { keys.close() }
     }
 
     private fun readExact(
@@ -310,6 +342,7 @@ internal class SecureLanControlChannel(
     ): SessionFailure {
         if (closed.compareAndSet(false, true)) {
             recordLayer.close()
+            releasePayloadKeys()
             closeSocket()
             try {
                 onTerminal()

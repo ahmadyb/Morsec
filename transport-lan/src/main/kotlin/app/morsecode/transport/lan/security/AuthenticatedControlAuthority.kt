@@ -20,13 +20,18 @@
  *   6. The record layer exists and its session id matches.
  *   7. The attempt has not already been settled, and the session has not expired.
  *
- * WHAT IT DELIBERATELY CANNOT DO
- *   It confers control only. It exposes no payload capability, it is not consulted by the payload
- *   gate, and that gate still refuses unconditionally. There is no method here that returns a
- *   payload sink, a chunk writer or a file channel, and no flag that could be read as permission for
- *   one. The type deliberately does not name those APIs even in comments, so the static verifier can
- *   keep treating any occurrence of them in this file as a defect rather than a documentation
- *   style choice.
+ * WHAT IT CARRIES, AND WHAT IT STILL CANNOT DO
+ *   It confers control. Since the payload slice it also *carries* the dormant payload key schedule,
+ *   bound to the same session, role, transcript and deadline, and hands it to the claimed channel
+ *   the way it hands over the record layer -- one owner at a time, once. Carrying material is not
+ *   conferring a capability: nothing here returns a payload sink, a chunk writer or a file channel,
+ *   the schedule cannot act without a record layer being claimed from it, and no production caller
+ *   claims one in this slice.
+ *
+ *   It is still not consulted by the payload gate, and that gate still refuses unconditionally. The
+ *   type deliberately does not name the transfer-facing APIs even in comments, so the static
+ *   verifier can keep treating any occurrence of them in this file as a defect rather than a
+ *   documentation style choice.
  *
  * ACCESSIBILITY
  *   The class is `internal` to `:transport-lan` -- the module that owns the channel, the record layer,
@@ -65,6 +70,7 @@ import app.morsecode.core.transfer.session.SecureApprovalDecision
 import app.morsecode.core.transfer.session.SecurePeerRole
 import app.morsecode.core.transfer.session.SecureRecordLayer
 import app.morsecode.core.transfer.session.SecureSessionLimits
+import app.morsecode.transport.lan.payload.LanPayloadKeySchedule
 import app.morsecode.transport.lan.security.jpake.ModpJpakeSession
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
@@ -82,9 +88,18 @@ internal class AuthenticatedControlAuthority private constructor(
     private val controlSession: NegotiatedSession,
     private val transcriptDigest: ByteArray,
     val expiryElapsedMillis: Long,
+    payloadKeys: LanPayloadKeySchedule,
 ) {
     private val claimed = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
+
+    /**
+     * The dormant payload capability, until [claim] transfers it.
+     *
+     * Null after the transfer: one owner at a time, and the claimed channel is the owner from then
+     * on. Nothing in this slice asks for it back.
+     */
+    private var payloadKeysValue: LanPayloadKeySchedule? = payloadKeys
 
     /** The control session this authority was issued for. It still reports control-only security. */
     val authenticatedControlSession: NegotiatedSession get() = controlSession
@@ -103,17 +118,23 @@ internal class AuthenticatedControlAuthority private constructor(
     fun claim(): AuthenticatedControlChannel? {
         if (closed.get()) return null
         if (!claimed.compareAndSet(false, true)) return null
+        val payload = payloadKeysValue
+        payloadKeysValue = null
         return AuthenticatedControlChannel.create(
             channel = channel,
             recordLayer = recordLayer,
             controlSession = controlSession,
             expiresAtElapsedMillis = expiryElapsedMillis,
+            payload = payload,
         )
     }
 
     /** Releases the channel. Idempotent, and safe to call before or after a claim. */
     fun close() {
         if (!closed.compareAndSet(false, true)) return
+        // Destroyed only while this authority still owns it. After a claim the channel does.
+        payloadKeysValue?.let { runCatching { it.close() } }
+        payloadKeysValue = null
         try {
             recordLayer.close()
         } catch (_: Exception) {
@@ -134,8 +155,9 @@ internal class AuthenticatedControlAuthority private constructor(
      * What a caller receives after claiming: the authenticated control channel.
      *
      * Nested inside the authority, with a private constructor, so the only way to hold one is to have
-     * claimed an [AuthenticatedControlAuthority]. The type is deliberately narrow -- it carries what
-     * the control-record exchange needs and names no payload capability.
+     * claimed an [AuthenticatedControlAuthority]. The type is deliberately narrow: it carries what
+     * the control-record exchange needs, and the payload capability it also carries is dormant --
+     * holding the channel does not claim it, and claiming it is a separate, single-use step.
      *
      * Kotlin does not let an outer class reach a nested class's private constructor, so construction
      * goes through [create], which is confined to this module. That is the same reachability an
@@ -147,6 +169,15 @@ internal class AuthenticatedControlAuthority private constructor(
         val recordLayer: SecureRecordLayer,
         val controlSession: NegotiatedSession,
         val expiresAtElapsedMillis: Long,
+        /**
+         * Payload material bound to this same session, role, transcript and deadline.
+         *
+         * Nullable only because the compiler requires it: `issue` refuses to build an authority
+         * without payload material, so a claimed channel produced by a real chain always carries
+         * one. It is a capability, not a permission -- holding it does not enable anything, and
+         * claiming it is what would.
+         */
+        val payload: LanPayloadKeySchedule?,
     ) {
         override fun toString(): String = "AuthenticatedControlChannel(ids=[redacted])"
 
@@ -156,11 +187,13 @@ internal class AuthenticatedControlAuthority private constructor(
                 recordLayer: SecureRecordLayer,
                 controlSession: NegotiatedSession,
                 expiresAtElapsedMillis: Long,
+                payload: LanPayloadKeySchedule?,
             ): AuthenticatedControlChannel = AuthenticatedControlChannel(
                 channel = channel,
                 recordLayer = recordLayer,
                 controlSession = controlSession,
                 expiresAtElapsedMillis = expiresAtElapsedMillis,
+                payload = payload,
             )
         }
     }
@@ -178,6 +211,9 @@ internal class AuthenticatedControlAuthority private constructor(
          * boolean anywhere in this signature, which is the point: a caller cannot say "the PAKE
          * succeeded". It can only supply a session in the CONFIRMED phase, and that phase is reachable
          * only by validating the partner's round-three tag.
+         *
+         * Payload material is evidence too: it is refused unless it was derived for this same
+         * session, the same role, the same transcript digest and the same pairing deadline.
          */
         fun issue(
             channel: Closeable,
@@ -192,6 +228,7 @@ internal class AuthenticatedControlAuthority private constructor(
             role: SecurePeerRole,
             pairStartedElapsedMillis: Long,
             nowElapsedMillis: Long,
+            payloadKeys: LanPayloadKeySchedule,
         ): AuthenticatedControlAuthority? {
             if (tlsProtocol != REQUIRED_TLS_PROTOCOL) return null
             if (transcriptDigest.size != TRANSCRIPT_DIGEST_BYTES) return null
@@ -201,6 +238,14 @@ internal class AuthenticatedControlAuthority private constructor(
             // for having done so.
             val expiry = saturatingAdd(pairStartedElapsedMillis, SecureSessionLimits.MAX_SESSION_LIFETIME_MILLIS)
             if (nowElapsedMillis >= expiry) return null
+            // The payload material must describe this exact connection. A schedule derived for
+            // another session, the other role, another transcript or a different pairing start
+            // would key a layer that looks correct and belongs somewhere else.
+            if (payloadKeys.sessionId != recordLayer.sessionId) return null
+            if (payloadKeys.localRole != role) return null
+            if (payloadKeys.expiryElapsedMillis != expiry) return null
+            if (!payloadKeys.bindsTranscript(transcriptDigest)) return null
+            if (payloadKeys.isClaimed() || payloadKeys.isClosed()) return null
             if (localDecision != SecureApprovalDecision.APPROVE) return null
             val approval = remoteApproval ?: return null
             if (approval.decision != PakeApprovalDecision.APPROVE) return null
@@ -245,6 +290,7 @@ internal class AuthenticatedControlAuthority private constructor(
                 controlSession = controlSession,
                 transcriptDigest = transcriptDigest.copyOf(),
                 expiryElapsedMillis = expiry,
+                payloadKeys = payloadKeys,
             )
         }
 

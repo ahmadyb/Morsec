@@ -116,6 +116,7 @@ public class ControlTimeoutClassificationTest {
                 role = SecurePeerRole.INITIATOR,
                 clock = clock,
                 expiresAtElapsedMillis = Long.MAX_VALUE,
+                payloadKeys = null,
                 onTerminal = { terminalRuns++ },
             )
             peerLayer = SecureRecordLayer(

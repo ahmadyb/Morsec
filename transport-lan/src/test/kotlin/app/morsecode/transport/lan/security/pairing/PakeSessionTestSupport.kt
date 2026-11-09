@@ -82,6 +82,8 @@ internal class DeterministicPairingChannel(
      *
      * That is what a key mismatch looks like without also breaking the PAKE: the transcript binds the
      * same way on both sides, so the refusal comes from the record layer and not from a PAKE tag.
+     * Payload record-key labels are included, so a salted channel mis-derives the payload schedule
+     * as well -- a real exporter failure would not stop at the control layer.
      */
     private val recordKeySalt: ByteArray = ByteArray(0),
 ) : PairingChannel {
@@ -98,16 +100,23 @@ internal class DeterministicPairingChannel(
         digest.update(label.toByteArray(Charsets.US_ASCII))
         digest.update(0)
         digest.update(context)
-        if (recordKeySalt.isNotEmpty() && label.startsWith("EXPORTER-MORSEC-C2S")) {
-            digest.update(recordKeySalt)
-        }
-        if (recordKeySalt.isNotEmpty() && label.startsWith("EXPORTER-MORSEC-S2C")) {
+        if (recordKeySalt.isNotEmpty() && label.isRecordKeyLabel()) {
             digest.update(recordKeySalt)
         }
         return digest.digest().copyOf(length)
     }
 
     override fun createAead(exportedKey: ByteArray): SecureRecordAead = JcaAesGcmAead(exportedKey)
+
+    /**
+     * True for every label that keys a record layer: the four control labels and the four payload
+     * labels. The pairing-proof and channel-binding labels are deliberately outside this set, so a
+     * salt can break keying without breaking the PAKE.
+     */
+    private fun String.isRecordKeyLabel(): Boolean =
+        startsWith("EXPORTER-MORSEC-C2S") ||
+            startsWith("EXPORTER-MORSEC-S2C") ||
+            startsWith("EXPORTER-MORSEC-PAYLOAD-")
 
     override fun exchangeIo(): PairingExchangeIo = exchange
 

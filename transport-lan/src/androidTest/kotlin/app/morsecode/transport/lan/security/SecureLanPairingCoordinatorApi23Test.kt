@@ -92,6 +92,7 @@ public class SecureLanPairingCoordinatorApi23Test {
                 role = SecurePeerRole.INITIATOR,
                 clock = api23Clock(),
                 expiresAtElapsedMillis = clientClaim.expiresAtElapsedMillis,
+                payloadKeys = null,
                 onTerminal = {},
             )
             serverChannel = SecureLanControlChannel(
@@ -100,6 +101,7 @@ public class SecureLanPairingCoordinatorApi23Test {
                 role = SecurePeerRole.RESPONDER,
                 clock = api23Clock(),
                 expiresAtElapsedMillis = peerClaim.expiresAtElapsedMillis,
+                payloadKeys = null,
                 onTerminal = {},
             )
             assertTrue(
@@ -351,6 +353,7 @@ public class SecureLanPairingCoordinatorApi23Test {
                 role = SecurePeerRole.INITIATOR,
                 clock = api23Clock(),
                 expiresAtElapsedMillis = claim.expiresAtElapsedMillis,
+                payloadKeys = null,
                 onTerminal = { terminalRuns++ },
             )
             clientChannel = channel
@@ -428,6 +431,7 @@ public class SecureLanPairingCoordinatorApi23Test {
                 role = SecurePeerRole.INITIATOR,
                 clock = api23Clock(),
                 expiresAtElapsedMillis = claim.expiresAtElapsedMillis,
+                payloadKeys = null,
                 onTerminal = {},
             )
             clientChannel = channel

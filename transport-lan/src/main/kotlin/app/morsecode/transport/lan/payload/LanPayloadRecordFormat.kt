@@ -109,6 +109,16 @@ internal object LanPayloadRecordFormat {
     /** Largest record this build will ever allocate: header plus maximal body plus tag. */
     const val MAX_PAYLOAD_RECORD_WIRE_BYTES: Int = 65_822
 
+    /**
+     * Records one direction of one payload session may carry before it must stop.
+     *
+     * The sequence field is a signed 64-bit value, so on its own it bounds nothing useful. This is
+     * the payload counterpart of the control layer's `MAX_RECORDS_PER_DIRECTION`: a number small
+     * enough that a nonce space is spent long before it is exhausted, and large enough that a 64 KiB
+     * profile can move 64 GiB in one direction. It is checked before a nonce is used, never after.
+     */
+    const val MAX_PAYLOAD_RECORDS_PER_DIRECTION: Long = 1_048_576L
+
     /** Offset of the magic bytes. */
     const val OFF_MAGIC: Int = 0
 

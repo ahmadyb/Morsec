@@ -1430,6 +1430,10 @@ public class LanPeerDiscoveryProvider(
                     role = role,
                     clock = clock,
                     expiresAtElapsedMillis = claimed.expiresAtElapsedMillis,
+                    // Payload material, when the chain produced it. The channel owns it and no
+                    // caller claims it in this slice; passing it is ownership transfer, not a
+                    // capability being handed to anyone.
+                    payloadKeys = claimed.payload,
                     onTerminal = { close() },
                 )
                 return true
@@ -1598,6 +1602,11 @@ public class LanPeerDiscoveryProvider(
                                         claimed = claimed,
                                     )
                                 ) {
+                                    // The claim transferred the payload material out of the
+                                    // authority, so the authority closing no longer reaches it.
+                                    // Installation failed, and nothing will ever own it: destroy it
+                                    // here rather than leaving keyed AEADs to the collector.
+                                    runCatching { claimed.payload?.close() }
                                     authority.close()
                                     closeSocket(pairingResult.secureSocket)
                                     completeFailure(SessionFailureCode.OPERATION_CANCELLED)

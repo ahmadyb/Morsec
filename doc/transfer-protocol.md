@@ -6,6 +6,9 @@ upgrade are documented separately in §11; neither changes the existing 44-byte
 transfer-frame format or adds a payload path. §13 specifies a proposed payload record
 layer for authenticated LAN sessions. It is framing only: code exists, nothing in
 production emits or accepts one of its records, and payload transfer remains disabled.
+§14 records the decisions the payload keys depend on and §15 the payload-key slice that is
+implemented and dormant: exporter labels, a key schedule, an in-memory AEAD record layer and
+the ownership chain that carries the schedule, with the gate still refusing every session.
 
 Everything described in the transfer-engine sections lives in `:core-transfer`, a
 **Kotlin/JVM** module: no Android class, Room, Hilt, coroutine, socket, system clock, or
@@ -647,12 +650,13 @@ record for pairing is **BC J-PAKE with `JPAKEPrimeOrderGroups.NIST_3072`**.
 **What exists.** `AuthenticatedControlAuthority` is `internal`, has a private constructor, and is
 obtainable only through `issue`, which takes concrete evidence — a `CONFIRMED` MODP session that is
 identity-equal to the attempt's, an `APPROVE` decision on both sides, a matching transcript, an
-unsettled attempt and a live clock (`AuthenticatedControlAuthority.kt:182` for `issue`, returning at `:248`). `claim()`
-(`:103`) hands out the channel exactly once through an `AtomicBoolean`; there is deliberately no
-test-only constructor. `LanPeerDiscoveryProvider.installSecureSession` (`:1416`) is the only place a
-claimed channel is installed, and it takes the claimed channel type rather than a socket plus a
-record layer, so "installed" and "authenticated" cannot drift apart. Separately,
-`PayloadTransferGate.evaluate` returns `Refused` for every session and `PayloadTransferDecision`
+unsettled attempt and a live clock (`AuthenticatedControlAuthority.kt:218` for `issue`, returning
+at `:287`). `claim()` (`:118`) hands out the channel exactly once through an `AtomicBoolean`; there
+is deliberately no test-only constructor. `LanPeerDiscoveryProvider.installSecureSession`
+(`:1416`) is the only place a claimed channel is installed, and it takes the claimed channel
+type rather than a socket plus a record layer, so "installed" and "authenticated" cannot drift
+apart. Separately, `PayloadTransferGate.evaluate` returns `Refused` for every session and
+`PayloadTransferDecision`
 has no other branch at all (`SessionContracts.kt:451`).
 
 **The constraint.** An authority that can be built from booleans, or copied, or read twice, is not
@@ -671,7 +675,7 @@ it — `PayloadTransferDecision` declares only `Refused`, no production source n
   current design deletes, a flag can be read twice and acted on twice, and it contradicts the
   documented control-only property that the Part B verification rests on.
 - **C — derive payload keys at claim time from the exporter.** Rejected on two facts: the exporter
-  belongs to `PairingChannel`, and `ConnectionRelease` (`PakeSessionCoordinator.kt:549`) closes the
+  belongs to `PairingChannel`, and `ConnectionRelease` (`PakeSessionCoordinator.kt:628`) closes the
   channel when the authority closes; and the transcript digest that is the exporter's context is
   wiped in `SecureLanPairingCoordinator` (`:331`–`:332`) when pairing ends. After pairing neither
   the exporter nor its context is alive.
@@ -734,99 +738,97 @@ searched.
 
 ### 14.3 Serialized writes, and control taking priority
 
-**What exists.** `send()` (`:59`) takes `writeLock`, and inside it: seal the record through
+**Corrected 2026-10-30.** The first version of this section recommended writing a sealed record in
+slices and interleaving a control record at a slice boundary. That was wrong, and the reason is
+worth keeping: a socket write is not a protocol boundary. MPL1 and MSR1 are length-prefixed records,
+and a peer's reader takes its frame boundary from the header it has already read. Bytes of another
+record inserted partway through a record leave the peer holding a header whose body is half one
+record and half another -- neither parseable, and no resynchronisation point that is not a guess.
+The rules below replace that recommendation and are the ones the writer slice must implement.
+
+**What exists.** `send()` (`:69`) takes `writeLock`, and inside it: seal the record through
 `SecureRecordLayer.protect` (`SecureRecordLayer.kt:214`), arm one absolute write deadline
 (`CONTROL_RECORD_WRITE_DEADLINE_MILLIS`, 5 s), write the whole frame, flush, and treat a write that
 finishes just as the deadline fires as a failure. `protect` is `@Synchronized` and increments
 `sendSequence` (`:253`) as part of sealing. A maximal MPL1 record is 65,822 bytes; the largest
-possible control record is 4,145 (33 + 4,096 + 16), so one payload record is sixteen times the largest
-control record.
+possible control record is 4,145 (33 + 4,096 + 16).
 
-**The constraint.** Two facts collide. First, sealing consumes a sequence number: once `protect`
-returns, the record exists in the sender's nonce space and re-sending it would reuse a nonce, so an
-abandoned record must terminate the connection rather than be retried. Second, a single 65,822-byte
-write against a peer that has stopped reading can block for the whole 5-second deadline, and a
-`SESSION_CLOSE` or `PING` queued behind it is late by exactly that long. The channel also documents
-that it has **no internal worker pool and creates no detached task** (`:37`–`:42`), so "add a writer
-thread with a priority queue" is not a small change; it deletes a stated property.
+**The rules, pinned now.**
 
-**Options.**
+- A complete MSR1 or MPL1 wire record is **contiguous** on the stream.
+- One shared write mutex is held from the first byte of a record until `writeFully` and `flush`
+  complete.
+- Control priority chooses **which complete record is written next**. It cannot interrupt a record
+  already being written.
+- If any sealed record is only partially written, the connection is **terminal**. The record is never
+  retried, because its sequence and nonce have already been consumed.
 
-- **A — one writer lock plus a bounded priority queue and a writer thread.** Rejected for now: it
-  introduces a thread and a queue into a component whose documentation promises neither, and a queue
-  is a place for a control record to wait — which is the problem, not the fix.
-- **B — one writer lock, sliced writes, resumable between slices.** Write the sealed record in
-  bounded pieces (for example 4 KiB), re-checking between pieces whether a control record is pending;
-  if one is, finish the payload piece boundary, write the control record, resume. Each lock hold is
-  bounded by a piece rather than by a record. A payload write that cannot finish inside its deadline
-  closes the socket, because the sequence was already consumed.
-- **C — payload writes never hold the lock; control writes preempt by closing the connection.**
-  Simplest failure mode, worst throughput, and it makes every concurrent control write a killed
-  transfer.
+The 64 KiB payload profile bounds worst-case control delay to at most one complete payload-record
+write. That is the trade the profile makes: the largest record a payload session can produce is
+65,822 bytes, so a control record can wait for one record's transmission and no longer. It does not
+wait for a file, a chunk loop, or a queue.
 
-**Recommendation: B**, with one sentence stated in the implementing slice and pinned by a test: *a
-sealed record that cannot be written to completion is a connection failure, never a retry.* Option C
-is the fallback if B's slicing turns out to complicate the deadline accounting more than it is worth.
+**Why the alternative was rejected.** Two facts collide. First, sealing consumes a sequence number:
+once `protect` returns, the record exists in the sender's nonce space and re-sending it would reuse a
+nonce, so an abandoned record must terminate the connection rather than be retried. Second, the
+channel documents that it has **no internal worker pool and creates no detached task**
+(`SecureLanControlChannel.kt:37`–`:42`), so "add a writer thread with a priority queue" deletes a
+stated property of a component the Part B evidence covers. Slicing a record into separately locked
+pieces was the third option and is the one that is now ruled out by the contiguity rule.
 
 **What would prove it.** A socket-pair test with a deliberately small peer receive buffer: write a
-maximal payload record while a control record is queued, assert the control record arrives inside the
-control write deadline, and assert that a peer which stops reading ends in a terminated connection
-with a timeout failure rather than in a stream the peer can still parse.
+maximal payload record while a control record is queued, assert the control record arrives after that
+one record completes and inside its own deadline, and assert that a peer which stops reading ends in
+a terminated connection with a timeout failure rather than in a stream it can still parse. A second
+test writes two records and asserts the bytes on the wire are exactly the concatenation of the two
+complete records, with no third interleaving.
 
 ### 14.4 Does the 300-second control session bound an active transfer
 
+**Corrected 2026-10-30.** The first version of this section recommended that the gate predict
+whether a transfer would fit in the remaining lifetime and refuse one that would not. That is
+removed: a sender cannot predict throughput, so the prediction would be a guess dressed as a
+precondition, and a refused transfer is worse than a transfer that stops cleanly.
+
 **What exists.** `MAX_SESSION_LIFETIME_MILLIS = 300_000` is measured from the **start of pairing**
-(`AuthenticatedControlAuthority.kt:202`), carried as `expiresAtElapsedMillis` into the channel
-(`SecureLanControlChannel.kt:49`), enforced on every send and every receive by `unavailableFailure()`
-(`:277`), and enforced independently by `LanPeerDiscoveryProvider.expireSecureSessionIfNeeded`
-(`:1403`), which closes the session at the same instant. The control layer's other ceilings —
-4,096 bytes per record, 4,096 records per direction, 16 MiB per direction
-(`SecureSessionContracts.kt:30`–`:32`) — are a control budget that the payload layer can neither use
-nor extend.
+(`AuthenticatedControlAuthority.kt:239`), carried as `expiresAtElapsedMillis` into the channel
+(`SecureLanControlChannel.kt:49`) and now also into the payload key schedule, enforced on every send
+and every receive by `unavailableFailure()` (`:309`), and enforced independently by
+`LanPeerDiscoveryProvider.expireSecureSessionIfNeeded` (`:1403`), which closes the session at the
+same instant.
 
-**The constraint.** 300 seconds is absolute, not an inactivity timer, and that is what makes it
-worth having. It is also short for a large file: at 5 MB/s, 300 s is 1.5 GB; at 200 KB/s it is 60 MB,
-minus the pairing time already spent. So either the bound is relaxed for payload, or a transfer must
-fit inside it, or a transfer must survive across sessions.
+**The policy, pinned now.**
 
-**Options.**
+- The sender does **not** predict whether a transfer will fit within the remaining session lifetime.
+- Transfer may continue only until the fixed session deadline.
+- At expiry it stops at a confirmed record/chunk boundary, persists the confirmed offset, closes the
+  session, and requires re-pairing before resume.
 
-- **A — extend the lifetime while a transfer is active, with a hard cap.** Rejected as a first
-  answer: it converts an absolute bound into a sliding one, and the sliding bound is the weaker
-  property.
-- **B — a transfer must complete inside the session's remaining lifetime.** The gate can consult the
-  remaining budget before the first record, refuse a transfer that cannot fit, and leave the rest to
-  resume (§5). Every existing property is kept; the effective file-size ceiling becomes a function of
-  measured throughput.
-- **C — the payload authority grants its own lifetime**, derived from declared size over a floor
-  throughput and capped, independent of the control lifetime, so the control channel may expire while
-  a payload continues. Cleanest long term; needs numbers nobody has measured on this stack.
+The boundary matters as much as the stop. A record that was sealed and not written is a terminal
+connection failure (§14.3), so the last usable position is the last offset a peer has confirmed, not
+the last offset this side sealed. Resume then begins from that confirmed offset under a new session,
+which is what §5 already specifies -- the session is the unit that expires, not the transfer.
 
-**Recommendation: B for the first slice that moves bytes**, and record C as the eventual answer if
-measured API 23 throughput makes B's ceiling embarrassing. Do not settle C now. The only real
-numbers this project has are the J-PAKE phase timings from the API 23 harness — median honest total
-around 689 ms — and they measure pairing, not transfer.
-
-**What would prove it.** A unit test on the budget arithmetic (remaining lifetime, bytes that fit at a
-declared floor throughput, refusal before the first record), and, once C is considered, a device
-measurement — not an estimate — of sustained throughput on the oldest supported device.
+**What would prove it.** A unit test on the stop arithmetic: given a deadline and a confirmed offset,
+the layer refuses the next protect at or after the deadline and reports the confirmed offset rather
+than an unconfirmed one. On the device, a transfer long enough to cross the deadline: the session
+closes at the deadline, the offset survives, and the resumed session starts there.
 
 ### 14.5 Exporter labels and key separation
 
 **What exists.** The control layer makes four exporter calls — `EXPORTER-MORSEC-C2S-KEY-V1`,
-`…-C2S-IV-V1`, `…-S2C-KEY-V1`, `…-S2C-IV-V1` (`PakeSessionCoordinator.kt:568`–`:571`) — each with the
-transcript digest as context (`:454`), through `EstablishedTlsSession.export`
+`…-C2S-IV-V1`, `…-S2C-KEY-V1`, `…-S2C-IV-V1` (`PakeSessionCoordinator.kt:459`–`:462`) — each with the
+transcript digest as context (`:531`–`:532`), through `EstablishedTlsSession.export`
 (`ConscryptSecureSessionEngine.kt:261`), which requires a context of exactly 32 bytes and a length of
-1 to 64. Keys are wiped as soon as the AEADs own them (`:434`–`:435`). One further output, the pairing
-proof value, is taken at `:178`.
+1 to 64. Keys are wiped as soon as the AEADs own them (`:465`–`:466`). One further output, the pairing
+proof value, is taken at `:195`.
 
-**A discrepancy worth recording, and not fixing here.** The four calls are at `:428`–`:431`. Two
-comments in the same file say *eight* exporter outputs — the header block at `:31`–`:34` and the KDoc
-above `deriveRecordLayer` at `:421`–`:425`. The count in the prose is wrong, not the code: four calls
-with four distinct labels is exactly what the separation argument needs. It is recorded rather than
-corrected because correcting a comment in a Part B file is a code change and this section changed
-none; whichever later slice next touches that file for its own reasons should make the number four
-while it is there.
+**A prose correction, with no protocol change.** The four calls are at `:459`–`:462`. Two comments
+in the same file used to say *eight* exporter outputs — the header block (`:32`) and the KDoc above
+`deriveRecordLayer` (`:453`–`:456`). The count was wrong and the code was right: four calls with
+four distinct labels is exactly what the separation argument needs. Both comments now say four. No
+key, label, byte or behaviour changed; the correction was made while this section's slice was
+already editing that file for its own reasons.
 
 **The constraint.** AAD does not create separation. Two AEADs keyed from the same key, with the same
 nonce base and overlapping sequence ranges, are a nonce reuse whether or not their headers differ —
@@ -863,7 +865,114 @@ work:
 3. **The reader and writer** (14.2, 14.3): the only slice that changes Part B components, and
    therefore the one that needs socket-backed tests over the composed TLS path before it is pushed.
 
+§15 records which of these the payload-key slice implemented: the exporter schedule, the dormant
+record layer and the ownership chain. The reader, the writer and the socket still do not exist.
+
 Nothing in this section authorizes any of it. `PayloadTransferGate` still refuses every session,
 `CURRENT_MILESTONE` is still 2 and `TRANSFER_ENGINE` is still gated: readiness is raised by an
 implementation that passes its tests, never by a document. No part of the framing in §13 is
 authenticated, reviewed or safe to rely on.
+
+---
+
+## 15. Payload keys and the dormant record layer (proposed, inert)
+
+**Status: implemented, dormant, and unreachable from any transfer path.** The payload slice added
+four exporter labels, one key schedule, one AEAD record layer and the ownership chain that carries
+the schedule from the authenticated pairing to the control channel. Nothing claims the schedule in
+production, no payload byte is written to a socket, `PayloadTransferGate` still refuses every
+session, `CURRENT_MILESTONE` is 2 and `TRANSFER_ENGINE` is still gated. Everything here is
+experimental, project-defined and not independently cryptographically reviewed; the owner accepted
+that risk on 2026-10-19, and the waiver establishes no security.
+
+### 15.1 The four payload exporter labels
+
+| Purpose | Label |
+| --- | --- |
+| payload key, initiator → responder | `EXPORTER-MORSEC-PAYLOAD-C2S-KEY-V1` |
+| payload nonce base, initiator → responder | `EXPORTER-MORSEC-PAYLOAD-C2S-IV-V1` |
+| payload key, responder → initiator | `EXPORTER-MORSEC-PAYLOAD-S2C-KEY-V1` |
+| payload nonce base, responder → initiator | `EXPORTER-MORSEC-PAYLOAD-S2C-IV-V1` |
+
+Four outputs rather than one split in two, for the reason §14.5 gives: a split output makes both
+halves share the exporter's internal chaining, and a shared output makes two purposes one key. The
+labels are pinned as ASCII bytes by a JVM test and read from the source by the boundary verifier,
+which also refuses a build where any of them equals a control, proof or channel-binding label.
+
+### 15.2 Where derivation happens, and what a failure does
+
+Inside `PakeSessionCoordinator`, after the control record layer is derived and before the authority
+is issued -- the last moment the exporter and the transcript digest are both alive, since the digest
+is wiped when the pairing function returns and the exporter dies with the connection. The context is
+the same transcript digest the control keys use, so neither layer can be derived for a different
+transcript by mistake.
+
+An export failure closes the pairing and issues no authority: the same refusal path as any other
+handshake failure, with no payload material left behind. There is **no on-demand exporter access
+after pairing**. A caller cannot ask for payload keys later, because there is nothing left to ask.
+
+### 15.3 The ownership chain
+
+```
+PakeSessionCoordinator derives the schedule
+        │
+        ▼
+AuthenticatedControlAuthority owns it, and refuses to issue unless
+it is bound to the same session, role, transcript and expiry
+        │  claim() — once
+        ▼
+AuthenticatedControlChannel carries it
+        │  installation
+        ▼
+SecureLanControlChannel owns it, unclaimed, and closes it with the channel
+```
+
+One chain, one owner at a time, and no sibling authority. The type has a private constructor, is
+`internal` to `:transport-lan`, is not serializable, is not a data class, exposes no key bytes, and
+prints only `[redacted]`. It can be claimed once; closing any parent before a claim destroys it;
+closing the control channel after a claim closes the layer that was claimed from it; and a failed
+installation destroys it explicitly, because the claim has already moved it out of the authority.
+`SecurePairingRunResult.Authenticated` still carries only the socket and the authority, so no
+independent payload grant appears in the pairing result.
+
+### 15.4 What the record layer guarantees
+
+`LanPayloadRecordLayer` is one MSC1 frame in, one complete MPL1 record out, and no socket anywhere.
+
+- **Cipher.** AES-128-GCM through the `SecureRecordAead` the locked provider supplies. The layer
+  takes an interface, so the JVM suite can drive it with the JDK provider and the device suite with
+  Conscrypt; it never names a provider itself.
+- **Associated data.** The whole 34-byte header: magic, version, session, direction, sequence,
+  declared length. Move a body to another sequence, direction or session and the tag fails.
+- **Keys and nonces.** The four labels above, per direction, with the payload's own sequence spaces
+  starting at zero. Payload and control never share a key, an IV or a counter.
+- **Framing before crypto.** Wrong magic, version, session, direction, sequence or length is refused
+  before any ciphertext is touched, and the refusal names which of them it was.
+- **Terminal failures.** A tag failure, an oversized plaintext, a spent record allowance, a clock
+  that went backwards or a passed deadline closes the layer permanently. There is no retry, because
+  a sequence that was consumed is consumed.
+- **Limits.** Body ceiling 65,772 bytes, wire ceiling 65,822, and `MAX_PAYLOAD_RECORDS_PER_DIRECTION
+  = 1,048,576` checked before a nonce is used -- 64 GiB in one direction at the 64 KiB profile.
+- **Bounded before allocation.** A record above the wire ceiling is refused before any field is
+  read or any array is sized from a declared length.
+- **One frame per record, not validated here.** The body is one MSC1 frame by contract. A zero-length
+  body is a structurally valid envelope and the frame decoder refuses it, which is where that
+  judgement belongs; the layer does not become a second frame parser.
+
+### 15.5 The rules that bind the writer slice
+
+The record-boundary rules are in §14.3 and are normative for the slice that adds socket I/O: one
+complete record is contiguous on the stream, one shared write mutex spans a record from first byte to
+completed flush, control priority chooses the next record rather than interrupting the current one,
+and a partially written record is a terminal connection failure. Nothing in this slice adds a writer
+thread, a reader thread, a dispatcher or a socket read/write site.
+
+### 15.6 What still does not exist
+
+- No socket ownership of payload bytes: `SecureLanControlChannel` has the same one read site and one
+  write site it had before, both control-only.
+- No dispatcher deciding between `MSR1` and `MPL1` on one stream (§14.2).
+- No writer serialization (§14.3), no transfer lifetime behaviour beyond the session deadline
+  (§14.4), no resume, chunk loop, storage, scheduler or UI.
+- No production claim of the payload capability. The seam exists and is uncalled.
+- No readiness change: `TRANSFER_ENGINE` is still unavailable and the gate still refuses.
