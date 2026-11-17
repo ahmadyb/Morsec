@@ -976,3 +976,104 @@ thread, a reader thread, a dispatcher or a socket read/write site.
   (§14.4), no resume, chunk loop, storage, scheduler or UI.
 - No production claim of the payload capability. The seam exists and is uncalled.
 - No readiness change: `TRANSFER_ENGINE` is still unavailable and the gate still refuses.
+
+---
+
+## 16. One TLS stream, two record formats: the multiplexer (proposed, inert)
+
+**Status: implemented as an inert unit, and unreachable from any production path.** This slice adds
+`LanMultiplexedRecordChannel`, one `internal` class in `:transport-lan` that owns one established
+TLS socket, one control record layer, one claimed payload record layer, one writer arbiter, one
+reader and one close lifecycle. Nothing constructs it outside the JVM and API 23 tests, the live
+provider still installs the control-only `SecureLanControlChannel`, `PayloadTransferGate` still
+refuses every session, `CURRENT_MILESTONE` is 2 and `TRANSFER_ENGINE` is still gated. No payload
+byte travels in a shipped app because of this section. Everything here is experimental,
+project-defined and not independently cryptographically reviewed; the owner's 2026-10-19 waiver
+records that risk and establishes no security.
+
+The rules below are normative for this class. They describe a shape that was built and tested; they
+do not describe a feature that is enabled.
+
+### 16.1 One reader owns the stream
+
+`receiveNext()` is the only method that reads the socket. There is no `receiveControl()` beside it
+and no `receivePayload()` beside it, because two such methods would each be entitled to consume the
+first bytes of the same record. Callers that arrive at once are serialised by one lock for the whole
+operation, so a record is never split between them: the second caller waits, then reads the next
+record whole. No other object holds the socket's input stream.
+
+### 16.2 Four bytes decide the format, and nothing else does
+
+The reader consumes exactly four bytes first. `MSR1` selects the control header and `MPL1` selects
+the payload header; anything else is terminal. There is no forward scan for a magic value, no
+resynchronisation after a bad byte and no discarding of a partial prefix, because a stream whose
+next four bytes match neither format has no boundary left to trust — and a scan would be a second,
+weaker parser deciding where records begin. Format parsing stays in the layer that owns it: the
+four bytes choose an arm, they do not authenticate anything.
+
+### 16.3 A record is indivisible on the wire
+
+Every write takes one arbiter. While it holds ownership a writer seals exactly one record, writes
+that whole record, flushes, and only then releases. `protect` is called after ownership is taken, so
+the layer's sequence order is the stream's byte order and two records can never interleave. There is
+no `writeFully` that another writer may join: the complete-record contiguity rule from §14.3 is the
+implementation, not a comment.
+
+### 16.4 Control priority, applied at record boundaries
+
+A control sender registers as waiting before it competes, and a payload sender may start only when
+no control sender is waiting. A record already being written is never interrupted: priority chooses
+the next record, not the current one. To keep continuous control traffic from starving payload, at
+most `MAX_CONSECUTIVE_CONTROL_WRITES = 32` consecutive control records may take the writer while a
+payload record waits; the payload record is then granted the next boundary. That bound is the
+documented anti-starvation policy.
+
+### 16.5 A spent nonce ends the connection, not the record
+
+Once `protect` returns, the sequence and the nonce are spent. A partial write, a write timeout, a
+socket exception or a layer refusal is therefore terminal: both record layers and the socket close
+once between them, through the same `close()`, and no later write is attempted. A writer that was
+waiting at that moment receives the same terminal failure as the writer that caused it — first cause
+is recorded and nothing overwrites it. This is why an MPL1 record is never retried and why a payload
+failure cannot leave the control half of the stream usable.
+
+### 16.6 Fifty milliseconds is a cancellation poll, not a lifetime
+
+A blocked read waits in slices of `MULTIPLEXED_POLL_SLICE_MILLIS = 50` so it can observe local
+cancellation. A slice that expires with bytes outstanding returns to the same loop with the same
+array and the same progress; it never discards a partial prefix, header or body. The absolute
+deadline supplied to `receiveNext` — by default the smaller of the control read budget and the
+session's remaining lifetime — is the operation's lifetime. Expiry at a boundary reports
+`TimedOut(streamUsable = true)` and leaves the channel open; expiry with any byte consumed reports
+`streamUsable = false` and closes it, because the next record's first byte is somewhere inside data
+the call already ate. Cancellation carries the same two states.
+
+### 16.7 Payload crosses the boundary as a frame, never as bytes
+
+The payload API is `sendPayloadFrame(TransferFrame)` and the inbound outcome is
+`Payload(frame: TransferFrame)`, encoded and decoded by `FrameCodec`. Exactly one MSC1 frame is
+decoded from each MPL1 plaintext with `FrameCodec.decodeSingle`, so an empty plaintext, a malformed
+frame and trailing bytes are all terminal. There is deliberately no `sendPayload(bytes: ByteArray)`:
+the class cannot be used to put arbitrary bytes on a payload path and call them a frame.
+
+### 16.8 Lifecycle: one close, and it reaches everything
+
+`close()` is idempotent and closes the control layer, the payload layer and the socket exactly once
+between them, in that order, then runs the caller's terminal hook. It never waits for the writer
+lock a blocked write holds; it closes the socket that releases the write instead. A reader blocked
+in `read` is released by the socket closing, and a writer waiting for ownership is released by the
+arbiter's condition. When the parent control session closes, it closes this channel; when this
+channel closes, both layers and the socket go with it. A payload-layer failure is terminal for same
+reason: there is one stream, and half of it cannot be trusted afterwards.
+
+### 16.9 What still does not exist
+
+- No production construction site: the provider, coordinator, authority, app, services, workers, UI
+  and storage adapters name neither the class nor its outcomes. The boundary verifier fails a build
+  that adds one.
+- No payload gate change and no readiness change. `PayloadTransferGate` refuses every session, the
+  milestone is 2 and `TRANSFER_ENGINE` is unavailable.
+- No storage adapter, chunk loop, resume, scheduler, notification or UI work. Those are the next
+  slice, and this section does not authorize them.
+- No claim that the multiplexer is production-ready, reviewed or safe to enable. It is inert code
+  with tests, and the gate remains the only thing that decides whether payload may start.

@@ -125,10 +125,11 @@ const PAYLOAD_PACKAGE_FILES = new Set([
 /**
  * The only production files outside the package that may name payload state.
  *
- * Three, and each for one reason. The coordinator derives the schedule; the authority owns and
- * binds it; the control channel holds it dormant. The discovery provider passes `claimed.payload`
- * without naming the type, so it does not appear here -- which is the shape wanted: the fewer files
- * that can name a capability, the fewer that can claim one.
+ * Four, and each for one reason. The coordinator derives the schedule; the authority owns and binds
+ * it; the control channel holds it dormant; the multiplexer frames it, and is the only file allowed
+ * to name both wire formats at once. The discovery provider passes `claimed.payload` without naming
+ * the type, so it does not appear here -- which is the shape wanted: the fewer files that can name a
+ * capability, the fewer that can claim one.
  */
 const PAYLOAD_COORDINATOR_PATH =
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/pairing/PakeSessionCoordinator.kt';
@@ -136,10 +137,17 @@ const PAYLOAD_AUTHORITY_PATH =
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/AuthenticatedControlAuthority.kt';
 const PAYLOAD_CONTROL_CHANNEL_PATH =
   'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/SecureLanControlChannel.kt';
+const MULTIPLEXER_PATH =
+  'transport-lan/src/main/kotlin/app/morsecode/transport/lan/security/LanMultiplexedRecordChannel.kt';
+const MULTIPLEXER_TEST_PATH =
+  'transport-lan/src/test/kotlin/app/morsecode/transport/lan/security/LanMultiplexedRecordChannelTest.kt';
+const MULTIPLEXER_API23_TEST_PATH =
+  'transport-lan/src/androidTest/kotlin/app/morsecode/transport/lan/security/LanMultiplexedRecordChannelApi23Test.kt';
 const PAYLOAD_CHAIN_FILES = new Set([
   PAYLOAD_COORDINATOR_PATH,
   PAYLOAD_AUTHORITY_PATH,
   PAYLOAD_CONTROL_CHANNEL_PATH,
+  MULTIPLEXER_PATH,
 ]);
 
 /** Every production file that may mention payload state at all. */
@@ -431,6 +439,99 @@ function digestMatches(bytes, expectedHex) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Multiplexer predicates.
+ *
+ * Each answers one structural question about the single file allowed to
+ * carry both wire formats. They are deliberately narrow: they look for
+ * the shape that makes the slice safe, not for style. A rewrite that
+ * keeps the property keeps the check; one that drops it does not.
+ * ------------------------------------------------------------------ */
+
+/** The file dispatches on both magics, one arm each, with no third path. */
+function multiplexerDispatchesOnBothMagics(text) {
+  return /matches\(prefix, MSR1_MAGIC\)/.test(text) &&
+    /matches\(prefix, LanPayloadRecordFormat\.magicBytes\(\)\)/.test(text);
+}
+
+/** One receive entry point, no competing control or payload reader, no forward scan. */
+function multiplexerHasSingleReader(text) {
+  const entries = (text.match(/fun receiveNext\s*\(/g) ?? []).length;
+  const competing = /fun receiveControl\s*\(|fun receivePayload\s*\(/.test(text);
+  const scan = /indexOf\(|resync\s*\(|findMagic|skipToMagic/.test(text);
+  return entries === 1 && !competing && !scan;
+}
+
+/** Exactly four bytes are consumed before the format is chosen. */
+function multiplexerReadsFourBytePrefix(text) {
+  return /const val PREFIX_BYTES: Int = 4\b/.test(text) &&
+    /val prefix = ByteArray\(PREFIX_BYTES\)/.test(text);
+}
+
+/** One write call per record, under the one arbiter, released in a finally block. */
+function multiplexerWritesWholeRecordsUnderOneLock(text) {
+  const writes = (text.match(/output\.write\(/g) ?? []).length;
+  return writes === 1 &&
+    /output\.flush\(\)/.test(text) &&
+    /releaseWriter\(\)/.test(text) &&
+    /acquireWriter\(control\)/.test(text) &&
+    /writeLock\.lock\(\)/.test(text) &&
+    /writeLock\.unlock\(\)/.test(text);
+}
+
+/** A sealed record is written once and never re-offered. */
+function multiplexerNeverRetriesAfterSeal(text) {
+  const writes = (text.match(/output\.write\(/g) ?? []).length;
+  return writes === 1 && !/fun retry|\.retry\(|retryWrite/.test(text);
+}
+
+/** No detached reader or writer: the class owns the socket, not a thread. */
+function multiplexerStartsNoThread(text) {
+  return !/\bThread\s*[({]|Executors\.|CoroutineScope|\.launch\s*\(|newSingleThreadExecutor/.test(text);
+}
+
+/** Control priority is bounded, so continuous control traffic cannot starve payload. */
+function multiplexerHasBoundedControlPriority(text) {
+  return /controlWaiting/.test(text) &&
+    /consecutiveControlWrites/.test(text) &&
+    /const val MAX_CONSECUTIVE_CONTROL_WRITES: Int = 32\b/.test(text);
+}
+
+/** Payload crosses the boundary only as a TransferFrame, never as raw bytes. */
+function multiplexerAcceptsTypedFramesOnly(text) {
+  return /fun sendPayloadFrame\(frame: TransferFrame\)/.test(text) &&
+    /class Payload\(val frame: TransferFrame\)/.test(text) &&
+    !/fun sendPayload\s*\(\s*\w+\s*:\s*ByteArray/.test(text) &&
+    !/sendPayloadBytes/.test(text);
+}
+
+/** Exactly one MSC1 frame is decoded out of one plaintext; trailing bytes are refused. */
+function multiplexerDecodesExactlyOneMsc1(text) {
+  return /FrameCodec\.decodeSingle\(/.test(text) && !/FrameCodec\.decode\(/.test(text);
+}
+
+/** The only diagnostic surface is a redacted toString. */
+function multiplexerDiagnosticsAreRedacted(text) {
+  return /override fun toString\(\): String =/.test(text) && /\[redacted\]/.test(text) &&
+    !/toString\(\).*sessionId/.test(text);
+}
+
+/** No logging, storage, file or URI API in the multiplexer. */
+function multiplexerTouchesNoStorageOrLogging(text) {
+  return !/\bLog\.[diwev]\s*\(|println\s*\(|SharedPreferences|\bRoom\b|\bDao\b|java\.io\.File|android\.net\.Uri/.test(text);
+}
+
+/** A construction site is any file other than the declaration's own file. */
+function constructsMultiplexer(path, text) {
+  return path !== MULTIPLEXER_PATH && /LanMultiplexedRecordChannel\s*\(/.test(text);
+}
+
+/** Only the transport module may name the multiplexer at all. */
+function outsideTransportNamesMultiplexer(path, text) {
+  return !path.startsWith('transport-lan/') &&
+    /LanMultiplexedRecordChannel|LanMultiplexedReceive|LanMultiplexedSend/.test(text);
+}
+
+/* ------------------------------------------------------------------ *
  * Self-test: mutate, then assert the guard caught it.
  * ------------------------------------------------------------------ */
 
@@ -639,6 +740,70 @@ function selfTest() {
     !milestonePinsHold('public const val CURRENT_MILESTONE: Int = 3\nTRANSFER_ENGINE("transfer_engine", 5)'));
   check('self-test: an enabled transfer engine is caught',
     !milestonePinsHold('public const val CURRENT_MILESTONE: Int = 2\nTRANSFER_ENGINE("transfer_engine", 2)'));
+
+  const muxGood = 'matches(prefix, MSR1_MAGIC)\n' +
+    'matches(prefix, LanPayloadRecordFormat.magicBytes())\n' +
+    'const val PREFIX_BYTES: Int = 4\nval prefix = ByteArray(PREFIX_BYTES)\n' +
+    'fun receiveNext(): Int = 0\nsynchronized(readLock) { }\n' +
+    'fun sendPayloadFrame(frame: TransferFrame): Int = 0\n' +
+    'class Payload(val frame: TransferFrame)\n' +
+    'FrameCodec.decodeSingle(body)\n' +
+    'output.write(wire)\noutput.flush()\nreleaseWriter()\nacquireWriter(control)\n' +
+    'writeLock.lock()\nwriteLock.unlock()\n' +
+    'controlWaiting + consecutiveControlWrites\n' +
+    'const val MAX_CONSECUTIVE_CONTROL_WRITES: Int = 32\n' +
+    'override fun toString(): String = "records=[redacted]"\n';
+  check('self-test: the multiplexer shape passes every predicate',
+    multiplexerDispatchesOnBothMagics(muxGood) &&
+    multiplexerHasSingleReader(muxGood) &&
+    multiplexerReadsFourBytePrefix(muxGood) &&
+    multiplexerWritesWholeRecordsUnderOneLock(muxGood) &&
+    multiplexerNeverRetriesAfterSeal(muxGood) &&
+    multiplexerStartsNoThread(muxGood) &&
+    multiplexerHasBoundedControlPriority(muxGood) &&
+    multiplexerAcceptsTypedFramesOnly(muxGood) &&
+    multiplexerDecodesExactlyOneMsc1(muxGood) &&
+    multiplexerDiagnosticsAreRedacted(muxGood) &&
+    multiplexerTouchesNoStorageOrLogging(muxGood));
+  check('self-test: a dispatcher with only the control arm is caught',
+    !multiplexerDispatchesOnBothMagics('matches(prefix, MSR1_MAGIC)\n'));
+  check('self-test: a second reader is caught',
+    !multiplexerHasSingleReader('fun receiveNext(): Int = 0\nfun receivePayload(): Int = 0\n'));
+  check('self-test: a forward magic scan is caught',
+    !multiplexerHasSingleReader('fun receiveNext(): Int = 0\nval i = prefix.indexOf(0x4D)\n'));
+  check('self-test: a two-byte prefix is caught',
+    !multiplexerReadsFourBytePrefix('const val PREFIX_BYTES: Int = 2\nval prefix = ByteArray(PREFIX_BYTES)\n'));
+  check('self-test: a retried write is caught',
+    !multiplexerNeverRetriesAfterSeal('output.write(wire)\noutput.write(wire)\n'));
+  check('self-test: a write outside the lock is caught',
+    !multiplexerWritesWholeRecordsUnderOneLock('output.write(wire)\noutput.flush()\n'));
+  check('self-test: a detached reader thread is caught',
+    !multiplexerStartsNoThread('Thread { read() }.start()\n'));
+  check('self-test: an executors-based reader is caught',
+    !multiplexerStartsNoThread('Executors.newSingleThreadExecutor()\n'));
+  check('self-test: unbounded control priority is caught',
+    !multiplexerHasBoundedControlPriority('controlWaiting\n'));
+  check('self-test: an arbitrary-byte payload send is caught',
+    !multiplexerAcceptsTypedFramesOnly('fun sendPayload(frame: TransferFrame) = Unit\n' +
+      'fun sendPayloadRaw(bytes: ByteArray) = Unit\n'));
+  check('self-test: a byte-array payload API is caught',
+    !multiplexerAcceptsTypedFramesOnly('fun sendPayloadFrame(frame: TransferFrame)\n' +
+      'class Payload(val frame: TransferFrame)\nfun sendPayloadBytes(b: ByteArray) = Unit\n'));
+  check('self-test: a stream-decoding payload path is caught',
+    !multiplexerDecodesExactlyOneMsc1('FrameCodec.decode(body)\n'));
+  check('self-test: an unredacted toString is caught',
+    !multiplexerDiagnosticsAreRedacted('override fun toString(): String = "sid=$sessionId"\n'));
+  check('self-test: logging inside the multiplexer is caught',
+    !multiplexerTouchesNoStorageOrLogging('Log.i("mux", "x")\n'));
+  check('self-test: a production construction site is caught',
+    constructsMultiplexer('transport-lan/src/main/kotlin/app/morsecode/transport/lan/LanPeerDiscoveryProvider.kt',
+      'val m = LanMultiplexedRecordChannel(s, c, p, r, k, e)\n'));
+  check('self-test: the declaration file is not a construction site',
+    !constructsMultiplexer(MULTIPLEXER_PATH, 'internal class LanMultiplexedRecordChannel(\n'));
+  check('self-test: an app reference to the multiplexer is caught',
+    outsideTransportNamesMultiplexer('app/src/main/kotlin/Ui.kt', 'val m: LanMultiplexedReceive\n'));
+  check('self-test: a transport reference is allowed',
+    !outsideTransportNamesMultiplexer(MULTIPLEXER_PATH, 'LanMultiplexedReceive\n'));
 
   check('self-test: a digest matches its own bytes',
     digestMatches(Buffer.from('payload'), createHash('sha256').update('payload').digest('hex')));
@@ -950,18 +1115,18 @@ function verify() {
     .filter((f) => PAYLOAD_WIRE_TOKEN.test(f.text))
     .map((f) => f.path);
   check(
-    'no file outside the payload package references the MPL1 wire format',
-    wireFiles.length === 0,
-    wireFiles.join(', '),
+    'the multiplexer is the only file outside the payload package that names the MPL1 format',
+    wireFiles.length === 1 && wireFiles[0] === MULTIPLEXER_PATH,
+    wireFiles.join(', ') || 'none',
   );
   const socketFiles = production
     .filter((f) => /\bSocket\b|SSLSocket|getInputStream|getOutputStream/.test(f.text))
     .filter((f) => PAYLOAD_WIRE_TOKEN.test(f.text))
     .map((f) => f.path);
   check(
-    'no socket-bearing file parses or produces an MPL1 record',
-    socketFiles.length === 0,
-    socketFiles.join(', '),
+    'the multiplexer is the only socket-bearing file that names the MPL1 record',
+    socketFiles.length === 1 && socketFiles[0] === MULTIPLEXER_PATH,
+    socketFiles.join(', ') || 'none',
   );
   const storageWire = production
     .filter((f) => /^(core-storage|core-data|app)\//.test(f.path))
@@ -1000,6 +1165,74 @@ function verify() {
     'utf8',
   );
   check('the milestone and the transfer-engine gate are unmoved', milestonePinsHold(readiness));
+
+  // 6d. The multiplexer is one inert file: the only dispatcher of both magics, the only owner of
+  //     the shared stream, and reachable from no production caller at all.
+  const muxSource = readFileSync(join(ROOT, MULTIPLEXER_PATH), 'utf8');
+  const dispatchers = production
+    .filter((f) => multiplexerDispatchesOnBothMagics(f.text))
+    .map((f) => f.path);
+  check(
+    'exactly one production file dispatches on both the MSR1 and MPL1 magics',
+    dispatchers.length === 1 && dispatchers[0] === MULTIPLEXER_PATH,
+    dispatchers.join(', ') || 'none',
+  );
+  check(
+    'the multiplexer is internal and pinned to the control codec magic',
+    /^internal class LanMultiplexedRecordChannel\(/m.test(muxSource) &&
+      /byteArrayOf\(0x4D, 0x53, 0x52, 0x31\)/.test(muxSource),
+  );
+  check('the multiplexer has one receive entry point and no forward scan',
+    multiplexerHasSingleReader(muxSource));
+  check('the multiplexer consumes exactly four bytes before choosing a format',
+    multiplexerReadsFourBytePrefix(muxSource));
+  check('the multiplexer writes each record whole under the one arbiter',
+    multiplexerWritesWholeRecordsUnderOneLock(muxSource));
+  check('the multiplexer never retries a record once its nonce is spent',
+    multiplexerNeverRetriesAfterSeal(muxSource));
+  check('the multiplexer starts no detached reader or writer thread',
+    multiplexerStartsNoThread(muxSource));
+  check('control priority is bounded by a stated consecutive-write limit',
+    multiplexerHasBoundedControlPriority(muxSource));
+  check('payload crosses the boundary only as a typed TransferFrame',
+    multiplexerAcceptsTypedFramesOnly(muxSource));
+  check('exactly one MSC1 frame is decoded from one payload plaintext',
+    multiplexerDecodesExactlyOneMsc1(muxSource));
+  check('the multiplexer logs and persists nothing and redacts its diagnostics',
+    multiplexerTouchesNoStorageOrLogging(muxSource) && multiplexerDiagnosticsAreRedacted(muxSource));
+
+  const multiplexerConstructions = production
+    .filter((f) => constructsMultiplexer(f.path, f.text))
+    .map((f) => f.path);
+  check(
+    'no production file constructs the multiplexer',
+    multiplexerConstructions.length === 0,
+    multiplexerConstructions.join(', ') || 'no construction site',
+  );
+  const outsideTransport = production
+    .filter((f) => outsideTransportNamesMultiplexer(f.path, f.text))
+    .map((f) => f.path);
+  check(
+    'no app, storage, service, worker or UI source names the multiplexer',
+    outsideTransport.length === 0,
+    outsideTransport.join(', ') || 'transport only',
+  );
+  const providerSource = readFileSync(join(ROOT, PROVIDER), 'utf8');
+  check(
+    'the live provider still installs the control-only channel',
+    !/LanMultiplexedRecordChannel/.test(providerSource) &&
+      /SecureLanControlChannel/.test(providerSource),
+  );
+  check(
+    'the JVM and API 23 multiplexer suites are present at their exact paths',
+    existsSync(join(ROOT, MULTIPLEXER_TEST_PATH)) &&
+      existsSync(join(ROOT, MULTIPLEXER_API23_TEST_PATH)),
+  );
+  check(
+    'the JVM suite covers the slice-by-slice prefix regression',
+    readFileSync(join(ROOT, MULTIPLEXER_TEST_PATH), 'utf8')
+      .includes('aPartiallyReadPrefixSurvivesThePollingSlice'),
+  );
 
   const schemaProblems = ROOM_SCHEMA_DIGESTS
     .filter(([path, digest]) =>
