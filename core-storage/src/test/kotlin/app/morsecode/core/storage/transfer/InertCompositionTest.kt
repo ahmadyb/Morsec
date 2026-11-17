@@ -1,5 +1,6 @@
 package app.morsecode.core.storage.transfer
 
+import app.morsecode.core.transfer.identity.RelativeTransferPath
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Digest
 import java.io.File
@@ -15,6 +16,9 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
  * The whole storage bridge, end to end, on real files with a real fsync.
@@ -38,6 +42,8 @@ import org.junit.Test
  * The transfer is deliberately interrupted and resumed once. A composition that only works for a
  * transfer that never breaks would not be evidence of much.
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class InertCompositionTest {
 
     private val transferId = TransferId("transfer-compose")
@@ -59,7 +65,15 @@ class InertCompositionTest {
         return content
     }
 
-    private fun source(): FileSource = FileSource(sourceFile)
+    private fun source(): FileBackedTransferSource = FileBackedTransferSource(
+        key = TransferSourceKey("private:payload"),
+        uri = android.net.Uri.parse("content://private/payload.bin"),
+        displayName = "payload.bin",
+        relativePath = RelativeTransferPath("payload.bin"),
+        mimeType = "application/octet-stream",
+        file = sourceFile,
+        permissionGate = { true },
+    )
 
     private fun sink(): FileSink = FileSink(partialFile)
 
@@ -264,60 +278,6 @@ class InertCompositionTest {
     }
 
     // --- adapters --------------------------------------------------------------------------------
-
-    /** A seekable file source, positioned by offset. */
-    private class FileSource(private val file: File) : TransferSource {
-        override val key: TransferSourceKey = TransferSourceKey("private:payload")
-        override val uri: android.net.Uri = android.net.Uri.parse("content://private/payload.bin")
-        override val displayName: String = "payload.bin"
-        override val relativePath: app.morsecode.core.transfer.identity.RelativeTransferPath =
-            app.morsecode.core.transfer.identity.RelativeTransferPath("payload.bin")
-        override val mimeType: String = "application/octet-stream"
-        override val sizeBytes: Long get() = file.length()
-        override val lastModifiedEpochMillis: Long? get() = file.lastModified().takeIf { it > 0L }
-        override val isSeekable: Boolean get() = true
-
-        override fun fingerprint(): SourceFingerprintResult = SourceFingerprintResult.Available(
-            SourceFingerprint(
-                sizeBytes = file.length(),
-                lastModifiedEpochMillis = lastModifiedEpochMillis,
-                contentId = key.value,
-            ),
-        )
-
-        override fun openAt(offset: Long): SourceOpenResult {
-            if (offset < 0L) {
-                return SourceOpenResult.Failed(TransferStorageError.StateConflict("negative_offset"))
-            }
-            if (offset > file.length()) {
-                return SourceOpenResult.Failed(TransferStorageError.StateConflict("offset_past_end"))
-            }
-            val random = RandomAccessFile(file, "r")
-            random.seek(offset)
-            return SourceOpenResult.Opened(Handle(random, offset), offset)
-        }
-
-        private class Handle(private val random: RandomAccessFile, private val start: Long) : SourceHandle {
-            private var closed = false
-            override val isSeekable: Boolean get() = true
-            override val openedAtOffset: Long get() = start
-            override var bytesRead: Long = 0L
-                private set
-            override val position: Long get() = random.filePointer
-
-            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-                val count = random.read(buffer, offset, length)
-                if (count > 0) bytesRead += count
-                return count
-            }
-
-            override fun close() {
-                if (closed) return
-                closed = true
-                random.close()
-            }
-        }
-    }
 
     /** A positional file sink that really fsyncs. */
     private class FileSink(private val file: File) : PartialSink, Closeable {
