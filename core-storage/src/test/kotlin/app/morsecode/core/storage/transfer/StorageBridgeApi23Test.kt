@@ -419,7 +419,7 @@ class StorageBridgeApi23Test {
             selectionArgs: Array<out String>?,
             sortOrder: String?,
         ): Cursor? {
-            val id = uri.lastPathSegment ?: return null
+            val id = documentIdOf(uri) ?: return null
             val columns = projection ?: COLUMNS
             return MatrixCursor(columns).apply {
                 addRow(
@@ -456,9 +456,20 @@ class StorageBridgeApi23Test {
         ): ParcelFileDescriptor? {
             if (denyWithSecurityException) throw SecurityException("grant revoked")
             if (failOpenWithIo) throw IOException("provider is unwell")
-            val id = uri.lastPathSegment ?: throw FileNotFoundException("no id")
+            val id = documentIdOf(uri) ?: throw FileNotFoundException("no id")
             val file = files[id] ?: throw FileNotFoundException("no file")
             return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
+
+        /**
+         * The document id is everything after `/document/`, not the last path segment: a document id
+         * is allowed to contain slashes (`primary:Download/clip.mp4`), and taking the last segment
+         * would look up the wrong row.
+         */
+        private fun documentIdOf(uri: Uri): String? {
+            val text = uri.toString()
+            if (text.contains("/document/")) return text.substringAfter("/document/")
+            return uri.lastPathSegment
         }
 
         companion object {
