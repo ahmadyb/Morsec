@@ -252,9 +252,15 @@ Full audit: `FilenameAndPathAuditTest` in `core-storage/src/test`. Summary of wh
   file byte appears in it.
 - `TransferStorageError.toString()` is `category:safeMessage` and nothing else. The free-form
   `diagnostic` field is not part of it.
-- Provider exceptions are converted at the adapter edge into typed domain failures. A raw provider
-  message never crosses into the domain port; where one is kept for a developer, it is in
-  `diagnostic`, which is not logged, not persisted and not printed.
+- Provider exceptions are converted at the adapter edge into typed domain failures — on open, on
+  positioning, on publication and on cleanup. A raw provider message never crosses into the domain
+  port; where one is kept for a developer, it is in `diagnostic`, which is not logged, not persisted
+  and not printed.
+- One path is different and is recorded rather than smoothed over: `SourceHandle.read` returns a
+  byte count, so it has no way to return a typed failure. An I/O fault in the middle of a read
+  therefore surfaces as an `IOException` from `read`, and the caller converts it with
+  `StorageFailureClassifier` before it reaches the domain. That is the seam Slice 4's runtime will
+  own; this slice does not widen the existing port to change it.
 - No file bytes are retained after an operation completes, and no caller chunk buffer is cached or
   stored. Ownership of the chunk array stays with the caller; the sink copies what it stores, which
   the retention test asserts by mutating the caller's buffer afterwards and re-reading the sink.
@@ -267,6 +273,36 @@ copies, a moving garbage collector, or the kernel's page cache, and an immutable
 cannot be wiped at all. This document therefore claims **no** erasure property. The requirement the
 code does meet is narrower and checkable: no reference is retained, nothing is written to a log, and
 every buffer is bounded.
+
+## What the API 23 suite covers
+
+`StorageBridgeApi23Test` runs under Robolectric with `sdk = [23]` against a real `ContentProvider`
+behind a real `ContentResolver`, handing out real `ParcelFileDescriptor`s over files on disk.
+
+| Requirement | Where it is covered |
+| --- | --- |
+| seekable `content://` | `StorageBridgeApi23Test` |
+| non-seekable `content://` | `StorageBridgeApi23Test`, through the `SeekabilityProbe` seam |
+| unknown-length descriptor | `StorageBridgeApi23Test`, through the same seam |
+| empty file | `StorageBridgeApi23Test` |
+| multi-chunk read | `StorageBridgeApi23Test` |
+| resume from a nonzero offset | `StorageBridgeApi23Test` and `SourceResumePolicyTest` |
+| permission revoked before open | `StorageBridgeApi23Test` and `SourceResumePolicyTest` |
+| permission revoked during an operation | not reproducible: a descriptor already handed out keeps working after the grant is withdrawn |
+| provider throws during a read | not reproducible with a real descriptor; the path is `SourceHandle.read` and is described above |
+| provider throws during a write | not reproducible without filling a disk; the classifier path is pinned instead |
+| bounded failing sink as disk-full | `StorageBridgeApi23Test` (classifier) and `DestinationSessionTest` (sink that fails) |
+| app-private partial | `StorageBridgeApi23Test` and `AppPrivatePartialTest` |
+| SAF commit, rename fallback and copy | the existing `SafCommitOrderTest`, `SafCommitRecoveryTest`, `SafRenameHistoryTest` and `SafCommitDestinationClosureTest` suites |
+| Unicode filenames and duplicate collision | `FilenameAndPathAuditTest` and `StorageBridgeApi23Test` |
+| cancellation and descriptor cleanup | `StorageBridgeApi23Test`, `DestinationSessionTest`, `DescriptorOwnershipTest` |
+| process-local restoration invocation | the existing `TransferRestorationCoordinatorTest` and `TransferRestorationRoomReconstructionTest` |
+| no network or socket activity | the static checks in `tools/verify/jpake-production-boundary.mjs`; no socket type is reachable from the storage ports |
+
+The two entries marked "not reproducible" are honest gaps, not passes: a real provider that fails
+mid-read cannot be built without a custom descriptor implementation, and a real write failure cannot
+be produced without exhausting a disk. The classification of both is pinned separately, and the
+runtime that will own them arrives with Slice 4.
 
 ## Inert composition
 
