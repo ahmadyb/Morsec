@@ -143,6 +143,29 @@ const MULTIPLEXER_TEST_PATH =
   'transport-lan/src/test/kotlin/app/morsecode/transport/lan/security/LanMultiplexedRecordChannelTest.kt';
 const MULTIPLEXER_API23_TEST_PATH =
   'transport-lan/src/androidTest/kotlin/app/morsecode/transport/lan/security/LanMultiplexedRecordChannelApi23Test.kt';
+
+const STORAGE_PACKAGE = 'core-storage/src/main/kotlin/app/morsecode/core/storage/transfer/';
+const STORAGE_SESSION_PATH = `${STORAGE_PACKAGE}DestinationSession.kt`;
+const STORAGE_CAPACITY_PATH = `${STORAGE_PACKAGE}DestinationCapacity.kt`;
+const STORAGE_BRIDGE_DOC_PATH = 'doc/transfer-storage-bridge.md';
+const STORAGE_TEST_PATHS = [
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/DestinationSessionTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/SourceResumePolicyTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/FilenameAndPathAuditTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/DestinationCapacityTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/InertCompositionTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/StorageBridgeApi23Test.kt',
+];
+const VERBATIM_URI_POLICY =
+  'Content URIs and required file metadata may be persisted only in the\n' +
+  'dedicated transfer-state database fields required for restoration.\n' +
+  '\n' +
+  'They must not appear in logs, crash reports, exception messages,\n' +
+  'diagnostic summaries, analytics, or generic key/value metadata.\n' +
+  '\n' +
+  'File bytes may exist only in the selected source, bounded in-memory\n' +
+  'buffers, and controlled partial/final destinations. They must never be\n' +
+  'written to logs, crash reports, or generic diagnostic storage.';
 const PAYLOAD_CHAIN_FILES = new Set([
   PAYLOAD_COORDINATOR_PATH,
   PAYLOAD_AUTHORITY_PATH,
@@ -531,6 +554,111 @@ function outsideTransportNamesMultiplexer(path, text) {
     /LanMultiplexedRecordChannel|LanMultiplexedReceive|LanMultiplexedSend/.test(text);
 }
 
+
+/* ------------------------------------------------------------------ *
+ * Storage bridge predicates (slice 3)
+ * ------------------------------------------------------------------ */
+
+/**
+ * A storage port must not know that a transport exists.
+ *
+ * The tokens are specific on purpose. "payload" alone appears in ordinary
+ * storage prose; the framing magics, the cipher suite, the multiplexer and the
+ * payload authority do not.
+ */
+const STORAGE_TRANSPORT_TOKENS =
+  /MPL1|MSR1|LanMultiplexedRecordChannel|LanPayload|PayloadRecordLayer|java[.]net[.]Socket|javax[.]net[.]ssl|SSLSocket|[EJ]-?PAKE|TransferEngine|PayloadAuthority/i;
+
+/** Comments may explain what the port avoids; only code can violate the rule. */
+function stripComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+function storagePortMentionsTransport(text) {
+  return STORAGE_TRANSPORT_TOKENS.test(stripComments(text));
+}
+
+/** The two new port files must stay free of Android, Uri, descriptor and Room types. */
+function storagePortUsesPlatformTypes(text) {
+  const code = stripComments(text);
+  return /^[ \t]*import[ \t]+(android|androidx)[.]/m.test(code) ||
+    /import[ \t]+java[.]io[.]File/.test(code) ||
+    /ContentResolver/.test(code) ||
+    /ParcelFileDescriptor/.test(code) ||
+    /(^|[^A-Za-z0-9_.])Uri([^A-Za-z0-9_]|$)/.test(code) ||
+    /androidx[.]room/.test(code);
+}
+
+/**
+ * A storage port that can write to a log is a leak waiting for a provider message.
+ *
+ * The session is allowed to own no logging surface at all, and its only string
+ * form must be redacted.
+ */
+function storagePortRedactsDiagnostics(text) {
+  const code = stripComments(text);
+  if (/Log[.][diwev][ \t]*[(]|println[ \t]*[(]|printStackTrace|SharedPreferences/.test(code)) {
+    return false;
+  }
+  // A type with no string form has nothing to leak; a type with one must redact it.
+  return /override fun toString[(][)]/.test(code) ? /\[redacted\]/.test(code) : true;
+}
+
+/**
+ * The sequential-write gate has to be visible in the source, not merely claimed in a document.
+ */
+function storageSessionEnforcesSequentialWrite(text) {
+  return /expectedFrontier/.test(text) &&
+    /sink[.]length[(][)]/.test(text) &&
+    /SequentialRejection[.]OVERLAP/.test(text) &&
+    /SequentialRejection[.]HOLE/.test(text) &&
+    /SequentialRejection[.]REWIND/.test(text) &&
+    /SequentialRejection[.]AFTER_VERIFICATION/.test(text) &&
+    /SequentialRejection[.]AFTER_COMMIT/.test(text) &&
+    /SequentialRejection[.]AFTER_ABORT/.test(text);
+}
+
+/** Publication happens once, after verification, and a duplicate commit does not republish. */
+function storageSessionCommitsOnce(text) {
+  return /CommitResult[.]Duplicate/.test(text) &&
+    /AbortResult[.]AlreadyAborted/.test(text) &&
+    /SessionVerification[.]Mismatched/.test(text);
+}
+
+/**
+ * The URI policy has to be present verbatim.
+ *
+ * This is a byte comparison rather than a keyword check because the owner
+ * supplied exact wording and a paraphrase is a different policy.
+ */
+function storageDocCarriesVerbatimPolicy(text) {
+  return text.includes(VERBATIM_URI_POLICY);
+}
+
+/**
+ * Room's URI columns are restoration state and belong to the core-data layer.
+ */
+function uriColumnOutsideCoreData(path, text) {
+  return !path.startsWith('core-data/') &&
+    /(^|[^A-Za-z0-9_])(source_uri|target_dir|result_uri)([^A-Za-z0-9_]|$)/.test(text);
+}
+
+/** No production file composes the storage module with the transport module. */
+function composesStorageWithTransport(text) {
+  return /app[.]morsecode[.]core[.]storage/.test(text) &&
+    /app[.]morsecode[.]transport[.]lan/.test(text);
+}
+
+/** core-transfer is platform-free: no Android storage type may enter it. */
+function coreTransferUsesAndroidStorage(text) {
+  return /android[.]net[.]Uri|android[.]content[.]ContentResolver|android[.]os[.]ParcelFileDescriptor|java[.]io[.]File|androidx[.]room/.test(text);
+}
+
+/** The transport module must not depend on the storage module, not even in tests. */
+function transportBuildDependsOnStorage(text) {
+  return /project\(":core-storage"\)|project\(':core-storage'\)/.test(text);
+}
+
 /* ------------------------------------------------------------------ *
  * Self-test: mutate, then assert the guard caught it.
  * ------------------------------------------------------------------ */
@@ -810,6 +938,67 @@ function selfTest() {
   check('self-test: a digest mismatch is caught',
     !digestMatches(Buffer.from('payload'), createHash('sha256').update('payload2').digest('hex')));
 
+  // Storage bridge (slice 3).
+  check('self-test: an inert storage port passes the transport scan',
+    !storagePortMentionsTransport('class DestinationSession(val frontier: Long)\n'));
+  check('self-test: a port naming MPL1 is caught',
+    storagePortMentionsTransport('val magic = MPL1\n'));
+  check('self-test: a comment that explains what the port avoids is not a violation',
+    !storagePortMentionsTransport('// this port carries no MPL1 record\nval x = 1\n'));
+  check('self-test: a port naming the multiplexer is caught',
+    storagePortMentionsTransport('LanMultiplexedRecordChannel()\n'));
+  check('self-test: a port opening a socket is caught',
+    storagePortMentionsTransport('java.net.Socket()\n'));
+  check('self-test: a port naming J-PAKE is caught',
+    storagePortMentionsTransport('ECJPAKE\n'));
+  check('self-test: a port naming the payload authority is caught',
+    storagePortMentionsTransport('PayloadAuthority\n'));
+
+  check('self-test: an Android-free port passes',
+    !storagePortUsesPlatformTypes('class DestinationSession\n'));
+  check('self-test: an android.net import is caught',
+    storagePortUsesPlatformTypes('import android.net.Uri\n'));
+  check('self-test: a ContentResolver is caught', storagePortUsesPlatformTypes('val r: ContentResolver\n'));
+  check('self-test: a File is caught', storagePortUsesPlatformTypes('import java.io.File\n'));
+  check('self-test: a Room annotation is caught',
+    storagePortUsesPlatformTypes('import androidx.room.ColumnInfo\n'));
+
+  check('self-test: a redacted port passes',
+    storagePortRedactsDiagnostics('override fun toString(): String = "x [redacted]"\n'));
+  check('self-test: a type with no string form is not required to redact one',
+    storagePortRedactsDiagnostics('object Policy { fun decide() = true }\n'));
+  check('self-test: a logging port is caught', !storagePortRedactsDiagnostics('Log.i("t", s)\n'));
+  check('self-test: an unredacted toString is caught',
+    !storagePortRedactsDiagnostics('override fun toString(): String = "id=$id"\n'));
+
+  check('self-test: a session naming all three frontier values passes',
+    storageSessionEnforcesSequentialWrite(
+      'expectedFrontier\nsink.length()\nSequentialRejection.OVERLAP\nSequentialRejection.HOLE\n' +
+      'SequentialRejection.REWIND\nSequentialRejection.AFTER_VERIFICATION\n' +
+      'SequentialRejection.AFTER_COMMIT\nSequentialRejection.AFTER_ABORT\n'));
+  check('self-test: a session without the overlap refusal is caught',
+    !storageSessionEnforcesSequentialWrite('expectedFrontier\nsink.length()\n'));
+
+  check('self-test: a doc with the exact policy passes',
+    storageDocCarriesVerbatimPolicy(`x\n${VERBATIM_URI_POLICY}\ny\n`));
+  check('self-test: a paraphrased policy is caught',
+    !storageDocCarriesVerbatimPolicy('Content URIs may be stored in transfer state.\n'));
+
+  check('self-test: a URI column inside core-data passes', !uriColumnOutsideCoreData('core-data/src/main/Entities.kt', 'source_uri'));
+  check('self-test: a URI column in a storage adapter is caught',
+    uriColumnOutsideCoreData('core-storage/src/main/A.kt', 'source_uri'));
+
+  check('self-test: storage without transport passes', !composesStorageWithTransport('import app.morsecode.core.storage.transfer.PartialSink\n'));
+  check('self-test: one file importing both is caught',
+    composesStorageWithTransport('import app.morsecode.core.storage.x\nimport app.morsecode.transport.lan.y\n'));
+
+  check('self-test: a platform-free core-transfer file passes', !coreTransferUsesAndroidStorage('class Frame\n'));
+  check('self-test: a Uri in core-transfer is caught', coreTransferUsesAndroidStorage('import android.net.Uri\n'));
+
+  check('self-test: a transport build without storage passes', !transportBuildDependsOnStorage('api(project(":core-transfer"))\n'));
+  check('self-test: a transport build depending on storage is caught',
+    transportBuildDependsOnStorage('api(project(":core-storage"))\n'));
+
   console.log('\nJ-PAKE production boundary self-test');
   console.log(checks.join('\n'));
   console.log(`\n${checks.length - failures}/${checks.length} checks passed, ${failures} failed`);
@@ -841,6 +1030,8 @@ function loadSources(files) {
   return files
     .filter((f) => CODE_EXTENSIONS.has(f.slice(f.lastIndexOf('.'))))
     .map((f) => ({ path: relative(ROOT, f), text: readFileSync(f, 'utf8') }));
+
+
 }
 
 function verify() {
@@ -1234,6 +1425,94 @@ function verify() {
       .includes('aPartiallyReadPrefixSurvivesThePollingSlice'),
   );
 
+  // 10. The storage bridge is inert: ports with no transport, no platform types and no leaks.
+  const storageSession = production.find((f) => f.path === STORAGE_SESSION_PATH);
+  const storageCapacity = production.find((f) => f.path === STORAGE_CAPACITY_PATH);
+  check(
+    'the storage session and capacity ports exist at their exact paths',
+    storageSession !== undefined && storageCapacity !== undefined,
+  );
+  const storagePorts = [storageSession, storageCapacity].filter(Boolean);
+  const transportTouchers = storagePorts
+    .filter((f) => storagePortMentionsTransport(f.text))
+    .map((f) => f.path);
+  check(
+    'storage ports reference no MPL1, MSR1, socket, TLS, PAKE or payload authority',
+    transportTouchers.length === 0,
+    transportTouchers.join(', ') || 'inert',
+  );
+  const platformTouchers = storagePorts
+    .filter((f) => storagePortUsesPlatformTypes(f.text))
+    .map((f) => f.path);
+  check(
+    'storage ports import no Android, Uri, descriptor, File or Room type',
+    platformTouchers.length === 0,
+    platformTouchers.join(', ') || 'platform free',
+  );
+  const loggers = storagePorts
+    .filter((f) => !storagePortRedactsDiagnostics(f.text))
+    .map((f) => f.path);
+  check(
+    'storage ports log nothing and redact their string forms',
+    loggers.length === 0,
+    loggers.join(', ') || 'redacted',
+  );
+  check(
+    'the session enforces the three-value sequential-write invariant',
+    storageSession !== undefined && storageSessionEnforcesSequentialWrite(storageSession.text),
+  );
+  check(
+    'the session commits once, refuses a duplicate and never aborts a commit',
+    storageSession !== undefined && storageSessionCommitsOnce(storageSession.text),
+  );
+
+  const androidInCoreTransfer = production
+    .filter((f) => f.path.startsWith('core-transfer/') && coreTransferUsesAndroidStorage(f.text))
+    .map((f) => f.path);
+  check(
+    'core-transfer holds no Android, Uri, descriptor, File or Room type',
+    androidInCoreTransfer.length === 0,
+    androidInCoreTransfer.join(', ') || 'core-transfer is platform free',
+  );
+
+  const uriColumnLeaks = production
+    .filter((f) => uriColumnOutsideCoreData(f.path, f.text))
+    .map((f) => f.path);
+  check(
+    'transfer URI columns are named only inside the core-data layer',
+    uriColumnLeaks.length === 0,
+    uriColumnLeaks.join(', ') || 'core-data only',
+  );
+
+  const compositions = production
+    .filter((f) => composesStorageWithTransport(f.text))
+    .map((f) => f.path);
+  check(
+    'no production file composes the storage module with the transport module',
+    compositions.length === 0,
+    compositions.join(', ') || 'no composition site',
+  );
+
+  const transportBuild = readFileSync(join(ROOT, 'transport-lan', 'build.gradle.kts'), 'utf8');
+  check(
+    'the transport module does not depend on the storage module',
+    !transportBuildDependsOnStorage(transportBuild),
+  );
+
+  const storageDocExists = existsSync(join(ROOT, STORAGE_BRIDGE_DOC_PATH));
+  check('the storage bridge document exists', storageDocExists, STORAGE_BRIDGE_DOC_PATH);
+  check(
+    'the storage bridge document carries the URI and file-byte policy verbatim',
+    storageDocExists &&
+      storageDocCarriesVerbatimPolicy(readFileSync(join(ROOT, STORAGE_BRIDGE_DOC_PATH), 'utf8')),
+  );
+  const missingStorageTests = STORAGE_TEST_PATHS.filter((p) => !existsSync(join(ROOT, p)));
+  check(
+    'the storage bridge test suites are present at their exact paths',
+    missingStorageTests.length === 0,
+    missingStorageTests.join(', ') || 'all present',
+  );
+
   const schemaProblems = ROOM_SCHEMA_DIGESTS
     .filter(([path, digest]) =>
       !existsSync(join(ROOT, path)) || !digestMatches(readFileSync(join(ROOT, path)), digest))
@@ -1261,6 +1540,7 @@ function verify() {
   const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'android-ci.yml'), 'utf8');
   check('the boundary verifier runs in CI',
     workflow.includes('jpake-production-boundary.mjs'));
+
 }
 
 process.on('uncaughtException', (error) => {

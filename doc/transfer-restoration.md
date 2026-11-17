@@ -107,6 +107,10 @@ publication/cleanup reconstruction, exact cleanup, and the inert production fact
 tests model persisted-state reconstruction only; they are not Android OS process-death
 tests and do not establish behavior for every OEM/document provider.
 
+The storage port that a restored transfer resumes onto — the sequential-write gate, the
+resume and reconciliation rules, and the URI and file-byte policy — is described in
+`doc/transfer-storage-bridge.md`.
+
 `CURRENT_MILESTONE` remains 2 and `TRANSFER_ENGINE` remains gated. LAN, Nearby, Wi-Fi Direct,
 foreground services, workers, alarms, startup automation, notifications, wake locks,
 transfer UI, Media3, WebShare, and background retry remain out of scope.
