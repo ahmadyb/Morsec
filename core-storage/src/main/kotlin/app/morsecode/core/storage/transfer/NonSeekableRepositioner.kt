@@ -82,12 +82,22 @@ public object NonSeekableRepositioner {
         val capacity = buffer.size
 
         while (discarded < targetOffset) {
+            if (Thread.currentThread().isInterrupted) return RepositionResult.Failed(TransferStorageError.Cancelled)
             val remaining = targetOffset - discarded
             val toRead = if (remaining < capacity.toLong()) remaining.toInt() else capacity
-            val count = stream.read(buffer, 0, toRead)
+            val count = try {
+                stream.read(buffer, 0, toRead)
+            } catch (error: Exception) {
+                return RepositionResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(error, "read", "read"))
+            }
+            if (Thread.currentThread().isInterrupted) return RepositionResult.Failed(TransferStorageError.Cancelled)
 
             when {
-                count < 0 -> return RepositionResult.EndOfFile(discarded)
+                count < -1 || count > toRead -> return RepositionResult.Failed(
+                    TransferStorageError.ProviderFailure("document_provider"),
+                )
+
+                count == -1 -> return RepositionResult.EndOfFile(discarded)
 
                 count == 0 -> {
                     zeroSteps++

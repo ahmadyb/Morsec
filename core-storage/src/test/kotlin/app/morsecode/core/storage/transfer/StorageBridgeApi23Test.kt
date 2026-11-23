@@ -8,6 +8,7 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.CancellationSignal
+import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import androidx.test.core.app.ApplicationProvider
@@ -17,6 +18,7 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.CancellationException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -200,6 +202,22 @@ class StorageBridgeApi23Test {
         assertArrayEquals(expected, seen.toByteArray())
     }
 
+    @Test(timeout = 60_000L)
+    fun aTypedReaderConsumesAnApi23ProviderDescriptor() {
+        val expected = seed(100)
+        val opened = ProviderSourceOpener.open(resolver, documentUri, 0L) as ProviderOpenResult.Opened
+        val reader = TypedSourceReader(opened.handle)
+        val buffer = ByteArray(128)
+        try {
+            assertEquals(SourceReadResult.Data(100), reader.read(buffer, 0, buffer.size))
+            assertArrayEquals(expected, buffer.copyOf(100))
+            assertEquals(SourceReadResult.EndOfSource, reader.read(buffer, 0, buffer.size))
+            assertEquals("TypedSourceReader([redacted])", reader.toString())
+        } finally {
+            reader.close()
+        }
+    }
+
     // --- provider failure shapes -------------------------------------------------------------------
 
     @Test(timeout = 60_000L)
@@ -231,10 +249,36 @@ class StorageBridgeApi23Test {
         provider.failOpenWithIo = true
         val opened = ProviderSourceOpener.open(resolver, documentUri, 0L)
         assertTrue(opened is ProviderOpenResult.Failed)
-        assertEquals(
-            TransferStorageErrorCategory.IO,
-            (opened as ProviderOpenResult.Failed).error.category,
-        )
+        val error = (opened as ProviderOpenResult.Failed).error
+        assertEquals(TransferStorageErrorCategory.IO, error.category)
+        assertNull(error.diagnostic)
+        assertFalse(error.toString().contains("private-provider-secret"))
+        assertFalse(error.safeMessage().contains("private-provider-secret"))
+    }
+
+    @Test(timeout = 60_000L)
+    fun cancellationWhileProbingClosesTheProviderDescriptor() {
+        seed(64)
+        val probe = SeekabilityProbe { throw CancellationException("private provider detail") }
+        val result = ProviderSourceOpener.open(resolver, documentUri, 0L, probe = probe)
+        assertTrue(result is ProviderOpenResult.Failed)
+        assertEquals(TransferStorageError.Cancelled, (result as ProviderOpenResult.Failed).error)
+        assertTrue("the provider handed out a descriptor", provider.handedOut.isNotEmpty())
+        provider.handedOut.forEach { descriptor ->
+            assertFalse("cancellation during probing must close the descriptor", descriptor.fileDescriptor.valid())
+        }
+    }
+
+    @Test(timeout = 60_000L)
+    fun androidProviderCancellationDuringProbeIsPreservedAndClosesTheDescriptor() {
+        seed(64)
+        val probe = SeekabilityProbe {
+            throw IllegalStateException("private provider detail", OperationCanceledException("private cancellation"))
+        }
+        val result = ProviderSourceOpener.open(resolver, documentUri, 0L, probe = probe) as ProviderOpenResult.Failed
+        assertEquals(TransferStorageError.Cancelled, result.error)
+        assertTrue(provider.handedOut.isNotEmpty())
+        provider.handedOut.forEach { assertFalse(it.fileDescriptor.valid()) }
     }
 
     @Test(timeout = 60_000L)
@@ -272,6 +316,25 @@ class StorageBridgeApi23Test {
         assertEquals("the descriptor closed exactly once", 1, partial.closeCount)
         assertEquals(4_096L, store.lengthOrNull(identity))
         assertTrue("the staged bytes are really on disk", store.fileFor(identity).length() == 4_096L)
+    }
+
+    @Test(timeout = 60_000L)
+    fun anAppPrivateOpenFailureDoesNotExposeThePrivatePath() {
+        val staging = Files.createTempDirectory("api23-private-secret-").toFile()
+        try {
+            // A regular file cannot be used as a directory; RandomAccessFile's exception normally
+            // contains the full attempted path. The storage boundary must replace that text.
+            val notADirectory = File(staging, "private-name").apply { writeText("x") }
+            val store = AppPrivatePartialStore(notADirectory)
+            val identity = PartialIdentity.of(TransferId("api23-open"), DestinationStrategy.APP_PRIVATE)
+            val failure = runCatching { store.open(identity) }.exceptionOrNull()
+            assertTrue(failure is IOException)
+            assertFalse(failure.toString().contains(staging.path))
+            assertFalse(failure.toString().contains("private-name"))
+            assertNull("the original exception and its private path must not be retained as a cause", failure?.cause)
+        } finally {
+            staging.deleteRecursively()
+        }
     }
 
     @Test(timeout = 60_000L)
@@ -400,12 +463,14 @@ class StorageBridgeApi23Test {
 
         val files: MutableMap<String, File> = LinkedHashMap()
         val sizes: MutableMap<String, Long> = LinkedHashMap()
+        val handedOut: MutableList<ParcelFileDescriptor> = mutableListOf()
         var denyWithSecurityException: Boolean = false
         var failOpenWithIo: Boolean = false
 
         fun reset() {
             files.clear()
             sizes.clear()
+            handedOut.clear()
             denyWithSecurityException = false
             failOpenWithIo = false
         }
@@ -455,10 +520,10 @@ class StorageBridgeApi23Test {
             signal: CancellationSignal?,
         ): ParcelFileDescriptor? {
             if (denyWithSecurityException) throw SecurityException("grant revoked")
-            if (failOpenWithIo) throw IOException("provider is unwell")
+            if (failOpenWithIo) throw IOException("private-provider-secret: content://private/photo.jpg")
             val id = documentIdOf(uri) ?: throw FileNotFoundException("no id")
             val file = files[id] ?: throw FileNotFoundException("no file")
-            return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).also { handedOut += it }
         }
 
         /**

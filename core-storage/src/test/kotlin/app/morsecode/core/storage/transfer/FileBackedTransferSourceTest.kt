@@ -188,7 +188,7 @@ class FileBackedTransferSourceTest {
     }
 
     @Test
-    fun `a source edited in place is still the same file`() {
+    fun `a source edited in place to a different size requires restart`() {
         root = newRoot()
         val file = seed(ByteArray(512))
         val source = sources().create(relative)!!
@@ -197,9 +197,9 @@ class FileBackedTransferSourceTest {
         file.appendBytes(ByteArray(512))
         val outcome = SourceChangePolicy.evaluate(stored, source.fingerprint())
 
-        // Identity outranks size, so an edited file resumes from a stored offset
-        // rather than being discarded.
-        assertEquals(FingerprintOutcome.STRONG_MATCH, outcome)
+        // The key is stable, but its unchanged identity cannot override a changed size.
+        assertEquals(FingerprintOutcome.DEFINITE_CHANGE, outcome)
+        assertTrue(outcome.requiresRestart)
     }
 
     // --- opening --------------------------------------------------------------

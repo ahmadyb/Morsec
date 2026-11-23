@@ -1,13 +1,17 @@
 package app.morsecode.core.storage.transfer
 
 import app.morsecode.core.transfer.identity.RelativeTransferPath
+import app.morsecode.core.transfer.integrity.Sha256Digest
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
+import java.util.concurrent.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -17,11 +21,9 @@ import org.robolectric.annotation.Config
 /**
  * Resume behaviour, pinned against the components that already implement it.
  *
- * No new source port is introduced here on purpose: `TransferSource.openAt`, `ProviderSourceOpener`,
- * `FileBackedTransferSource` and `NonSeekableRepositioner` already contain the whole §4 sequence. What
- * this file adds is the evidence that each step behaves as the slice requires -- reopen, compare
- * fingerprint, validate the offset, seek or discard, stop at EOF, and never allocate proportional to
- * the offset -- plus the typed restart-required outcome a mismatch must produce.
+ * `TransferSource.openAt`, `ProviderSourceOpener`, `FileBackedTransferSource` and
+ * `NonSeekableRepositioner` implement positioning. These tests pin their low-level behavior and the
+ * restart decisions; `TypedSourceReaderTest` separately covers the runtime-facing read boundary.
  *
  * The seekable cases run over a real file through the shipped `FileBackedTransferSource`. The
  * non-seekable ones run over a stream, because the discard loop is the part that must stay bounded and
@@ -187,6 +189,62 @@ class SourceResumePolicyTest {
         )
     }
 
+    @Test(timeout = 30_000L)
+    fun cancellationAfterOneDiscardReadStopsWithoutAnotherRead() {
+        var calls = 0
+        val stream = SourceStream { _, _, _ ->
+            calls++
+            if (calls == 1) 1 else throw CancellationException("private provider detail")
+        }
+        val result = NonSeekableRepositioner.reposition(stream, 10L)
+        assertTrue(result is RepositionResult.Failed)
+        assertEquals(TransferStorageError.Cancelled, (result as RepositionResult.Failed).error)
+        assertEquals(2, calls)
+    }
+
+    @Test(timeout = 30_000L)
+    fun discardFailureAfterProgressIsClassifiedWithoutProviderText() {
+        val secret = "content://private/secret/photo.jpg"
+        var calls = 0
+        val stream = SourceStream { _, _, _ ->
+            calls++
+            if (calls == 1) 1 else throw IOException(secret)
+        }
+        val result = NonSeekableRepositioner.reposition(stream, 10L) as RepositionResult.Failed
+        assertEquals(TransferStorageErrorCategory.IO, result.error.category)
+        assertNull(result.error.diagnostic)
+        assertFalse(result.toString().contains(secret))
+        assertEquals(2, calls)
+    }
+
+    @Test(timeout = 30_000L)
+    fun interruptionStopsTheDiscardLoopAndPreservesTheThreadFlag() {
+        var calls = 0
+        val stream = SourceStream { _, _, _ ->
+            calls++
+            Thread.currentThread().interrupt()
+            1
+        }
+        try {
+            val result = NonSeekableRepositioner.reposition(stream, 10L)
+            assertTrue(result is RepositionResult.Failed)
+            assertEquals(TransferStorageError.Cancelled, (result as RepositionResult.Failed).error)
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertEquals(1, calls)
+        } finally {
+            Thread.interrupted()
+        }
+    }
+
+    @Test(timeout = 30_000L)
+    fun impossibleDiscardCountsCannotProduceAPositionedSource() {
+        for (count in listOf(-2, 17)) {
+            val result = NonSeekableRepositioner.reposition(SourceStream { _, _, _ -> count }, 16L)
+            assertTrue(result is RepositionResult.Failed)
+            assertEquals(TransferStorageErrorCategory.PROVIDER, (result as RepositionResult.Failed).error.category)
+        }
+    }
+
     // --- fingerprint comparison ------------------------------------------------------------------
 
     @Test(timeout = 30_000L)
@@ -196,51 +254,36 @@ class SourceResumePolicyTest {
         val transfer = source()
         val stored = (transfer.fingerprint() as SourceFingerprintResult.Available).fingerprint
 
-        val unchanged = SourceChangePolicy.evaluate(stored, transfer.fingerprint())
-        assertTrue("an untouched source must allow resume", unchanged.allowsResume)
+        val current = transfer.fingerprint()
+        val unchanged = SourceChangePolicy.evaluate(stored, current)
+        assertEquals(FingerprintOutcome.STRONG_MATCH, unchanged)
+        val expected = Sha256Digest(ByteArray(32) { 3 })
+        assertTrue(SourceResumePolicy.authorize(stored, current, expected) is SourceResumeDecision.Ready)
+        assertTrue(SourceResumePolicy.authorize(stored, current, null) is SourceResumeDecision.Refused)
         assertFalse(unchanged.requiresRestart)
     }
 
-    /**
-     * Identity outranks size, and this test records the consequence rather than wishing it away.
-     *
-     * An app-private file source derives its identity from its key, and the key is stable across an
-     * edit. `SourceChangePolicy` therefore reports STRONG_MATCH for a file that grew after the
-     * fingerprint was taken -- which is exactly what its header says it does, because a same-key file
-     * is the same file edited rather than a different file. Resume is permitted on that evidence, so
-     * the guarantee against splicing two versions does not rest on the fingerprint. It rests on
-     * whole-file digest verification before commit, which refuses the result regardless of how the
-     * resume was justified.
-     */
+    /** A stable app-private key does not permit resuming an edited, longer source. */
     @Test(timeout = 30_000L)
-    fun identityOutranksSizeSoTheDigestIsWhatRefusesASplicedResume() {
+    fun stableIdentityCannotOverrideAChangedSize() {
         root = newRoot()
-        val original = seed(4_096)
+        seed(4_096)
         val stored = (source().fingerprint() as SourceFingerprintResult.Available).fingerprint
 
         File(File(root, "Camera"), "clip.mp4").appendBytes(byteArrayOf(0x7F))
-        val afterGrowth = SourceChangePolicy.evaluate(stored, source().fingerprint())
-        assertEquals("same key means same file edited", FingerprintOutcome.STRONG_MATCH, afterGrowth)
-        assertTrue(afterGrowth.allowsResume)
-
-        // The splice a resumed transfer would produce: the stale prefix plus the new tail.
-        val spliced = File(File(root, "Camera"), "clip.mp4").readBytes()
-        assertEquals(original.size + 1, spliced.size)
-        val digester = Sha256Digester()
-        digester.update(spliced, 0, spliced.size)
-        val splicedDigest = digester.digest()
-        val expected = Sha256Digester()
-        expected.update(original, 0, original.size)
-        assertTrue(
-            "whole-file verification is what refuses the splice, not the fingerprint",
-            splicedDigest != expected.digest(),
+        val current = source().fingerprint()
+        val afterGrowth = SourceChangePolicy.evaluate(stored, current)
+        assertEquals(FingerprintOutcome.DEFINITE_CHANGE, afterGrowth)
+        assertTrue(afterGrowth.requiresRestart)
+        val refused = SourceResumePolicy.authorize(stored, current, Sha256Digest(ByteArray(32)))
+        assertTrue(refused is SourceResumeDecision.Refused)
+        assertEquals(
+            "source_changed_restart_required",
+            ((refused as SourceResumeDecision.Refused).error as TransferStorageError.StateConflict).reason,
         )
     }
 
-    /**
-     * Without an identity there is nothing to outrank the size, so a changed size is a definite
-     * change and the transfer restarts. This is the SAF and MediaStore-less path.
-     */
+    /** A size mismatch is independently decisive whether an identity exists or not. */
     @Test(timeout = 30_000L)
     fun aChangedSizeWithNoIdentityRequiresRestart() {
         val stored = SourceFingerprint(sizeBytes = 4_096L, lastModifiedEpochMillis = 1_000L, contentId = null)
@@ -248,7 +291,7 @@ class SourceResumePolicyTest {
         val outcome = SourceChangePolicy.compare(stored, grown)
         assertEquals(FingerprintOutcome.DEFINITE_CHANGE, outcome)
         assertTrue("a mismatch must force a restart", outcome.requiresRestart)
-        assertFalse("and must not be resumed", outcome.allowsResume)
+        assertTrue(decisionFor(stored, grown) is SourceResumeDecision.Refused)
     }
 
     @Test(timeout = 30_000L)
@@ -268,7 +311,7 @@ class SourceResumePolicyTest {
         root = newRoot()
         seed(128)
         val stored = (source().fingerprint() as SourceFingerprintResult.Available).fingerprint
-        // Same length, different stable identity: the identity outranks every other field.
+        // Same length, different stable identity: a comparable identity mismatch forces restart.
         val replaced = SourceFingerprint(sizeBytes = 128L, lastModifiedEpochMillis = null, contentId = "other")
         assertEquals(
             FingerprintOutcome.DEFINITE_CHANGE,
@@ -284,8 +327,8 @@ class SourceResumePolicyTest {
         )
         val outcome = SourceChangePolicy.evaluate(stored, unavailable)
         assertEquals(FingerprintOutcome.UNAVAILABLE, outcome)
-        assertFalse("unknown is not the same as unchanged", outcome.allowsResume)
-        assertFalse("and is not the same as changed", outcome.requiresRestart)
+        assertTrue(SourceResumePolicy.authorize(stored, unavailable, Sha256Digest(ByteArray(32))) is SourceResumeDecision.Refused)
+        assertFalse("an unavailable query is not the same as changed", outcome.requiresRestart)
 
         val revoked = SourceFingerprintResult.Unavailable(
             TransferStorageError.PermissionRevoked("read"),
@@ -302,7 +345,8 @@ class SourceResumePolicyTest {
         val current = SourceFingerprint(sizeBytes = null, lastModifiedEpochMillis = null, contentId = null)
         val outcome = SourceChangePolicy.compare(stored, current)
         assertEquals(FingerprintOutcome.MISSING_METADATA, outcome)
-        assertFalse("a source that cannot describe itself cannot prove a resume is safe", outcome.allowsResume)
+        assertTrue(SourceResumePolicy.authorize(stored, SourceFingerprintResult.Available(current), null) is SourceResumeDecision.Refused)
+        assertTrue(decisionFor(stored, current) is SourceResumeDecision.Ready)
     }
 
     @Test(timeout = 30_000L)
@@ -328,6 +372,9 @@ class SourceResumePolicyTest {
             permission = true
         }
     }
+
+    private fun decisionFor(stored: SourceFingerprint, current: SourceFingerprint): SourceResumeDecision =
+        SourceResumePolicy.authorize(stored, SourceFingerprintResult.Available(current), Sha256Digest(ByteArray(32)))
 
     // --- ownership -------------------------------------------------------------------------------
 

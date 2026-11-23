@@ -6,8 +6,10 @@ import android.os.ParcelFileDescriptor
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.io.InputStream
 import java.nio.channels.FileChannel
+import java.util.concurrent.CancellationException
 
 /*
  * The shared path from a content or document Uri to a positioned handle.
@@ -66,29 +68,40 @@ public object ProviderSourceOpener {
         } catch (e: FileNotFoundException) {
             // The row was deleted between the metadata query and the open.
             return ProviderOpenResult.Failed(TransferStorageError.NotFound("source"))
-        } catch (e: IOException) {
-            return ProviderOpenResult.Failed(TransferStorageError.Io("open", e.message))
-        } catch (e: IllegalArgumentException) {
-            return ProviderOpenResult.Failed(
-                TransferStorageError.ProviderFailure("content_resolver", e.message),
-            )
+        } catch (_: InterruptedIOException) {
+            return ProviderOpenResult.Failed(TransferStorageError.Cancelled)
+        } catch (e: Exception) {
+            return ProviderOpenResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "open", "read"))
         }
 
         val resource = OwnedSourceResource(OwnedFileDescriptor(descriptor))
-        val capability = probe.probe(descriptor)
-
         return try {
+            // Probing also owns the descriptor: a throwing probe must not leak it.
+            val capability = probe.probe(descriptor)
             if (capability.seekability.canSeek) {
                 positionSeekable(resource, descriptor, capability, offset)
             } else {
                 advanceByDiscarding(resource, descriptor, offset, buffer)
             }
+        } catch (_: CancellationException) {
+            resource.close()
+            ProviderOpenResult.Failed(TransferStorageError.Cancelled)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            resource.close()
+            ProviderOpenResult.Failed(TransferStorageError.Cancelled)
+        } catch (_: InterruptedIOException) {
+            resource.close()
+            ProviderOpenResult.Failed(TransferStorageError.Cancelled)
         } catch (e: IOException) {
             resource.close()
-            ProviderOpenResult.Failed(TransferStorageError.Io("open", e.message))
+            ProviderOpenResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "open", "read"))
         } catch (e: SecurityException) {
             resource.close()
             ProviderOpenResult.Failed(TransferStorageError.PermissionRevoked("read"))
+        } catch (e: Exception) {
+            resource.close()
+            ProviderOpenResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "open", "read"))
         }
     }
 

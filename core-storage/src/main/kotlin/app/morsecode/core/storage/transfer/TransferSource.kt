@@ -131,7 +131,7 @@ public interface TransferSource {
     /** Opaque stable key. Two reads of the same file produce the same key. */
     public val key: TransferSourceKey
 
-    /** Content, document or file Uri. Carried for display and for grant checks. */
+    /** Content, document or file Uri for restoration and grant checks; never for display or diagnostics. */
     public val uri: Uri
 
     /** File name shown to the user. Never contains a separator. */

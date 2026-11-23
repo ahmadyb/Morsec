@@ -7,8 +7,10 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.io.RandomAccessFile
 import java.nio.channels.FileChannel
+import java.util.concurrent.CancellationException
 
 /*
  * A source backed by a regular file the app can open directly.
@@ -131,8 +133,10 @@ public class FileBackedTransferSource internal constructor(
             return SourceOpenResult.Failed(TransferStorageError.NotFound("source"))
         } catch (e: SecurityException) {
             return SourceOpenResult.Failed(TransferStorageError.PermissionRevoked("read"))
+        } catch (_: InterruptedIOException) {
+            return SourceOpenResult.Failed(TransferStorageError.Cancelled)
         } catch (e: IOException) {
-            return SourceOpenResult.Failed(TransferStorageError.Io("open", e.message))
+            return SourceOpenResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "open", "read"))
         }
 
         val resource = OwnedResource(random)
@@ -142,9 +146,25 @@ public class FileBackedTransferSource internal constructor(
             } else {
                 openByDiscarding(resource, random, offset)
             }
+        } catch (_: CancellationException) {
+            resource.close()
+            SourceOpenResult.Failed(TransferStorageError.Cancelled)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            resource.close()
+            SourceOpenResult.Failed(TransferStorageError.Cancelled)
+        } catch (_: InterruptedIOException) {
+            resource.close()
+            SourceOpenResult.Failed(TransferStorageError.Cancelled)
         } catch (e: IOException) {
             resource.close()
-            SourceOpenResult.Failed(TransferStorageError.Io("open", e.message))
+            SourceOpenResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "open", "read"))
+        } catch (e: SecurityException) {
+            resource.close()
+            SourceOpenResult.Failed(TransferStorageError.PermissionRevoked("read"))
+        } catch (e: Exception) {
+            resource.close()
+            SourceOpenResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "open", "read"))
         }
     }
 
@@ -167,9 +187,12 @@ public class FileBackedTransferSource internal constructor(
                 )
             }
             SourceOpenResult.Opened(ChannelSourceHandle(resource, adopted, offset), offset)
+        } catch (_: InterruptedIOException) {
+            resource.close()
+            SourceOpenResult.Failed(TransferStorageError.Cancelled)
         } catch (e: IOException) {
             resource.close()
-            SourceOpenResult.Failed(TransferStorageError.Io("seek", e.message))
+            SourceOpenResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "seek", "read"))
         }
     }
 

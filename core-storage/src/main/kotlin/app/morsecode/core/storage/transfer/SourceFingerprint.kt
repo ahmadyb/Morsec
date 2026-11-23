@@ -1,41 +1,14 @@
 package app.morsecode.core.storage.transfer
 
-/*
- * Source fingerprinting: deciding whether a stored resume offset still applies.
- *
- * The question this answers is narrow and unforgiving: I have a partial file at
- * offset N, and the user has asked to resume the same transfer. Is the source
- * still the same file?
- *
- * Getting it wrong in one direction re-downloads something that had not
- * changed, which is wasteful. Getting it wrong in the other direction splices
- * the head of one file onto the tail of another and publishes it as complete.
- * The policy below is written so that the second mistake is impossible and the
- * first is merely possible.
- *
- * There is deliberately no attempt to hash the source to answer this. Hashing
- * the whole file is exactly the multi-gigabyte read this group is forbidden from
- * doing before a transfer even starts, and a partial hash of the head would be
- * cheaper but would prove nothing about the tail — which is where the resume
- * would begin. Metadata, plus a strong identity where the provider offers one,
- * is what is affordable and what the six outcomes below are graded on.
- */
-
-/** How much a fingerprint can actually prove. */
+/** How much identifying metadata a fingerprint contains, not proof that bytes are unchanged. */
 public enum class FingerprintStrength(public val id: String) {
-    /**
-     * A provider-supplied identity is present alongside the size, so two
-     * fingerprints agreeing is real evidence that the content is the same file.
-     */
+    /** Both a provider identity and a size were available. */
     STRONG("strong"),
 
-    /**
-     * Only size (and possibly last-modified) is available. Agreement is
-     * suggestive, not proof: a different file of the same length scores a match.
-     */
+    /** A size, but no provider identity, was available. */
     WEAK("weak"),
 
-    /** Nothing usable could be read; no comparison is possible. */
+    /** No size was available. Other fields can still reveal a definite change. */
     NONE("none"),
     ;
 
@@ -46,11 +19,11 @@ public enum class FingerprintStrength(public val id: String) {
 }
 
 /**
- * What was observed about a source at one moment.
+ * Metadata observed about a source at one moment.
  *
- * `contentId` is a provider-supplied stable identity where one exists — a
- * MediaStore `_ID`, or a document id from a SAF tree. It is *not* a path and is
- * never persisted as one; it is an opaque string compared for equality.
+ * [contentId] is an opaque provider identity, not evidence that the object's bytes are immutable.
+ * A non-null timestamp is compared conservatively as reported metadata; a caller that cannot trust
+ * the timestamp must record it as null. Matching metadata never replaces whole-file verification.
  */
 public data class SourceFingerprint(
     public val sizeBytes: Long?,
@@ -64,6 +37,9 @@ public data class SourceFingerprint(
             else -> FingerprintStrength.NONE
         }
 
+    // Provider identities can contain document names or paths; never render them in diagnostics.
+    override fun toString(): String = "SourceFingerprint([redacted])"
+
     public companion object {
         public fun of(
             sizeBytes: Long?,
@@ -71,7 +47,6 @@ public data class SourceFingerprint(
             contentId: String?,
         ): SourceFingerprint = SourceFingerprint(sizeBytes, lastModifiedEpochMillis, contentId)
 
-        /** A fingerprint that can never prove anything. */
         public val UNKNOWN: SourceFingerprint = SourceFingerprint(null, null, null)
     }
 }
@@ -82,54 +57,28 @@ public sealed interface SourceFingerprintResult {
     public data class Unavailable(public val error: TransferStorageError) : SourceFingerprintResult
 }
 
-/**
- * The six possible answers to "can the stored offset still be trusted?"
- *
- * Every outcome is terminal and every one of them is tested individually; there
- * is no default branch that quietly picks one.
- */
+/** Evidence from a metadata comparison, not an authorization to read or publish. */
 public enum class FingerprintOutcome(public val id: String) {
-    /**
-     * A provider identity was available on both sides and agrees. Resume from
-     * the stored offset.
-     */
+    /** Identity, size and timestamp are all comparable and agree. */
     STRONG_MATCH("strong_match"),
 
-    /**
-     * Only size (and last-modified, where known) was available, and it agrees.
-     * Resume is permitted, but the row records that the evidence was weak so a
-     * verification failure later is interpretable rather than mysterious.
-     */
+    /** Size and timestamp agree but an identity is unavailable. */
     WEAK_MATCH("weak_match"),
 
-    /**
-     * A field the comparison depends on could not be read on one or both sides.
-     * Nothing is claimed either way; the caller decides, and the default is to
-     * restart rather than to gamble on an offset.
-     */
+    /** Size or timestamp is unavailable on at least one side. */
     MISSING_METADATA("missing_metadata"),
 
-    /**
-     * The source is provably a different file: the identity differs, or the size
-     * differs, or the last-modified time differs with no identity to overrule
-     * it. The partial must be discarded.
-     */
+    /** Comparable identities, sizes or timestamps disagree; restart is required. */
     DEFINITE_CHANGE("definite_change"),
 
-    /** The source could not be queried at all. Not evidence of change. */
+    /** The source could not be queried at all. */
     UNAVAILABLE("unavailable"),
 
-    /** A grant that was held for this URI is gone. Needs a user action. */
+    /** A grant held for the source is gone. */
     PERMISSION_REVOKED("permission_revoked"),
     ;
 
-    /** True only when resuming from a stored offset is justified. */
-    public val allowsResume: Boolean
-        get() = this == STRONG_MATCH || this == WEAK_MATCH
-
-    /** True when the existing partial has to be thrown away. */
-    public val requiresRestart: Boolean
-        get() = this == DEFINITE_CHANGE
+    public val requiresRestart: Boolean get() = this == DEFINITE_CHANGE
 
     public companion object {
         public fun fromId(id: String?): FingerprintOutcome =
@@ -138,22 +87,12 @@ public enum class FingerprintOutcome(public val id: String) {
 }
 
 /**
- * The comparison itself.
+ * Compare every available field before considering missing metadata or an identity match.
  *
- * Order matters and is the whole policy:
- *
- *  1. A provider identity outranks everything else. If both sides have one, it
- *     decides alone — a size or timestamp change on a file whose identity is
- *     unchanged is the same file, edited.
- *  2. Size disagreement is always a definite change. There is no plausible
- *     resume across it.
- *  3. A last-modified change with no identity is treated as a definite change
- *     too. That will occasionally re-download a file that only had its metadata
- *     touched; the alternative is splicing two files together and publishing the
- *     result, which is the one outcome this group is not allowed to have.
- *  4. A missing field is reported as missing rather than as a mismatch, because
- *     "I could not read the size" and "the size is different" are different
- *     facts and lead to different recovery decisions.
+ * Any comparable identity, size or timestamp mismatch means restart, including an in-place edit of
+ * an object whose identity stayed the same. Matching metadata is not proof of matching bytes: a
+ * same-size, same-timestamp edit is detected only by the expected whole-file digest at verification.
+ * [SourceResumePolicy] binds that digest to a resume decision; this comparison alone permits nothing.
  */
 public object SourceChangePolicy {
 
@@ -162,9 +101,7 @@ public object SourceChangePolicy {
         current: SourceFingerprintResult,
     ): FingerprintOutcome = when (current) {
         is SourceFingerprintResult.Unavailable -> when (current.error.category) {
-            TransferStorageErrorCategory.PERMISSION_REVOKED ->
-                FingerprintOutcome.PERMISSION_REVOKED
-
+            TransferStorageErrorCategory.PERMISSION_REVOKED -> FingerprintOutcome.PERMISSION_REVOKED
             else -> FingerprintOutcome.UNAVAILABLE
         }
 
@@ -175,22 +112,17 @@ public object SourceChangePolicy {
         stored: SourceFingerprint,
         current: SourceFingerprint,
     ): FingerprintOutcome {
-        if (current.strength == FingerprintStrength.NONE) return FingerprintOutcome.MISSING_METADATA
-
         val storedId = stored.contentId
         val currentId = current.contentId
-        if (storedId != null && currentId != null) {
-            return if (storedId == currentId) {
-                FingerprintOutcome.STRONG_MATCH
-            } else {
-                FingerprintOutcome.DEFINITE_CHANGE
-            }
+        if (storedId != null && currentId != null && storedId != currentId) {
+            return FingerprintOutcome.DEFINITE_CHANGE
         }
 
         val storedSize = stored.sizeBytes
         val currentSize = current.sizeBytes
-        if (storedSize == null || currentSize == null) return FingerprintOutcome.MISSING_METADATA
-        if (storedSize != currentSize) return FingerprintOutcome.DEFINITE_CHANGE
+        if (storedSize != null && currentSize != null && storedSize != currentSize) {
+            return FingerprintOutcome.DEFINITE_CHANGE
+        }
 
         val storedModified = stored.lastModifiedEpochMillis
         val currentModified = current.lastModifiedEpochMillis
@@ -198,6 +130,13 @@ public object SourceChangePolicy {
             return FingerprintOutcome.DEFINITE_CHANGE
         }
 
-        return FingerprintOutcome.WEAK_MATCH
+        if (storedSize == null || currentSize == null || storedModified == null || currentModified == null) {
+            return FingerprintOutcome.MISSING_METADATA
+        }
+        return if (storedId != null && currentId != null) {
+            FingerprintOutcome.STRONG_MATCH
+        } else {
+            FingerprintOutcome.WEAK_MATCH
+        }
     }
 }

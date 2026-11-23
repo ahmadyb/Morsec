@@ -1,6 +1,9 @@
 package app.morsecode.core.storage.transfer
 
+import android.os.OperationCanceledException
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.util.concurrent.CancellationException
 
 /*
  * Deciding what a platform exception means.
@@ -36,6 +39,18 @@ internal object StorageFailureClassifier {
     /** Signals that the platform ran out of room. There is no exception type. */
     private val STORAGE_FULL_SIGNALS = arrayOf("ENOSPC", "No space left", "not enough space")
 
+    /** Preserve cancellation, including Android provider cancellation and bounded wrapped causes. */
+    fun isCancellation(error: Throwable): Boolean = walk(error) { candidate ->
+        when (candidate) {
+            is InterruptedException -> {
+                Thread.currentThread().interrupt()
+                true
+            }
+            is CancellationException, is InterruptedIOException, is OperationCanceledException -> true
+            else -> false
+        }
+    } || Thread.currentThread().isInterrupted
+
     /** Whether [error] is the grant having been taken away. */
     fun isRevocation(error: Throwable): Boolean = walk(error) { it is SecurityException }
 
@@ -57,6 +72,7 @@ internal object StorageFailureClassifier {
         operation: String,
         access: String = if (operation.contains("read", ignoreCase = true)) "read" else "write",
     ): TransferStorageError? = when {
+        isCancellation(error) -> TransferStorageError.Cancelled
         isRevocation(error) -> TransferStorageError.PermissionRevoked(access)
         isStorageFull(error) -> TransferStorageError.StorageFull(operation)
         error is IOException -> TransferStorageError.Io(operation)

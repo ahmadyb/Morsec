@@ -57,6 +57,7 @@ class SafDocumentSourceTest {
 
         var rows: MutableMap<String, Row> = LinkedHashMap()
         var files: MutableMap<String, File> = LinkedHashMap()
+        var queryFailure: RuntimeException? = null
 
         val handedOut = mutableListOf<ParcelFileDescriptor>()
 
@@ -69,6 +70,7 @@ class SafDocumentSourceTest {
             selectionArgs: Array<out String>?,
             sortOrder: String?,
         ): Cursor? {
+            queryFailure?.let { throw it }
             val columns = projection ?: COLUMNS
             val id = uri.lastPathSegment ?: return null
             val row = rows[id] ?: return MatrixCursor(columns)
@@ -215,6 +217,40 @@ class SafDocumentSourceTest {
         assertEquals("doc:primary:Download/Camera/clip.mp4", available.fingerprint.contentId)
         assertEquals(FingerprintStrength.STRONG, available.fingerprint.strength)
         assertEquals(4_096L, available.fingerprint.sizeBytes)
+    }
+
+    @Test
+    fun `a fresh fingerprint observes a changed provider document identity`() {
+        seed()
+        val source = (create() as SafSourceResult.Ready).source
+        val stored = (source.fingerprint() as SourceFingerprintResult.Available).fingerprint
+        val key = "primary:Download/Camera/clip.mp4"
+        provider.rows[key] = provider.rows.getValue(key).copy(documentId = "primary:Download/other.mp4")
+
+        val current = source.fingerprint()
+        assertEquals(FingerprintOutcome.DEFINITE_CHANGE, SourceChangePolicy.evaluate(stored, current))
+        val decision = SourceResumePolicy.authorize(
+            stored, current, app.morsecode.core.transfer.integrity.Sha256Digest(ByteArray(32)),
+        )
+        assertTrue(decision is SourceResumeDecision.Refused)
+        assertTrue((decision as SourceResumeDecision.Refused).fingerprintOutcome.requiresRestart)
+    }
+
+    @Test
+    fun `fingerprint failures do not retain provider text or downgrade cancellation`() {
+        seed()
+        val source = (create() as SafSourceResult.Ready).source
+        val secret = "content://private/secret/photo.jpg"
+        provider.queryFailure = IllegalStateException(secret)
+        val failed = source.fingerprint() as SourceFingerprintResult.Unavailable
+        assertEquals(TransferStorageErrorCategory.PROVIDER, failed.error.category)
+        assertNull(failed.error.diagnostic)
+        assertFalse(failed.toString().contains(secret))
+        assertFalse(failed.error.safeMessage().contains(secret))
+
+        provider.queryFailure = java.util.concurrent.CancellationException(secret)
+        val cancelled = source.fingerprint() as SourceFingerprintResult.Unavailable
+        assertEquals(TransferStorageError.Cancelled, cancelled.error)
     }
 
     @Test

@@ -234,12 +234,9 @@ public class MediaStorePendingPartial internal constructor(
                 ),
             )
         }
-    } catch (e: IOException) {
-        WriteOutcome.Failed(TransferStorageError.Io("write", e.message))
-    } catch (e: SecurityException) {
-        // A grant withdrawn mid-transfer, which is a different recovery from a
-        // full disk and must not be reported as one.
-        WriteOutcome.Failed(TransferStorageError.PermissionRevoked("write"))
+    } catch (e: Exception) {
+        // Preserve revocation, cancellation and storage-full as distinct typed outcomes.
+        WriteOutcome.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "write", "write"))
     }
 
     /**
@@ -253,17 +250,15 @@ public class MediaStorePendingPartial internal constructor(
     override fun flush(): FlushDurability = try {
         channel.force(true)
         FlushDurability.FlushAttemptedGuaranteeUnknown
-    } catch (e: IOException) {
-        FlushDurability.FlushFailed(TransferStorageError.Io("sync", e.message))
-    } catch (e: SecurityException) {
-        FlushDurability.FlushFailed(TransferStorageError.PermissionRevoked("write"))
+    } catch (e: Exception) {
+        FlushDurability.FlushFailed(StorageFailureClassifier.classifyOrProviderFailure(e, "sync", "write"))
     }
 
     override fun truncateTo(offset: Long): TruncateOutcome = try {
         channel.truncate(offset)
         TruncateOutcome.Truncated(channel.size())
-    } catch (e: IOException) {
-        TruncateOutcome.Failed(TransferStorageError.Io("truncate", e.message))
+    } catch (e: Exception) {
+        TruncateOutcome.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "truncate", "write"))
     }
 
     override fun close() {
@@ -364,14 +359,13 @@ public object MediaStorePendingDestination {
                     TransferStorageError.ProviderFailure("media_store", "insert returned null"),
                 )
             PendingCreation.Created(uri)
-        } catch (e: SecurityException) {
-            PendingCreation.Refused(TransferStorageError.PermissionRevoked("write"))
-        } catch (e: IllegalArgumentException) {
+        } catch (e: Exception) {
+            // Providers may throw more than IOException or IllegalArgumentException. Never let an
+            // arbitrary provider exception, including its message, escape this typed boundary.
             PendingCreation.Refused(
-                TransferStorageError.ProviderFailure("media_store", e.message),
+                StorageFailureClassifier.classify(e, "create", "write")
+                    ?: TransferStorageError.ProviderFailure("media_store"),
             )
-        } catch (e: IOException) {
-            PendingCreation.Refused(TransferStorageError.Io("open", e.message))
         }
     }
 
@@ -404,12 +398,10 @@ public object MediaStorePendingDestination {
             PendingOpen.Opened(
                 MediaStorePendingPartial(identity, uri, resource, stream.channel),
             )
-        } catch (e: IOException) {
-            descriptor.close()
-            PendingOpen.Refused(TransferStorageError.Io("open", e.message))
-        } catch (e: SecurityException) {
-            descriptor.close()
-            PendingOpen.Refused(TransferStorageError.PermissionRevoked("write"))
+        } catch (e: Exception) {
+            // Teardown is best effort; a second provider exception must not mask the typed failure.
+            runCatching { descriptor.close() }
+            PendingOpen.Refused(StorageFailureClassifier.classifyOrProviderFailure(e, "open", "write"))
         }
     }
 
@@ -438,12 +430,9 @@ public object MediaStorePendingDestination {
             val stream = ParcelFileDescriptor.AutoCloseInputStream(descriptor)
             val resource = OwnedResource(stream)
             PendingReadOpen.Opened(PendingReader(uri, resource, stream.channel))
-        } catch (e: IOException) {
-            descriptor.close()
-            PendingReadOpen.Refused(TransferStorageError.Io("read", e.message))
-        } catch (e: SecurityException) {
-            descriptor.close()
-            PendingReadOpen.Refused(TransferStorageError.PermissionRevoked("read"))
+        } catch (e: Exception) {
+            runCatching { descriptor.close() }
+            PendingReadOpen.Refused(StorageFailureClassifier.classifyOrProviderFailure(e, "read", "read"))
         }
     }
 
@@ -654,8 +643,8 @@ public object MediaStorePendingDestination {
             }
         } catch (e: SecurityException) {
             AbandonOutcome.ReconciliationRequired(state, "delete refused by permission")
-        } catch (e: Exception) {
-            AbandonOutcome.ReconciliationRequired(state, "delete failed: ${e.message}")
+        } catch (_: Exception) {
+            AbandonOutcome.ReconciliationRequired(state, "delete failed")
         }
     }
 
@@ -670,27 +659,24 @@ public object MediaStorePendingDestination {
         resolver: ContentResolver,
         uri: Uri,
         mode: String,
-    ): DescriptorOpen = try {
-        val descriptor = resolver.openFileDescriptor(uri, mode)
-            ?: return DescriptorOpen.Refused(
-                TransferStorageError.ProviderFailure(
-                    "media_store",
-                    "openFileDescriptor returned null",
-                ),
+    ): DescriptorOpen {
+        return try {
+            val descriptor = resolver.openFileDescriptor(uri, mode)
+                ?: return DescriptorOpen.Refused(
+                    TransferStorageError.ProviderFailure(
+                        "media_store",
+                        "openFileDescriptor returned null",
+                    ),
+                )
+            DescriptorOpen.Opened(descriptor)
+        } catch (_: FileNotFoundException) {
+            DescriptorOpen.Refused(TransferStorageError.NotFound("partial"))
+        } catch (e: Exception) {
+            DescriptorOpen.Refused(
+                StorageFailureClassifier.classify(e, "open", if (mode == READ_MODE) "read" else "write")
+                    ?: TransferStorageError.ProviderFailure("media_store"),
             )
-        DescriptorOpen.Opened(descriptor)
-    } catch (e: SecurityException) {
-        DescriptorOpen.Refused(
-            TransferStorageError.PermissionRevoked(if (mode == READ_MODE) "read" else "write"),
-        )
-    } catch (e: FileNotFoundException) {
-        DescriptorOpen.Refused(TransferStorageError.NotFound("partial"))
-    } catch (e: IOException) {
-        DescriptorOpen.Refused(TransferStorageError.Io("open", e.message))
-    } catch (e: IllegalArgumentException) {
-        DescriptorOpen.Refused(
-            TransferStorageError.ProviderFailure("media_store", e.message),
-        )
+        }
     }
 
     /**
@@ -710,10 +696,10 @@ public object MediaStorePendingDestination {
             resolver.update(uri, values, null, null)
         } catch (e: SecurityException) {
             return Publication.Refused(TransferStorageError.PermissionRevoked("write"))
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             return Publication.ReconciliationRequired(
                 PendingState.UNKNOWN,
-                "clearing the pending flag failed: ${e.message}",
+                "clearing the pending flag failed",
             )
         }
 

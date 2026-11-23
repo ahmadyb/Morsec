@@ -245,6 +245,7 @@ public class DestinationSession private constructor(
     private val publisher: DestinationPublisher?,
     private val abortAction: (() -> TransferStorageError?)?,
     private val resources: List<Closeable>,
+    private val retainedExpectedSha256: Sha256Digest?,
     initialConfirmedBytes: Long,
 ) : Closeable {
 
@@ -292,7 +293,11 @@ public class DestinationSession private constructor(
         rejectionFor(offset, buffer, dataOffset, length)?.let {
             return DestinationWrite.Rejected(it, frontier)
         }
-        val outcome = sink.writeAt(offset, buffer, dataOffset, length)
+        val outcome = try {
+            sink.writeAt(offset, buffer, dataOffset, length)
+        } catch (error: Exception) {
+            return DestinationWrite.Failed(StorageFailureClassifier.classifyOrProviderFailure(error, "write", "write"), frontier)
+        }
         if (outcome is WriteOutcome.Failed) {
             return DestinationWrite.Failed(outcome.error, frontier)
         }
@@ -307,7 +312,11 @@ public class DestinationSession private constructor(
                 frontier,
             )
         }
-        val durability = sink.flush()
+        val durability = try {
+            sink.flush()
+        } catch (error: Exception) {
+            return DestinationWrite.Failed(StorageFailureClassifier.classifyOrProviderFailure(error, "sync", "write"), frontier)
+        }
         if (durability is FlushDurability.FlushFailed) {
             // The bytes may or may not be durable. Either way nothing is acknowledged.
             return DestinationWrite.Failed(durability.error, frontier)
@@ -369,7 +378,11 @@ public class DestinationSession private constructor(
                 ),
             )
         }
-        val outcome = sink.truncateTo(offset)
+        val outcome = try {
+            sink.truncateTo(offset)
+        } catch (error: Exception) {
+            return TruncateOutcome.Failed(StorageFailureClassifier.classifyOrProviderFailure(error, "truncate", "write"))
+        }
         if (outcome is TruncateOutcome.Truncated) frontier = offset
         return outcome
     }
@@ -381,7 +394,8 @@ public class DestinationSession private constructor(
      *
      * Only [DestinationSessionState.OPEN] sessions verify, and only a successful pass moves the state
      * to [DestinationSessionState.VERIFIED]. A mismatch leaves the session open: nothing was verified,
-     * so the caller may truncate and rewrite.
+     * so the caller may truncate and rewrite. For a resumed session, [expected] must equal the digest
+     * retained at open; omitting it or supplying a different value cannot authorize publication.
      */
     public fun verify(
         expected: Sha256Digest?,
@@ -391,10 +405,19 @@ public class DestinationSession private constructor(
         if (state != DestinationSessionState.OPEN) {
             return SessionVerification.Refused(lifecycleError())
         }
+        val retained = retainedExpectedSha256
+        if (retained != null && expected == null) {
+            return SessionVerification.Refused(TransferStorageError.StateConflict("resume_digest_required"))
+        }
+        if (retained != null && !retained.contentEquals(expected)) {
+            return SessionVerification.Refused(TransferStorageError.StateConflict("resume_digest_changed"))
+        }
         val source = verificationSource ?: return SessionVerification.Refused(
             TransferStorageError.Unsupported("verification"),
         )
-        return when (val result = DestinationVerifier.verify(source, frontier, expected, buffer, isCancelled = isCancelled)) {
+        // Always compare resumed bytes to the value retained at open, never a replacement supplied
+        // by the caller of this method.
+        return when (val result = DestinationVerifier.verify(source, frontier, retained ?: expected, buffer, isCancelled = isCancelled)) {
             is VerifyResult.Matched -> {
                 verifiedDigest = result.digest
                 verifiedBytes = result.bytes
@@ -403,6 +426,9 @@ public class DestinationSession private constructor(
             }
 
             is VerifyResult.VerifiedWithoutExpected -> {
+                if (retained != null) {
+                    return SessionVerification.Refused(TransferStorageError.StateConflict("resume_digest_required"))
+                }
                 verifiedDigest = result.digest
                 verifiedBytes = result.bytes
                 state = DestinationSessionState.VERIFIED
@@ -441,9 +467,18 @@ public class DestinationSession private constructor(
         val digest = verifiedDigest ?: return CommitResult.Refused(
             TransferStorageError.StateConflict(reason = "not_verified"),
         )
-        if (frontier != verifiedBytes || sink.length() != verifiedBytes) {
-            // Defensive: a write cannot reach here through the public API, but a partial replaced on
-            // disk between verification and commit would otherwise be published unverified.
+        val retained = retainedExpectedSha256
+        if (retained != null && !retained.contentEquals(digest)) {
+            return CommitResult.Refused(TransferStorageError.StateConflict(reason = "resume_digest_not_verified"))
+        }
+        val physical = try {
+            sink.length()
+        } catch (error: Exception) {
+            return CommitResult.Refused(StorageFailureClassifier.classifyOrProviderFailure(error, "measure", "read"))
+        }
+        if (frontier != verifiedBytes || physical != verifiedBytes) {
+            // Detect length changes after verification. An external same-length mutation is not
+            // detected here; provider-specific snapshot or exclusive ownership is still required.
             return CommitResult.Refused(
                 TransferStorageError.StateConflict(reason = "partial_changed_after_verification"),
             )
@@ -546,7 +581,7 @@ public class DestinationSession private constructor(
 
         val physical = try {
             sink.length()
-        } catch (_: RuntimeException) {
+        } catch (_: Exception) {
             // A sink that cannot report its length cannot prove the invariant; treat it as a mismatch.
             return SequentialRejection.NOT_AT_PHYSICAL_FRONTIER
         }
@@ -571,7 +606,9 @@ public class DestinationSession private constructor(
          * [initialConfirmedBytes] is the checkpointed frontier the caller recovered; when a
          * [CheckpointSink] is supplied its value wins. The physical partial decides the rest: equal
          * length resumes, longer length requires an explicit truncation, shorter length is refused
-         * because acknowledged bytes are gone.
+         * because acknowledged bytes are gone. A nonzero confirmed frontier also requires the original
+         * [retainedExpectedSha256] recovered from transfer state; that value is fixed for this session
+         * and must match the final full-file verification before commit.
          */
         public fun open(
             transferId: TransferId,
@@ -584,6 +621,7 @@ public class DestinationSession private constructor(
             abortAction: (() -> TransferStorageError?)? = null,
             resources: List<Closeable> = emptyList(),
             initialConfirmedBytes: Long = 0L,
+            retainedExpectedSha256: Sha256Digest? = null,
         ): DestinationOpen {
             if (declaredSizeBytes != null && declaredSizeBytes < 0L) {
                 return DestinationOpen.Refused(
@@ -614,10 +652,8 @@ public class DestinationSession private constructor(
             }
             val physical = try {
                 sink.length()
-            } catch (_: RuntimeException) {
-                return DestinationOpen.Refused(
-                    TransferStorageError.Io(operation = "measure the partial file"),
-                )
+            } catch (error: Exception) {
+                return DestinationOpen.Refused(StorageFailureClassifier.classifyOrProviderFailure(error, "measure", "read"))
             }
             if (physical < 0L) {
                 return DestinationOpen.Refused(
@@ -639,6 +675,9 @@ public class DestinationSession private constructor(
                     ),
                 )
             }
+            if (confirmed > 0L && retainedExpectedSha256 == null) {
+                return DestinationOpen.Refused(TransferStorageError.StateConflict("expected_sha256_required"))
+            }
             return DestinationOpen.Opened(
                 session = DestinationSession(
                     transferId = transferId,
@@ -650,6 +689,7 @@ public class DestinationSession private constructor(
                     publisher = publisher,
                     abortAction = abortAction,
                     resources = resources,
+                    retainedExpectedSha256 = retainedExpectedSha256,
                     initialConfirmedBytes = confirmed,
                 ),
                 frontier = confirmed,

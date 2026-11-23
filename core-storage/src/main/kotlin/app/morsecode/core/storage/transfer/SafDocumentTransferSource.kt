@@ -87,7 +87,6 @@ public class SafDocumentTransferSource internal constructor(
     override val displayName: String,
     override val relativePath: RelativeTransferPath,
     override val mimeType: String,
-    private val documentId: String?,
     private val treeUri: Uri,
     private val reportedSizeBytes: Long,
     private val reportedModifiedEpochMillis: Long?,
@@ -118,15 +117,14 @@ public class SafDocumentTransferSource internal constructor(
                 SourceFingerprint(
                     sizeBytes = row.sizeBytes,
                     lastModifiedEpochMillis = row.modifiedEpochMillis,
-                    contentId = contentId,
+                    // Compare the provider's current identity, not the one cached at construction.
+                    contentId = row.documentId?.let { "doc:$it" },
                 ),
             )
         } catch (e: SecurityException) {
             SourceFingerprintResult.Unavailable(TransferStorageError.PermissionRevoked("read"))
         } catch (e: Exception) {
-            SourceFingerprintResult.Unavailable(
-                TransferStorageError.ProviderFailure("saf", e.message),
-            )
+            SourceFingerprintResult.Unavailable(StorageFailureClassifier.classifyOrProviderFailure(e, "query", "read"))
         }
     }
 
@@ -151,9 +149,6 @@ public class SafDocumentTransferSource internal constructor(
      * platform is the fact.
      */
     private fun grantHeld(): Boolean = grantChecker.isReadGranted(treeUri)
-
-    /** The document id is the identity: it is a provider-issued handle, not a path. */
-    private val contentId: String? get() = documentId?.let { "doc:$it" }
 
     private fun queryRow(): SafDocumentRow? {
         val cursor = resolver.query(uri, PROJECTION, null, null, null) ?: return null
@@ -236,7 +231,6 @@ public object SafDocumentTransferSources {
                 displayName = name,
                 relativePath = relativePath,
                 mimeType = mimeType ?: row?.mimeType ?: guessMimeType(name),
-                documentId = row?.documentId ?: documentId,
                 treeUri = treeUri,
                 // -1 means "the provider would not say", not "empty".
                 reportedSizeBytes = row?.sizeBytes ?: -1L,

@@ -37,10 +37,12 @@ hold them:
 
 - A URI may be read back to re-open a document. It is not a value a UI prints, a log line
   interpolates, or a crash report carries.
-- A filename is metadata about a document, not a label for a progress line. `toString()` on every
-  storage type in this module is redacted; the identifier it holds is replaced with `[redacted]`.
-- `TransferStorageError` subclasses carry a `diagnostic` field that may name a location. It is
-  deliberately excluded from `toString()`, and it is not written to the database.
+- A filename is metadata about a document, not a label for a progress line. The new runtime-facing
+  reader, resume authorization and destination session have redacted string forms. Legacy storage
+  objects are not safe to log merely because they have a `toString()` method.
+- Legacy `TransferStorageError` subclasses have a local-only `diagnostic` field. Source fingerprint,
+  source open, repositioning and typed-read failures never place provider exception text in that field
+  or any other domain value. No diagnostic may be logged, persisted, surfaced or sent to crash reports.
 - Digests are compared, stored where the schema says so, and never logged. They are also redacted in
   `toString()`, because a digest of a file the user did not intend to publish is still information
   about that file.
@@ -51,8 +53,31 @@ location, no name and no provider message.
 
 ## The port boundary
 
-Two Android-free ports live in `core-storage`, in the `transfer` package. They are the only types a
-caller has to know about; the Android adapters sit behind them.
+The runtime-facing decisions live in `core-storage`, in the `transfer` package. Source handles,
+destination sinks and platform-specific adapters already existed; the new types wrap or compose
+those abstractions rather than creating another storage hierarchy. `core-transfer` remains free of
+Android storage types.
+
+### Source read and ownership
+
+`TypedSourceReader` wraps one existing `SourceHandle`. Its `read(buffer, offset, length)` returns
+`Data(count)`, `EndOfSource` or `Failure(TransferStorageError)`. It rejects invalid ranges before
+calling the provider, treats counts below -1 or above the request as provider faults, and fails on
+the first zero-progress return for a positive-length request. It never caches the caller's buffer.
+Provider and I/O exceptions are classified at this boundary without retaining exception messages,
+causes or stacks. Cancellation is returned as `Cancelled`, not I/O, including Android provider
+cancellation and bounded wrapped causes; for these storage descriptors, `InterruptedIOException` and
+its subclasses are conservatively treated as cancellation. Coroutine owners must propagate that
+outcome as cancellation. End of source, failure and cancellation close the handle; `close()` is
+idempotent, including concurrent cancellation. A failure is terminal because a provider may have
+consumed an unknown number of bytes. The owner reads serially and closes in `finally`.
+
+`TypedSourceReader.openAt(...)` is an adapter-side factory: it turns the existing source opener's
+result into a typed reader, redacts legacy open diagnostics and closes a handle returned at the wrong
+offset. A nonzero offset requires a digest-bearing `SourceResumeDecision.Ready`; the factory compares
+the stored fingerprint with a fresh source fingerprint again immediately before opening. The future
+runtime must consume the typed reader and must not call `SourceHandle.read` directly. The older
+low-level handle remains for compatibility with existing storage adapters.
 
 ### Destination
 
@@ -72,7 +97,10 @@ verification may run, whether commit may proceed, and how abort and close behave
 That split is what keeps `File`, `Uri`, `ContentResolver` and provider exceptions out of the port.
 
 A session moves through `OPEN → VERIFIED → COMMITTED`, or `OPEN → ABORTED`, or anything `→ CLOSED`.
-`CLOSED` is reachable from every state, is idempotent, and closes owned resources exactly once.
+`CLOSED` is reachable from every state, is idempotent, and closes owned resources exactly once. After
+an interruption, including one in the same process, the future owner must discard the old session and
+reopen from the persisted confirmed frontier with the retained digest. An unbound fresh session must
+not be reused as a resumed one; the session cannot observe network interruption by itself.
 
 ### Capacity
 
@@ -111,7 +139,8 @@ Refused at the gate, by name, each with its own `SequentialRejection`:
 
 **A failed or partial write never advances the confirmed frontier.** The sink may have accepted some
 bytes — an `ENOSPC` after 4 KiB is the normal case — and those bytes are visible in the physical
-length. The frontier stays where it was, which turns the next write at that offset into an `OVERLAP`.
+length. Both returned failures and thrown write/flush exceptions are classified without provider
+text. The frontier stays where it was, which turns the next write at that offset into an `OVERLAP`.
 The caller's only way forward is an explicit `truncateTo(...)` to a legal offset, and then a retry.
 That is intentional: the session refuses to build a story about bytes it did not see accepted.
 
@@ -125,48 +154,52 @@ deliberately weaker than the runtime's.
 
 ## Resume
 
-The §4 sequence, implemented by `TransferSource.openAt` and by the provider opener beneath it:
+The source-side sequence is: query a fresh fingerprint, compare it with the persisted fingerprint,
+authorize the resume using the retained expected whole-file SHA-256, and open at the confirmed offset
+through `TypedSourceReader`. `TransferSource.openAt` validates a known length and seeks, or delegates
+to the bounded non-seekable discard loop. An offset past a known end is refused; an early EOF while
+discarding is `source_shorter_than_offset`. No allocation is proportional to the offset.
 
-1. Re-open the source at the persisted offset.
-2. Take a fingerprint and compare it with the persisted descriptor.
-3. Validate the offset against the length, when a length is known.
-4. Seek when the descriptor is seekable; otherwise discard forward through a fixed buffer.
-5. Stop if the stream ends before the offset.
-6. Never allocate anything proportional to the offset.
+`NonSeekableRepositioner` uses a constant 64 KiB buffer. Its bounded zero-progress policy prevents a
+stalled stream from spinning indefinitely. A fingerprint query and a subsequent open are not an
+atomic snapshot of a provider: the source can change between them or while it is read. The retained
+expected digest and the final verification are required despite a metadata match.
 
-Steps 4 to 6 are the ones that need care, and `NonSeekableRepositioner` is where they live:
-`SKIP_BUFFER_BYTES` is a constant 64 KiB, the loop counts *bytes*, and a stream that returns zero
-bytes `MAX_ZERO_PROGRESS_STEPS` times in a row is a typed `ZeroProgress` failure instead of an
-infinite loop. An offset past the known end is refused at open time (`offset_past_end`); a stream that
-ends early is `source_shorter_than_offset`. Both are `StateConflict`s, so they cannot be mistaken for
-an I/O fault that might go away on retry.
+### Fingerprint and retained digest policy
 
-### What a resumed read is *not* protected by
+`SourceChangePolicy` compares **all** comparable fields before declaring a match or missing metadata:
 
-`SourceChangePolicy` ranks evidence. A provider identity outranks everything: if both sides carry one
-and they match, the file is the same file, and a change of size or timestamp is an edit to it, not a
-different file. The policy therefore reports `STRONG_MATCH` for an app-private file that grew after
-the fingerprint was taken, because its identity — derived from its stable key — did not change.
-Resuming is allowed on that evidence.
+- A different known identity requires restart.
+- Different known sizes require restart **even when a strong identity matches**.
+- Different known timestamps require restart even when identity and size match. A timestamp that a
+  caller cannot regard as trustworthy must be recorded as unavailable, not invented.
+- A matching identity identifies the logical object, not immutable file contents. A comparable
+  metadata mismatch remains a restart even if some other field is unavailable.
+- Missing size, timestamp or identity is not proof of equality. `SourceResumePolicy.authorize`
+  permits such a resume only with the expected whole-file SHA-256 retained; an inaccessible source or
+  revoked grant is refused. It requires that digest even when every field matches. The owner retains
+  it in the approved transfer-state fields across restoration. A destination reopened with a nonzero
+  confirmed frontier refuses to open without that retained digest. It binds the value for its whole
+  session: `verify(null)`, a replacement expected digest, or a mismatch cannot lead to commit.
+  `SourceResumeDecision.Ready.verify(session)` is a convenience that supplies its own retained value;
+  it is not the enforcement mechanism. A hash without an expected value is not a comparison.
 
-The consequence is recorded rather than hidden: **the guarantee against splicing two versions of a
-file is whole-file digest verification before commit, not the fingerprint.** A resume that lands in
-the middle of an edited file produces bytes that fail verification, and a session that fails
-verification cannot commit. The fingerprint is an optimisation that saves re-reading a file that has
-not changed; it is not the integrity check.
-
-Without an identity — the SAF path, where a document id is not stable across a replace — a size
-change is `DEFINITE_CHANGE`, a last-modified change with no identity is also `DEFINITE_CHANGE`, and
-the transfer restarts. That occasionally re-reads a file whose metadata was merely touched. That is
-the cheaper mistake.
+**Residual limitation:** a same-size, same-timestamp mutation can have the same logical identity and
+escape fingerprint detection. Final verification against the retained expected whole-file SHA-256
+detects an edit or splice present in the bytes it reads; no metadata comparison is a content-integrity
+guarantee. Verification is not an atomic provider snapshot: an external same-length mutation after
+verification may evade the commit-time length check. A future runtime needs provider-appropriate
+exclusive ownership or publication guarantees. The inert tests demonstrate the mismatch refusal.
 
 ### The cost of a non-seekable resume
 
 A `content://` descriptor that cannot seek is resumed by reading and discarding offset bytes. For a
 multi-gigabyte file at a large offset that is genuinely slow: the bytes cross the provider boundary
-and are thrown away. It is bounded in memory (64 KiB), it is cancellable at every step, and it does
-not require the file to fit anywhere. It is still I/O the user waits for, and it is the reason
-seekability is probed once and recorded rather than re-guessed.
+and are thrown away. It is bounded in memory (64 KiB) and checks interruption between reads; a
+cancellation raised by a read is returned as `Cancelled`, and the opener closes its owned descriptor.
+A single provider read that blocks indefinitely may not respond to interruption until the provider or
+descriptor unblocks. The file never has to fit in memory, but the discard is still I/O the user waits
+for; seekability is probed rather than guessed.
 
 ## Destination reconciliation
 
@@ -193,10 +226,13 @@ side of this comparison; a `DestinationSession` consumes its conclusion rather t
 
 - `verify(expectedDigest)` reads the whole partial through `VerificationSource` and moves to
   `VERIFIED` on a match. A mismatch returns `Mismatched` and leaves the session `OPEN`, because a
-  caller may still truncate and retry. A missing expected digest is recorded as
-  `matchedExpected = false` — the bytes were read and hashed, but nothing was compared.
+  caller may still truncate and retry. Provider exceptions during verification become redacted typed
+  failures and cannot authorize commit. For a fresh session, a missing expected digest is recorded as
+  `matchedExpected = false` — the bytes were read and hashed, but nothing was compared. A session
+  bound to a retained digest refuses a null or different expected value before reading.
 - `commit()` is refused unless the session is `VERIFIED`, the frontier equals the verified byte
-  count, and the sink still reports that length. Publication happens through
+  count, the sink still reports that length, and any retained resume digest equals the verified
+  digest. Publication happens through
   `DestinationPublisher`; a failed publication leaves the session `VERIFIED` and publishes nothing
   twice.
 - A second `commit()` is `CommitResult.Duplicate`. It does not republish.
@@ -248,22 +284,22 @@ Full audit: `FilenameAndPathAuditTest` in `core-storage/src/test`. Summary of wh
 
 ## Diagnostics
 
-- Every storage type's `toString()` is redacted: no URI, filename, path, descriptor number, digest or
-  file byte appears in it.
-- `TransferStorageError.toString()` is `category:safeMessage` and nothing else. The free-form
-  `diagnostic` field is not part of it.
-- Provider exceptions are converted at the adapter edge into typed domain failures — on open, on
-  positioning, on publication and on cleanup. A raw provider message never crosses into the domain
-  port; where one is kept for a developer, it is in `diagnostic`, which is not logged, not persisted
-  and not printed.
-- One path is different and is recorded rather than smoothed over: `SourceHandle.read` returns a
-  byte count, so it has no way to return a typed failure. An I/O fault in the middle of a read
-  therefore surfaces as an `IOException` from `read`, and the caller converts it with
-  `StorageFailureClassifier` before it reaches the domain. That is the seam Slice 4's runtime will
-  own; this slice does not widen the existing port to change it.
-- No file bytes are retained after an operation completes, and no caller chunk buffer is cached or
-  stored. Ownership of the chunk array stays with the caller; the sink copies what it stores, which
-  the retention test asserts by mutating the caller's buffer afterwards and re-reading the sink.
+- The runtime-facing reader, resume authorization and destination session redact their string forms:
+  no URI, filename, path, descriptor number, digest or file byte is emitted. Legacy objects are not
+  safe to log merely because they have a string form.
+- `TransferStorageError.toString()` is `category:safeMessage` and nothing else. Legacy storage
+  errors may carry a free-form `diagnostic` field; it is never logged, persisted or put into crash
+  reports. The typed source boundary discards that field and never forwards provider exception text.
+- MediaStore pending-row creation and descriptor opening classify unexpected provider exceptions,
+  including cancellation, without retaining their text. Failed phase setup closes its descriptor
+  best-effort. Publication and cleanup reconciliation use fixed details rather than provider text;
+  app-private open failures also replace filesystem exception messages with safe text.
+- The low-level `SourceHandle.read` remains count-based for compatibility and can throw. Before any
+  future runtime use, `TypedSourceReader` wraps it and calls the shared `StorageFailureClassifier`;
+  runtime call sites must not classify raw provider exceptions themselves.
+- The reader and session do not retain caller chunk buffers. Ownership stays with the caller; tests
+  inspect the reader and session and mutate the caller's buffer after writing. This is not a claim
+  that an arbitrary external provider or the operating system never copies or retains data.
 
 ### What cannot be erased
 
@@ -274,35 +310,31 @@ cannot be wiped at all. This document therefore claims **no** erasure property. 
 code does meet is narrower and checkable: no reference is retained, nothing is written to a log, and
 every buffer is bounded.
 
-## What the API 23 suite covers
+## API 23 coverage and deterministic failure tests
 
-`StorageBridgeApi23Test` runs under Robolectric with `sdk = [23]` against a real `ContentProvider`
-behind a real `ContentResolver`, handing out real `ParcelFileDescriptor`s over files on disk.
+`StorageBridgeApi23Test` runs on the host under Robolectric with `sdk = [23]`, using a simulated
+`ContentResolver` and provider with file-backed `ParcelFileDescriptor`s. It exercises the typed
+reader, seekable and simulated non-seekable opens, unknown length, empty and multi-chunk files,
+nonzero resume, pre-open revocation, app-private partials and filename behavior. It is **not** device
+instrumentation. The CI API 23 device run currently instruments `transport-lan`, not `core-storage`.
 
-| Requirement | Where it is covered |
+| Failure or ownership case | Evidence and limitation |
 | --- | --- |
-| seekable `content://` | `StorageBridgeApi23Test` |
-| non-seekable `content://` | `StorageBridgeApi23Test`, through the `SeekabilityProbe` seam |
-| unknown-length descriptor | `StorageBridgeApi23Test`, through the same seam |
-| empty file | `StorageBridgeApi23Test` |
-| multi-chunk read | `StorageBridgeApi23Test` |
-| resume from a nonzero offset | `StorageBridgeApi23Test` and `SourceResumePolicyTest` |
-| permission revoked before open | `StorageBridgeApi23Test` and `SourceResumePolicyTest` |
-| permission revoked during an operation | not reproducible: a descriptor already handed out keeps working after the grant is withdrawn |
-| provider throws during a read | not reproducible with a real descriptor; the path is `SourceHandle.read` and is described above |
-| provider throws during a write | not reproducible without filling a disk; the classifier path is pinned instead |
-| bounded failing sink as disk-full | `StorageBridgeApi23Test` (classifier) and `DestinationSessionTest` (sink that fails) |
-| app-private partial | `StorageBridgeApi23Test` and `AppPrivatePartialTest` |
-| SAF commit, rename fallback and copy | the existing `SafCommitOrderTest`, `SafCommitRecoveryTest`, `SafRenameHistoryTest` and `SafCommitDestinationClosureTest` suites |
-| Unicode filenames and duplicate collision | `FilenameAndPathAuditTest` and `StorageBridgeApi23Test` |
-| cancellation and descriptor cleanup | `StorageBridgeApi23Test`, `DestinationSessionTest`, `DescriptorOwnershipTest` |
-| process-local restoration invocation | the existing `TransferRestorationCoordinatorTest` and `TransferRestorationRoomReconstructionTest` |
-| no network or socket activity | the static checks in `tools/verify/jpake-production-boundary.mjs`; no socket type is reachable from the storage ports |
+| provider read fault after a successful read | `TypedSourceReaderTest` uses a controlled JVM stream; a provider-thrown mid-read exception has not been demonstrated on an API 23 device descriptor |
+| destination write fault after a successful write | `DestinationSessionTest` uses a controlled sink that appends a partial chunk, then reports classified `ENOSPC`; no disk is filled |
+| short write and reconciliation | `DestinationSessionTest` checks physical length, unchanged confirmed frontier, overlap refusal, explicit truncation and continuation |
+| failure redaction and cancellation | `TypedSourceReaderTest` checks classifier categories, discarded raw diagnostics, interruption/cancellation and exactly-once close |
+| destination provider failures | `MediaStorePendingDestinationTest` exercises redacted creation/open/reconciliation failures with a Robolectric provider; `StorageBridgeApi23Test` checks a sanitized app-private open failure |
+| cancellation during descriptor probing | `StorageBridgeApi23Test` checks the Robolectric provider descriptor is closed; this is not a device-instrumentation claim |
+| SAF commit, rename fallback and copy | existing `SafCommitOrderTest`, `SafCommitRecoveryTest`, `SafRenameHistoryTest` and `SafCommitDestinationClosureTest` suites |
+| process-local restoration | existing `TransferRestorationCoordinatorTest` and `TransferRestorationRoomReconstructionTest` suites |
+| no network/socket activity | static checks in `tools/verify/jpake-production-boundary.mjs` |
 
-The two entries marked "not reproducible" are honest gaps, not passes: a real provider that fails
-mid-read cannot be built without a custom descriptor implementation, and a real write failure cannot
-be produced without exhausting a disk. The classification of both is pinned separately, and the
-runtime that will own them arrives with Slice 4.
+Android may keep an already-open descriptor usable after a grant is revoked, and a provider's
+mid-stream exception does not necessarily propagate through that descriptor. The controlled JVM
+read-failure test is the authoritative evidence for the typed boundary; no unexecuted API 23 device
+failure case is claimed as passing. A controlled sink tests disk-full behavior without exhausting a
+real device disk.
 
 ## Inert composition
 
@@ -310,8 +342,8 @@ The shape a real transfer would use exists, and is exercised by tests, but no pr
 composes it:
 
 ```
-source adapter → bounded chunk buffer → destination adapter → flush
-              → digest verification → commit
+source adapter → typed reader → bounded chunk buffer → destination adapter → flush
+                            → expected digest verification → commit
 ```
 
 There is no socket in this path, no payload framing record, and no interpretation of transfer
@@ -323,9 +355,16 @@ each with a mutation test proving the predicate can fail.
 
 ## Status
 
-Slice 3 is complete when the tests pass and CI is green, and its status line is:
+Until this hardening revision passes its exact-SHA gate, the status is:
 
-`PAYLOAD SLICE 3 COMPLETE — STORAGE BRIDGE INERT, PAYLOAD DISABLED`
+`PAYLOAD SLICE 3 HARDENING REQUIRED — PAYLOAD DISABLED`
 
-`CURRENT_MILESTONE` remains 2, `TRANSFER_ENGINE` remains unavailable, the payload gate is
-unconditional, and this slice adds no service, worker, notification, UI or Room change.
+The hardening gate requires the exact committed revision to pass the complete CI, verifier, schema and
+repository-state checks. A previous green checkpoint does not satisfy that gate for later edits. Only
+when the exact revision passes may its verified result be reported as:
+
+`PAYLOAD SLICE 3 COMPLETE — STORAGE BRIDGE HARDENED, PAYLOAD DISABLED`
+
+This conditional statement is not CI evidence. `CURRENT_MILESTONE` remains 2, `TRANSFER_ENGINE` remains
+unavailable, the payload gate is unconditional, and this slice adds no service, worker, notification,
+UI or Room change.

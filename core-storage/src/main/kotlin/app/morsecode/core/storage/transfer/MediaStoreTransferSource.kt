@@ -76,9 +76,7 @@ public class MediaStoreTransferSource internal constructor(
     } catch (e: SecurityException) {
         SourceFingerprintResult.Unavailable(TransferStorageError.PermissionRevoked("read"))
     } catch (e: Exception) {
-        SourceFingerprintResult.Unavailable(
-            TransferStorageError.ProviderFailure("media_store", e.message),
-        )
+        SourceFingerprintResult.Unavailable(StorageFailureClassifier.classifyOrProviderFailure(e, "query", "read"))
     }
 
     override fun openAt(offset: Long): SourceOpenResult =

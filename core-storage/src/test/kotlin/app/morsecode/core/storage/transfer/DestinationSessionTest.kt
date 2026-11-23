@@ -4,6 +4,7 @@ import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Digest
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
+import java.io.IOException
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
 import org.junit.Assert.assertArrayEquals
@@ -85,6 +86,37 @@ class DestinationSessionTest {
         val error = (opened as DestinationOpen.Refused).error
         assertEquals(TransferStorageErrorCategory.STATE, error.category)
         assertEquals("partial_shorter_than_confirmed", (error as TransferStorageError.StateConflict).reason)
+    }
+
+    @Test(timeout = 30_000L)
+    fun aNonzeroRestoredFrontierCannotOpenWithoutTheRetainedDigest() {
+        val sink = MemorySink(initial = byteArrayOf(1, 2, 3, 4))
+        val direct = DestinationSession.open(
+            transferId = transferId,
+            identity = identity,
+            sink = sink,
+            initialConfirmedBytes = 4L,
+        )
+        assertEquals(
+            "expected_sha256_required",
+            ((direct as DestinationOpen.Refused).error as TransferStorageError.StateConflict).reason,
+        )
+
+        // The checkpoint is authoritative even if the caller supplies an initial zero frontier.
+        val checkpoint = MemoryCheckpoint()
+        checkpoint.persist(transferId, 4L, FlushDurability.DurableFlushSupported)
+        val fromCheckpoint = DestinationSession.open(
+            transferId = transferId,
+            identity = identity,
+            sink = sink,
+            checkpointSink = checkpoint,
+            initialConfirmedBytes = 0L,
+        )
+        assertEquals(
+            "expected_sha256_required",
+            ((fromCheckpoint as DestinationOpen.Refused).error as TransferStorageError.StateConflict).reason,
+        )
+        assertEquals(0, sink.writeCalls)
     }
 
     @Test(timeout = 30_000L)
@@ -212,6 +244,83 @@ class DestinationSessionTest {
         val repaired = session.truncateTo(0L)
         assertTrue(repaired is TruncateOutcome.Truncated)
         assertTrue(session.writeAt(0L, ByteArray(10)) is DestinationWrite.Written)
+    }
+
+    @Test(timeout = 30_000L)
+    fun shortWriteAfterConfirmedProgressRequiresExplicitReconciliation() {
+        val sink = MemorySink()
+        val checkpoint = MemoryCheckpoint()
+        val session = openOn(sink, checkpoint = checkpoint).session()
+        assertTrue(session.writeAt(0L, byteArrayOf(1, 2, 3, 4)) is DestinationWrite.Written)
+        assertNull(session.acknowledge(4L))
+
+        sink.shortWriteBytes = 2
+        val nextChunk = byteArrayOf(5, 6, 7, 8, 9, 10)
+        assertTrue(session.writeAt(4L, nextChunk) is DestinationWrite.Failed)
+        assertEquals("the physical partial includes the two unconfirmed bytes", 6L, sink.length())
+        assertEquals(4L, session.expectedFrontier)
+        assertEquals(4L, session.confirmedFrontier)
+        assertEquals(4L, checkpoint.frontier)
+        assertEquals(
+            SequentialRejection.OVERLAP,
+            (session.writeAt(4L, nextChunk) as DestinationWrite.Rejected).reason,
+        )
+        assertTrue(session.acknowledge(6L) is TransferStorageError.StateConflict)
+        assertEquals(4L, session.confirmedFrontier)
+
+        assertTrue(session.truncateTo(4L) is TruncateOutcome.Truncated)
+        assertEquals(4L, sink.length())
+        assertTrue(session.writeAt(4L, nextChunk) is DestinationWrite.Written)
+        assertEquals(10L, sink.length())
+        assertEquals(10L, session.expectedFrontier)
+        assertEquals("newly written bytes remain optimistic", 4L, session.confirmedFrontier)
+        assertNull(session.acknowledge(10L))
+        assertEquals(10L, checkpoint.frontier)
+    }
+
+    @Test(timeout = 30_000L)
+    fun classifiedWriteFailureAfterProgressRequiresTruncationBeforeContinuation() {
+        val secret = "content://private/secret/photo.jpg"
+        val sink = MidStreamFailingSink(secret)
+        val checkpoint = MemoryCheckpoint()
+        val publisher = CountingPublisher()
+        val session = DestinationSession.open(
+            transferId = transferId,
+            identity = identity,
+            sink = sink,
+            checkpointSink = checkpoint,
+            verificationSource = sink.verificationSource(),
+            publisher = publisher,
+        ).session()
+        val first = byteArrayOf(1, 2, 3, 4)
+        val rest = byteArrayOf(5, 6, 7, 8, 9, 10)
+        assertTrue(session.writeAt(0L, first) is DestinationWrite.Written)
+        assertNull(session.acknowledge(4L))
+
+        val failure = session.writeAt(4L, rest) as DestinationWrite.Failed
+        assertEquals(TransferStorageErrorCategory.INSUFFICIENT_SPACE, failure.error.category)
+        assertNull(failure.error.diagnostic)
+        assertFalse(failure.error.toString().contains(secret))
+        assertEquals(6L, sink.length())
+        assertEquals(4L, session.expectedFrontier)
+        assertEquals(4L, session.confirmedFrontier)
+        assertEquals(4L, checkpoint.frontier)
+        assertEquals(
+            SequentialRejection.OVERLAP,
+            (session.writeAt(4L, rest) as DestinationWrite.Rejected).reason,
+        )
+        assertEquals("the overlap is refused before invoking the sink", 2, sink.writeCalls)
+
+        assertTrue(session.truncateTo(4L) is TruncateOutcome.Truncated)
+        assertEquals(4L, sink.length())
+        assertTrue(session.writeAt(4L, rest) is DestinationWrite.Written)
+        assertEquals(10L, sink.length())
+        assertEquals(4L, session.confirmedFrontier)
+        assertNull(session.acknowledge(10L))
+        assertTrue(session.verify(digestOf(first + rest)) is SessionVerification.Verified)
+        assertEquals(CommitResult.Committed, session.commit())
+        assertEquals(1, publisher.publishCount)
+        session.close()
     }
 
     @Test(timeout = 30_000L)
@@ -363,13 +472,124 @@ class DestinationSessionTest {
     }
 
     @Test(timeout = 30_000L)
-    fun verificationWithoutAnExpectedDigestIsRecordedAsSuch() {
+    fun verificationWithoutAnExpectedDigestIsRecordedAsSuchForAFreshSession() {
         val sink = MemorySink()
-        val session = openOn(sink, declared = 16L, publisher = CountingPublisher()).session()
+        val publisher = CountingPublisher()
+        val session = openOn(sink, declared = 16L, publisher = publisher).session()
         session.writeAt(0L, ByteArray(16) { 9 })
         val verification = session.verify(null)
         assertTrue(verification is SessionVerification.Verified)
         assertFalse("must not claim a match that was never checked", (verification as SessionVerification.Verified).matchedExpected)
+        assertEquals(CommitResult.Committed, session.commit())
+        assertEquals(1, publisher.publishCount)
+    }
+
+    @Test(timeout = 30_000L)
+    fun aResumedSessionRejectsNullOrReplacementDigestBeforeCommit() {
+        val original = ByteArray(16) { (it + 1).toByte() }
+        val retained = digestOf(original)
+        val replacement = digestOf(ByteArray(16) { 99 })
+        val sink = MemorySink(initial = original)
+        val publisher = CountingPublisher()
+        val session = openOn(
+            sink, declared = original.size.toLong(), confirmed = original.size.toLong(),
+            publisher = publisher, retainedExpectedSha256 = retained,
+        ).session()
+
+        assertEquals(
+            "resume_digest_required",
+            ((session.verify(null) as SessionVerification.Refused).error as TransferStorageError.StateConflict).reason,
+        )
+        assertTrue(session.commit() is CommitResult.Refused)
+        assertEquals(
+            "resume_digest_changed",
+            ((session.verify(replacement) as SessionVerification.Refused).error as TransferStorageError.StateConflict).reason,
+        )
+        assertTrue(session.commit() is CommitResult.Refused)
+        assertEquals(DestinationSessionState.OPEN, session.currentState)
+        assertEquals(0, publisher.publishCount)
+
+        // A separate, value-equal digest is accepted; the session compares with its retained copy.
+        val verified = session.verify(Sha256Digest(retained.bytes))
+        assertTrue(verified is SessionVerification.Verified)
+        assertTrue((verified as SessionVerification.Verified).matchedExpected)
+        assertEquals(CommitResult.Committed, session.commit())
+        assertEquals(1, publisher.publishCount)
+    }
+
+    @Test(timeout = 30_000L)
+    fun aResumedDigestMismatchCannotBeBypassedWithTheObservedDigestOrNull() {
+        val original = ByteArray(16) { it.toByte() }
+        val changed = original.copyOf().apply { this[12] = (this[12].toInt() xor 1).toByte() }
+        val retained = digestOf(original)
+        val sink = MemorySink(initial = changed)
+        val publisher = CountingPublisher()
+        val session = openOn(
+            sink, declared = changed.size.toLong(), confirmed = changed.size.toLong(),
+            publisher = publisher, retainedExpectedSha256 = retained,
+        ).session()
+
+        assertTrue(session.verify(retained) is SessionVerification.Mismatched)
+        assertTrue(session.commit() is CommitResult.Refused)
+        assertTrue(session.verify(digestOf(changed)) is SessionVerification.Refused)
+        assertTrue(session.verify(null) is SessionVerification.Refused)
+        assertTrue(session.commit() is CommitResult.Refused)
+        assertEquals(DestinationSessionState.OPEN, session.currentState)
+        assertEquals(0, publisher.publishCount)
+    }
+
+    @Test(timeout = 30_000L)
+    fun aVerificationReadFailureAfterProgressCannotAuthorizeAResumedCommit() {
+        val body = byteArrayOf(1, 2, 3, 4)
+        val retained = digestOf(body)
+        val sink = MemorySink(initial = body)
+        val publisher = CountingPublisher()
+        val secret = "content://private/secret/photo.jpg"
+        var reads = 0
+        val verificationSource = VerificationSource { _, buffer, dataOffset, _ ->
+            reads++
+            if (reads == 1) {
+                buffer[dataOffset] = body[0]
+                1
+            } else {
+                throw IOException(secret)
+            }
+        }
+        val opened = DestinationSession.open(
+            transferId = transferId,
+            identity = identity,
+            sink = sink,
+            verificationSource = verificationSource,
+            publisher = publisher,
+            initialConfirmedBytes = body.size.toLong(),
+            retainedExpectedSha256 = retained,
+        ) as DestinationOpen.Opened
+        val failure = opened.session.verify(retained, buffer = ByteArray(2)) as SessionVerification.Failed
+        assertEquals(TransferStorageErrorCategory.IO, failure.error.category)
+        assertNull(failure.error.diagnostic)
+        assertFalse(failure.toString().contains(secret))
+        assertTrue(opened.session.commit() is CommitResult.Refused)
+        assertEquals(0, publisher.publishCount)
+        assertEquals(2, reads)
+    }
+
+    @Test(timeout = 30_000L)
+    fun aResumeAuthorizationCannotVerifyASessionBoundToADifferentDigest() {
+        val body = ByteArray(16) { it.toByte() }
+        val original = digestOf(body)
+        val different = digestOf(body + 1.toByte())
+        val metadata = SourceFingerprint.UNKNOWN
+        val ready = SourceResumePolicy.authorize(metadata, SourceFingerprintResult.Available(metadata), original)
+            as SourceResumeDecision.Ready
+        val sink = MemorySink(initial = body)
+        val session = openOn(
+            sink, confirmed = body.size.toLong(), retainedExpectedSha256 = different,
+        ).session()
+        assertEquals(
+            "resume_digest_changed",
+            ((ready.verify(session) as SessionVerification.Refused).error as TransferStorageError.StateConflict).reason,
+        )
+        assertTrue(session.commit() is CommitResult.Refused)
     }
 
     @Test(timeout = 30_000L)
@@ -436,8 +656,8 @@ class DestinationSessionTest {
     fun abortAfterAFailedWriteStillSucceeds() {
         val sink = MemorySink(failure = TransferStorageError.Io("write"))
         val aborts = intArrayOf(0)
-        val session = openOn(MemorySink(), abortAction = { aborts[0]++; null }).session()
-        assertTrue(sink.writeAt(0L, ByteArray(1), 0, 1) is WriteOutcome.Failed)
+        val session = openOn(sink, abortAction = { aborts[0]++; null }).session()
+        assertTrue(session.writeAt(0L, ByteArray(1)) is DestinationWrite.Failed)
         assertEquals(AbortResult.Aborted, session.abort())
         assertEquals(1, aborts[0])
         assertEquals(DestinationSessionState.ABORTED, session.currentState)
@@ -524,6 +744,7 @@ class DestinationSessionTest {
         publisher: CountingPublisher? = null,
         abortAction: (() -> TransferStorageError?)? = null,
         resources: List<Closeable> = emptyList(),
+        retainedExpectedSha256: Sha256Digest? = if (confirmed > 0L) digestOf(sink.bytes()) else null,
     ): DestinationOpen = LanDestinationSession.open(
         transferId = transferId,
         identity = identity,
@@ -535,6 +756,7 @@ class DestinationSessionTest {
         abortAction = abortAction,
         resources = resources,
         initialConfirmedBytes = confirmed,
+        retainedExpectedSha256 = retainedExpectedSha256,
     ) {
         // The memory sink reads back through the same object; a real adapter passes a handle.
         sink.verificationSource()
@@ -617,6 +839,28 @@ class DestinationSessionTest {
         }
     }
 
+    /** Writes a prefix of the second chunk, then throws a controlled ENOSPC for the session to classify. */
+    private class MidStreamFailingSink(private val secret: String) : PartialSink {
+        private val delegate = MemorySink()
+        var writeCalls: Int = 0
+            private set
+
+        override fun length(): Long = delegate.length()
+
+        override fun writeAt(offset: Long, buffer: ByteArray, dataOffset: Int, length: Int): WriteOutcome {
+            writeCalls++
+            if (writeCalls == 2) {
+                check(delegate.writeAt(offset, buffer, dataOffset, minOf(2, length)) is WriteOutcome.Written)
+                throw IOException("ENOSPC $secret")
+            }
+            return delegate.writeAt(offset, buffer, dataOffset, length)
+        }
+
+        override fun flush(): FlushDurability = delegate.flush()
+        override fun truncateTo(offset: Long): TruncateOutcome = delegate.truncateTo(offset)
+        fun verificationSource(): VerificationSource = delegate.verificationSource()
+    }
+
     private class MemoryCheckpoint(private val failing: Boolean = false) : CheckpointSink {
         var frontier: Long = 0L
             private set
@@ -670,6 +914,7 @@ internal object LanDestinationSession {
         abortAction: (() -> TransferStorageError?)? = null,
         resources: List<Closeable> = emptyList(),
         initialConfirmedBytes: Long = 0L,
+        retainedExpectedSha256: Sha256Digest? = null,
         unusedSource: (() -> VerificationSource?)? = null,
     ): DestinationOpen {
         unusedSource?.invoke()
@@ -684,6 +929,7 @@ internal object LanDestinationSession {
             abortAction = abortAction,
             resources = resources,
             initialConfirmedBytes = initialConfirmedBytes,
+            retainedExpectedSha256 = retainedExpectedSha256,
         )
     }
 }

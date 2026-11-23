@@ -62,6 +62,7 @@ class MediaStoreSourceTest {
 
         /** When set, `query` behaves as a provider that will not answer. */
         var queryReturnsNull = false
+        var queryFailure: RuntimeException? = null
 
         /** Every descriptor handed out, so closure can be proven afterwards. */
         val handedOut = mutableListOf<ParcelFileDescriptor>()
@@ -75,6 +76,7 @@ class MediaStoreSourceTest {
             selectionArgs: Array<out String>?,
             sortOrder: String?,
         ): Cursor? {
+            queryFailure?.let { throw it }
             if (queryReturnsNull) return null
             val columns = projection ?: COLUMNS
             val id = uri.lastPathSegment?.toLongOrNull() ?: return null
@@ -224,6 +226,37 @@ class MediaStoreSourceTest {
     }
 
     @Test
+    fun `a fresh fingerprint observes a changed provider identity`() {
+        seed()
+        val source = MediaStoreTransferSources.create(resolver, uriFor(42L), relative)
+        val stored = (source.fingerprint() as SourceFingerprintResult.Available).fingerprint
+        provider.rows[42L] = provider.rows.getValue(42L).copy(id = 43L)
+        val current = source.fingerprint()
+        assertEquals(FingerprintOutcome.DEFINITE_CHANGE, SourceChangePolicy.evaluate(stored, current))
+        assertTrue(
+            SourceResumePolicy.authorize(stored, current, app.morsecode.core.transfer.integrity.Sha256Digest(ByteArray(32)))
+                is SourceResumeDecision.Refused,
+        )
+    }
+
+    @Test
+    fun `fingerprint failures do not retain provider text or downgrade cancellation`() {
+        seed()
+        val source = MediaStoreTransferSources.create(resolver, uriFor(42L), relative)
+        val secret = "content://private/secret/photo.jpg"
+        provider.queryFailure = IllegalStateException(secret)
+        val failed = source.fingerprint() as SourceFingerprintResult.Unavailable
+        assertEquals(TransferStorageErrorCategory.PROVIDER, failed.error.category)
+        assertNull(failed.error.diagnostic)
+        assertFalse(failed.toString().contains(secret))
+        assertFalse(failed.error.safeMessage().contains(secret))
+
+        provider.queryFailure = java.util.concurrent.CancellationException(secret)
+        val cancelled = source.fingerprint() as SourceFingerprintResult.Unavailable
+        assertEquals(TransferStorageError.Cancelled, cancelled.error)
+    }
+
+    @Test
     fun `a provider that will not state a length says so instead of claiming zero`() {
         seed(reportedSize = null)
         val source = MediaStoreTransferSources.create(resolver, uriFor(42L), relative)
@@ -365,16 +398,15 @@ class MediaStoreSourceTest {
     // --- change and mutation ---------------------------------------------------------
 
     @Test
-    fun `a media item edited in place is still the same item`() {
+    fun `an edited media item with the same id and different size requires restart`() {
         seed(size = 4_096)
         val source = MediaStoreTransferSources.create(resolver, uriFor(42L), relative)
         val stored = (source.fingerprint() as SourceFingerprintResult.Available).fingerprint
 
         provider.rows[42L] = FakeMediaProvider.Row(42L, "clip.mp4", 9_999L, "video/mp4", 1_700_000_099L)
 
-        // The id outranks the size, so a resumed transfer is not thrown away
-        // because the file was edited while it waited.
-        assertEquals(FingerprintOutcome.STRONG_MATCH, SourceChangePolicy.evaluate(stored, source.fingerprint()))
+        // A stable media id identifies the object, not the bytes it contained before the edit.
+        assertEquals(FingerprintOutcome.DEFINITE_CHANGE, SourceChangePolicy.evaluate(stored, source.fingerprint()))
     }
 
     // --- closure ------------------------------------------------------------------------

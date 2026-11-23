@@ -4,6 +4,7 @@ import android.util.Base64
 import java.io.Closeable
 import java.io.File
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -68,8 +69,8 @@ public class AppPrivatePartial internal constructor(
                 ),
             )
         }
-    } catch (e: IOException) {
-        WriteOutcome.Failed(TransferStorageError.Io("write", e.message))
+    } catch (e: Exception) {
+        WriteOutcome.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "write", "write"))
     }
 
     override fun flush(): FlushDurability = try {
@@ -77,15 +78,15 @@ public class AppPrivatePartial internal constructor(
         // "durable" may be claimed without qualification.
         channel.force(true)
         FlushDurability.DurableFlushSupported
-    } catch (e: IOException) {
-        FlushDurability.FlushFailed(TransferStorageError.Io("sync", e.message))
+    } catch (e: Exception) {
+        FlushDurability.FlushFailed(StorageFailureClassifier.classifyOrProviderFailure(e, "sync", "write"))
     }
 
     override fun truncateTo(offset: Long): TruncateOutcome = try {
         channel.truncate(offset)
         TruncateOutcome.Truncated(channel.size())
-    } catch (e: IOException) {
-        TruncateOutcome.Failed(TransferStorageError.Io("truncate", e.message))
+    } catch (e: Exception) {
+        TruncateOutcome.Failed(StorageFailureClassifier.classifyOrProviderFailure(e, "truncate", "write"))
     }
 
     /** Reads this partial back for verification, in bounded positional reads. */
@@ -148,25 +149,43 @@ public class AppPrivatePartialStore(private val directory: File) {
      * before the failure is reported rather than leaked.
      */
     public fun open(identity: PartialIdentity): AppPrivatePartial {
-        if (!directory.exists() && !directory.mkdirs()) {
-            // Deliberately not a path in the message: this exception text can
-            // reach a crash report.
-            throw IOException(TransferStorageError.Io("open").safeMessage())
+        try {
+            if (!directory.exists() && !directory.mkdirs()) {
+                // Deliberately not a path in the message: this exception text can reach a crash report.
+                throw IOException(TransferStorageError.Io("open").safeMessage())
+            }
+        } catch (_: SecurityException) {
+            throw SecurityException(TransferStorageError.PermissionRevoked("write").safeMessage())
         }
         val file = fileFor(identity)
         // RandomAccessFile rather than FileOutputStream: a channel taken from a
         // FileOutputStream is write-only, so verification could not read the
         // bytes back. And rather than FileChannel.open, which needs
         // java.nio.file and therefore API 26 — this module supports API 23.
-        val random = RandomAccessFile(file, "rw")
+        val random = try {
+            RandomAccessFile(file, "rw")
+        } catch (error: IOException) {
+            throw safeOpenIOException(error)
+        } catch (_: SecurityException) {
+            throw SecurityException(TransferStorageError.PermissionRevoked("write").safeMessage())
+        }
         val resource = OwnedResource(random)
         return try {
             val channel = resource.adopt(random.channel)
             AppPrivatePartial(identity, resource, channel)
-        } catch (e: IOException) {
+        } catch (error: IOException) {
             resource.close()
-            throw e
+            throw safeOpenIOException(error)
+        } catch (_: SecurityException) {
+            resource.close()
+            throw SecurityException(TransferStorageError.PermissionRevoked("write").safeMessage())
         }
+    }
+
+    private fun safeOpenIOException(error: IOException): IOException {
+        val failure = StorageFailureClassifier.classifyOrProviderFailure(error, "open", "write")
+        return if (failure == TransferStorageError.Cancelled) InterruptedIOException(failure.safeMessage())
+        else IOException(failure.safeMessage())
     }
 
     /** Deletes the partial. Idempotent: deleting what is not there succeeds. */

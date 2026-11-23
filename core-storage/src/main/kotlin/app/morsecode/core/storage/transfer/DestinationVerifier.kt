@@ -117,7 +117,7 @@ public object DestinationVerifier {
         require(totalBytes >= 0L) { "totalBytes must not be negative, was $totalBytes" }
         require(buffer.isNotEmpty()) { "buffer must not be empty" }
         require(maxZeroProgressSteps >= 1) { "maxZeroProgressSteps must be at least 1" }
-        if (isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
+        if (Thread.currentThread().isInterrupted || isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
 
         val digester = newDigester()
 
@@ -126,13 +126,20 @@ public object DestinationVerifier {
         val capacity = buffer.size
 
         while (offset < totalBytes) {
-            if (isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
+            if (Thread.currentThread().isInterrupted || isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
             val remaining = totalBytes - offset
             val toRead = if (remaining < capacity.toLong()) remaining.toInt() else capacity
-            val count = source.read(offset, buffer, 0, toRead)
+            val count = try {
+                source.read(offset, buffer, 0, toRead)
+            } catch (error: Exception) {
+                return VerifyResult.Failed(StorageFailureClassifier.classifyOrProviderFailure(error, "read", "read"))
+            }
+            if (Thread.currentThread().isInterrupted || isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
 
             when {
-                count < 0 -> return VerifyResult.Failed(
+                count < -1 -> return VerifyResult.Failed(TransferStorageError.ProviderFailure("verification_source"))
+
+                count == -1 -> return VerifyResult.Failed(
                     TransferStorageError.StateConflict(
                         reason = "verification_source_ended_early",
                         diagnostic = "source ended at $offset of $totalBytes bytes",
@@ -175,7 +182,7 @@ public object DestinationVerifier {
             )
         }
 
-        if (isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
+        if (Thread.currentThread().isInterrupted || isCancelled()) return VerifyResult.Failed(TransferStorageError.Cancelled)
         val observed = digester.digest()
         return when {
             expected == null -> VerifyResult.VerifiedWithoutExpected(observed, offset)

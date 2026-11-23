@@ -1,9 +1,12 @@
 package app.morsecode.core.storage.transfer
 
 import app.morsecode.core.transfer.integrity.Sha256Digest
+import java.io.IOException
+import java.util.concurrent.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -234,6 +237,39 @@ class DestinationVerifierTest {
     }
 
     // --- failure handling ------------------------------------------------------
+
+    @Test
+    fun `a read exception after verification progress is classified and redacted`() {
+        val secret = "content://private/secret/photo.jpg"
+        var calls = 0
+        val source = VerificationSource { _, buffer, dataOffset, _ ->
+            calls++
+            if (calls == 1) {
+                buffer[dataOffset] = 7
+                1
+            } else {
+                throw IOException(secret)
+            }
+        }
+        val result = DestinationVerifier.verify(source, 4L, null) as VerifyResult.Failed
+        assertEquals(TransferStorageErrorCategory.IO, result.error.category)
+        assertNull(result.error.diagnostic)
+        assertFalse(result.toString().contains(secret))
+        assertFalse(result.allowsCommit)
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun `verification preserves wrapped cancellation and rejects impossible negative counts`() {
+        val cancelled = DestinationVerifier.verify(
+            VerificationSource { _, _, _, _ -> throw IllegalStateException("private", CancellationException("private")) },
+            1L, null,
+        ) as VerifyResult.Failed
+        assertEquals(TransferStorageError.Cancelled, cancelled.error)
+        val impossible = DestinationVerifier.verify(VerificationSource { _, _, _, _ -> -2 }, 1L, null) as VerifyResult.Failed
+        assertEquals(TransferStorageErrorCategory.PROVIDER, impossible.error.category)
+        assertFalse(impossible.allowsCommit)
+    }
 
     @Test
     fun `a source that ends early fails rather than digesting what it got`() {

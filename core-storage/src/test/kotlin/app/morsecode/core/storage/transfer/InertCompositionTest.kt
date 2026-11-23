@@ -34,10 +34,8 @@ import org.robolectric.annotation.Config
  * that the flush the sink reports is backed by `force(true)` on a real file descriptor, and that the
  * digest taken over the destination equals the digest the source produced.
  *
- * The source and sink below are thin adapters over `RandomAccessFile`. They exist because the Android
- * adapters need a `Uri` and a `Context`, and this file is deliberately plain JVM so the composition
- * runs without Robolectric. The adapters' own behaviour is covered by their own tests; what is on
- * trial here is the seam between the two ports.
+ * The source is the shipped file adapter, exercised under Robolectric; the sink is a small file-backed
+ * test adapter. What is on trial here is the typed-read and destination seam between the two ports.
  *
  * The transfer is deliberately interrupted and resumed once. A composition that only works for a
  * transfer that never breaks would not be evidence of much.
@@ -80,7 +78,7 @@ class InertCompositionTest {
     /** Copies [length] bytes from the source into the session, reusing one buffer. */
     private fun pump(
         session: DestinationSession,
-        source: SourceHandle,
+        source: TypedSourceReader,
         buffer: ByteArray,
         fromOffset: Long,
         length: Long,
@@ -90,8 +88,11 @@ class InertCompositionTest {
         val end = fromOffset + length
         while (offset < end) {
             val want = minOf(buffer.size.toLong(), end - offset).toInt()
-            val read = source.read(buffer, 0, want)
-            if (read <= 0) error("source ended at $offset, expected $end")
+            val read = when (val outcome = source.read(buffer, 0, want)) {
+                is SourceReadResult.Data -> outcome.count
+                SourceReadResult.EndOfSource -> error("source ended at $offset, expected $end")
+                is SourceReadResult.Failure -> error("typed source failure: ${outcome.error}")
+            }
             val written = session.writeAt(offset, buffer, 0, read)
             assertTrue("write at $offset failed: $written", written is DestinationWrite.Written)
             offset = (written as DestinationWrite.Written).frontier
@@ -123,7 +124,7 @@ class InertCompositionTest {
         val sink = sink()
         val session = openSession(sink, size, publisher)
 
-        val handle = (source().openAt(0L) as SourceOpenResult.Opened).handle
+        val handle = (TypedSourceReader.openAt(source(), 0L) as TypedSourceOpen.Opened).reader
         var chunks = 0
         try {
             val end = pump(session, handle, buffer, 0L, size.toLong()) { chunks++ }
@@ -161,11 +162,16 @@ class InertCompositionTest {
         val size = 250_000
         val expected = seed(size)
         val buffer = ByteArray(chunkBytes)
+        val originalFingerprint = (source().fingerprint() as SourceFingerprintResult.Available)
+            .fingerprint.copy(lastModifiedEpochMillis = null)
+        val expectedDigester = Sha256Digester()
+        expectedDigester.update(expected, 0, expected.size)
+        val expectedDigest = expectedDigester.digest()
 
         // First life: write 100 KiB, acknowledge it, then vanish without a flush or a close.
         val firstSink = sink()
         val firstSession = openSession(firstSink, size)
-        val firstHandle = (source().openAt(0L) as SourceOpenResult.Opened).handle
+        val firstHandle = (TypedSourceReader.openAt(source(), 0L) as TypedSourceOpen.Opened).reader
         try {
             pump(firstSession, firstHandle, buffer, 0L, 100_000L)
             assertNull(firstSession.acknowledge(100_000L))
@@ -186,6 +192,7 @@ class InertCompositionTest {
             declaredSizeBytes = size.toLong(),
             verificationSource = resumedSink.verificationSource(),
             initialConfirmedBytes = 100_000L,
+            retainedExpectedSha256 = expectedDigest,
             publisher = RecordingPublisher(),
             resources = listOf(resumedSink),
         )
@@ -195,19 +202,29 @@ class InertCompositionTest {
         assertEquals(100_000L, session.expectedFrontier)
         assertEquals(100_000L, session.confirmedFrontier)
 
+        // With unavailable metadata, the original digest must be retained across restoration.
+        val liveFingerprint = (source().fingerprint() as SourceFingerprintResult.Available)
+            .fingerprint.copy(lastModifiedEpochMillis = null)
+        val current = SourceFingerprintResult.Available(liveFingerprint)
+        assertTrue(SourceResumePolicy.authorize(originalFingerprint, current, null) is SourceResumeDecision.Refused)
+        val authorization = SourceResumePolicy.authorize(originalFingerprint, current, expectedDigest)
+            as SourceResumeDecision.Ready
+        assertEquals(FingerprintOutcome.MISSING_METADATA, authorization.fingerprintOutcome)
+
         // The source is reopened at the frontier too, rather than re-read from zero.
-        val handle = (source().openAt(100_000L) as SourceOpenResult.Opened).handle
+        val resumedSource = TypedSourceReader.openAt(source(), 100_000L, authorization) as TypedSourceOpen.Opened
+        val handle = resumedSource.reader
         try {
-            assertEquals(100_000L, handle.openedAtOffset)
+            assertEquals(100_000L, resumedSource.offset)
             pump(session, handle, buffer, 100_000L, size - 100_000L)
             assertNull(session.acknowledge(size.toLong()))
         } finally {
             handle.close()
         }
 
-        val digester = Sha256Digester()
-        digester.update(expected, 0, expected.size)
-        assertTrue(session.verify(digester.digest()) is SessionVerification.Verified)
+        val verified = authorization.verify(session)
+        assertTrue(verified is SessionVerification.Verified)
+        assertTrue((verified as SessionVerification.Verified).matchedExpected)
         assertEquals(CommitResult.Committed, session.commit())
         session.close()
 
@@ -224,7 +241,7 @@ class InertCompositionTest {
         val sink = sink()
         val session = openSession(sink, size, publisher)
 
-        val handle = (source().openAt(0L) as SourceOpenResult.Opened).handle
+        val handle = (TypedSourceReader.openAt(source(), 0L) as TypedSourceOpen.Opened).reader
         try {
             pump(session, handle, buffer, 0L, 40_000L)
             // A flipped bit in transit: the destination keeps it, verification must refuse it.
@@ -242,6 +259,58 @@ class InertCompositionTest {
         assertTrue(session.commit() is CommitResult.Refused)
         assertEquals("nothing was published", 0, publisher.calls)
         assertEquals(DestinationSessionState.OPEN, session.currentState)
+        session.close()
+    }
+
+    @Test(timeout = 120_000L)
+    fun sameSizeAndTimestampMutationIsCaughtByTheRetainedDigestBeforeCommit() {
+        val size = 20_000
+        val split = 8_192
+        val original = seed(size)
+        val stored = (source().fingerprint() as SourceFingerprintResult.Available).fingerprint
+        val timestamp = sourceFile.lastModified()
+        val expected = Sha256Digester().apply { update(original, 0, original.size) }.digest()
+
+        val changed = original.copyOf()
+        changed[15_000] = (changed[15_000].toInt() xor 1).toByte()
+        sourceFile.writeBytes(changed)
+        assertTrue("restore the original timestamp to model an undetectable metadata match", sourceFile.setLastModified(timestamp))
+        val current = source().fingerprint()
+        assertEquals(FingerprintOutcome.STRONG_MATCH, SourceChangePolicy.evaluate(stored, current))
+        val authorization = SourceResumePolicy.authorize(stored, current, expected) as SourceResumeDecision.Ready
+
+        // A persisted partial still contains the old prefix; the resumed tail is from the edit.
+        partialFile.writeBytes(original.copyOfRange(0, split))
+        val sink = sink()
+        val publisher = RecordingPublisher()
+        val opened = DestinationSession.open(
+            transferId = transferId,
+            identity = identity,
+            sink = sink,
+            declaredSizeBytes = size.toLong(),
+            verificationSource = sink.verificationSource(),
+            initialConfirmedBytes = split.toLong(),
+            retainedExpectedSha256 = expected,
+            publisher = publisher,
+            resources = listOf(sink),
+        ) as DestinationOpen.Opened
+        val session = opened.session
+        val reader = (TypedSourceReader.openAt(source(), split.toLong(), authorization) as TypedSourceOpen.Opened).reader
+        try {
+            pump(session, reader, ByteArray(chunkBytes), split.toLong(), (size - split).toLong())
+            assertNull(session.acknowledge(size.toLong()))
+        } finally {
+            reader.close()
+        }
+        assertTrue(authorization.verify(session) is SessionVerification.Mismatched)
+        assertTrue(session.commit() is CommitResult.Refused)
+        // Neither a missing digest nor the edited file's digest can replace the value retained
+        // when the resumed session opened.
+        val editedDigest = Sha256Digester().apply { update(changed, 0, changed.size) }.digest()
+        assertTrue(session.verify(null) is SessionVerification.Refused)
+        assertTrue(session.verify(editedDigest) is SessionVerification.Refused)
+        assertTrue(session.commit() is CommitResult.Refused)
+        assertEquals(0, publisher.calls)
         session.close()
     }
 

@@ -10,6 +10,7 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.CancellationSignal
+import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import androidx.test.core.app.ApplicationProvider
@@ -17,10 +18,13 @@ import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.integrity.Sha256Digest
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -64,6 +68,10 @@ class MediaStorePendingDestinationTest {
 
         // --- how the provider misbehaves, one flag per race -------------------
         var throwSecurityOnOpen = false
+        var insertFailure: Exception? = null
+        var openFailure: Exception? = null
+        var updateFailure: Exception? = null
+        var deleteFailure: Exception? = null
         var readOnlyOnWriteOpen = false
         var throwOnQuery = false
         var throwSecurityOnQuery = false
@@ -80,6 +88,7 @@ class MediaStorePendingDestinationTest {
         override fun onCreate(): Boolean = true
 
         override fun insert(uri: Uri, values: ContentValues?): Uri? {
+            insertFailure?.let { throw it }
             val id = nextId++
             val stored = ContentValues(values ?: ContentValues())
             stored.put(MediaStore.MediaColumns._ID, id)
@@ -124,6 +133,7 @@ class MediaStorePendingDestinationTest {
             selection: String?,
             selectionArgs: Array<out String>?,
         ): Int {
+            updateFailure?.let { throw it }
             if (deleteRowBeforeUpdate) {
                 val id = ContentUris.parseId(uri)
                 rows.remove(id)
@@ -139,6 +149,7 @@ class MediaStorePendingDestinationTest {
         }
 
         override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
+            deleteFailure?.let { throw it }
             val id = ContentUris.parseId(uri)
             // The bytes go with the row, as they do in MediaStore.
             files.remove(id)
@@ -156,6 +167,7 @@ class MediaStorePendingDestinationTest {
             mode: String,
             signal: CancellationSignal?,
         ): ParcelFileDescriptor? {
+            openFailure?.let { throw it }
             if (throwSecurityOnOpen) throw SecurityException("grant revoked")
             val file = files[ContentUris.parseId(uri)] ?: throw FileNotFoundException("gone")
             val flags = when {
@@ -235,6 +247,72 @@ class MediaStorePendingDestinationTest {
         val partial = opened(uri)
         assertTrue(partial.writeAt(0L, bytes, 0, bytes.size) is WriteOutcome.Written)
         partial.close()
+    }
+
+    private fun providerFailureCases(secret: String): List<Pair<Exception, TransferStorageErrorCategory>> = listOf(
+        IllegalStateException(secret) to TransferStorageErrorCategory.PROVIDER,
+        IOException(secret) to TransferStorageErrorCategory.IO,
+        SecurityException(secret) to TransferStorageErrorCategory.PERMISSION_REVOKED,
+        CancellationException(secret) to TransferStorageErrorCategory.CANCELLED,
+        IllegalStateException(secret, OperationCanceledException(secret)) to TransferStorageErrorCategory.CANCELLED,
+        IOException("ENOSPC $secret") to TransferStorageErrorCategory.INSUFFICIENT_SPACE,
+    )
+
+    private fun assertRedacted(error: TransferStorageError, expected: TransferStorageErrorCategory, secret: String) {
+        assertEquals(expected, error.category)
+        assertNull(error.diagnostic)
+        assertFalse(error.toString().contains(secret))
+        assertFalse(error.safeMessage().contains(secret))
+    }
+
+    @Test
+    fun `unexpected create failures are typed redacted and preserve cancellation`() {
+        val secret = "content://private/secret/photo.jpg"
+        for ((failure, category) in providerFailureCases(secret)) {
+            provider.insertFailure = failure
+            val result = MediaStorePendingDestination.create(resolver, collection, "clip.mp4", "video/mp4")
+            assertTrue(result is PendingCreation.Refused)
+            assertRedacted((result as PendingCreation.Refused).error, category, secret)
+        }
+        assertTrue("failed creation must not insert a row", provider.rows.isEmpty())
+    }
+
+    @Test
+    fun `unexpected descriptor open failures are typed redacted and preserve cancellation`() {
+        val uri = createPending()
+        val secret = "content://private/secret/photo.jpg"
+        for ((failure, category) in providerFailureCases(secret) +
+            (FileNotFoundException(secret) to TransferStorageErrorCategory.NOT_FOUND)
+        ) {
+            provider.openFailure = failure
+            val write = MediaStorePendingDestination.openForWrite(resolver, uri, identity)
+            val read = MediaStorePendingDestination.openForRead(resolver, uri)
+            assertTrue(write is PendingOpen.Refused)
+            assertTrue(read is PendingReadOpen.Refused)
+            assertRedacted((write as PendingOpen.Refused).error, category, secret)
+            assertRedacted((read as PendingReadOpen.Refused).error, category, secret)
+        }
+        assertTrue("a failed open cannot hand out a descriptor", provider.handedOut.isEmpty())
+    }
+
+    @Test
+    fun `publication and cleanup reconciliation omit provider exception text`() {
+        val uri = createPending()
+        written(uri)
+        val secret = "content://private/secret/photo.jpg"
+        provider.updateFailure = IllegalStateException(secret)
+        val publication = MediaStorePendingDestination.publish(
+            resolver, uri, identity, payload.size.toLong(), digestOf(payload),
+        )
+        assertTrue(publication is Publication.ReconciliationRequired)
+        assertFalse(publication.toString().contains(secret))
+        assertEquals(PendingState.PENDING, MediaStorePendingDestination.stateOf(resolver, uri))
+
+        provider.deleteFailure = IllegalStateException(secret)
+        val abandoned = MediaStorePendingDestination.abandon(resolver, uri)
+        assertTrue(abandoned is AbandonOutcome.ReconciliationRequired)
+        assertFalse(abandoned.toString().contains(secret))
+        assertEquals(PendingState.PENDING, MediaStorePendingDestination.stateOf(resolver, uri))
     }
 
     // =========================================================================

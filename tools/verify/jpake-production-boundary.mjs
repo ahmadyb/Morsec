@@ -146,11 +146,41 @@ const MULTIPLEXER_API23_TEST_PATH =
 
 const STORAGE_PACKAGE = 'core-storage/src/main/kotlin/app/morsecode/core/storage/transfer/';
 const STORAGE_SESSION_PATH = `${STORAGE_PACKAGE}DestinationSession.kt`;
+const STORAGE_VERIFIER_PATH = `${STORAGE_PACKAGE}DestinationVerifier.kt`;
+const STORAGE_PRIVATE_PARTIAL_PATH = `${STORAGE_PACKAGE}AppPrivatePartial.kt`;
+const STORAGE_PENDING_PARTIAL_PATH = `${STORAGE_PACKAGE}MediaStorePendingDestination.kt`;
 const STORAGE_CAPACITY_PATH = `${STORAGE_PACKAGE}DestinationCapacity.kt`;
+const STORAGE_TYPED_READ_PATH = `${STORAGE_PACKAGE}TypedSourceReader.kt`;
+const STORAGE_FINGERPRINT_PATH = `${STORAGE_PACKAGE}SourceFingerprint.kt`;
+const STORAGE_RESUME_PATH = `${STORAGE_PACKAGE}SourceResumePolicy.kt`;
+const STORAGE_CLASSIFIER_PATH = `${STORAGE_PACKAGE}StorageFailureClassifier.kt`;
+const STORAGE_DISCARD_PATH = `${STORAGE_PACKAGE}NonSeekableRepositioner.kt`;
+const STORAGE_SOURCE_OPENER_PATH = `${STORAGE_PACKAGE}ProviderSourceOpener.kt`;
+const STORAGE_SOURCE_ADAPTER_PATHS = [
+  STORAGE_SOURCE_OPENER_PATH,
+  `${STORAGE_PACKAGE}FileBackedTransferSource.kt`,
+  `${STORAGE_PACKAGE}MediaStoreTransferSource.kt`,
+  `${STORAGE_PACKAGE}SafDocumentTransferSource.kt`,
+];
+const LOW_LEVEL_SOURCE_FILES = new Set([
+  `${STORAGE_PACKAGE}TransferSource.kt`,
+  `${STORAGE_PACKAGE}ProviderSourceOpener.kt`,
+  `${STORAGE_PACKAGE}FileBackedTransferSource.kt`,
+  `${STORAGE_PACKAGE}MediaStoreTransferSource.kt`,
+  `${STORAGE_PACKAGE}SafDocumentTransferSource.kt`,
+  STORAGE_TYPED_READ_PATH,
+]);
 const STORAGE_BRIDGE_DOC_PATH = 'doc/transfer-storage-bridge.md';
 const STORAGE_TEST_PATHS = [
   'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/DestinationSessionTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/DestinationVerifierTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/MediaStorePendingDestinationTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/MediaStoreSourceTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/SafDocumentSourceTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/FileBackedTransferSourceTest.kt',
   'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/SourceResumePolicyTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/SourceChangePolicyTest.kt',
+  'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/TypedSourceReaderTest.kt',
   'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/FilenameAndPathAuditTest.kt',
   'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/DestinationCapacityTest.kt',
   'core-storage/src/test/kotlin/app/morsecode/core/storage/transfer/InertCompositionTest.kt',
@@ -444,16 +474,18 @@ function docRowStates(docText, name, formattedValue) {
 function payloadGateRefusesOnly(contractsText) {
   const gate = contractsText.match(/object PayloadTransferGate\s*\{[\s\S]*?\n\}/);
   if (gate === null) return false;
-  if (/PayloadTransferDecision\.Authorized/.test(contractsText)) return false;
-  return /return PayloadTransferDecision\.Refused\(\s*SessionFailure\(\s*SessionFailureCode\.SECURE_SESSION_REQUIRED/.test(
-    gate[0],
-  );
+  const code = kotlinWithoutComments(gate[0]);
+  if (/PayloadTransferDecision\.Authorized/.test(kotlinWithoutComments(contractsText))) return false;
+  if (/\b(?:if|when|else)\b/.test(code) || (code.match(/\breturn\b/g) ?? []).length !== 1) return false;
+  return /return PayloadTransferDecision\.Refused\(\s*SessionFailure\(\s*SessionFailureCode\.SECURE_SESSION_REQUIRED/.test(code);
 }
 
-/** Milestone 2 and the gated transfer engine, pinned to their exact declarations. */
+/** Pin the milestone, the engine's delivery milestone and the actual readiness comparison. */
 function milestonePinsHold(featureReadiness) {
-  return /CURRENT_MILESTONE\s*:\s*Int\s*=\s*2\b/.test(featureReadiness) &&
-    /TRANSFER_ENGINE\("transfer_engine",\s*5\)/.test(featureReadiness);
+  const code = kotlinWithoutComments(featureReadiness);
+  return /CURRENT_MILESTONE\s*:\s*Int\s*=\s*2\b/.test(code) &&
+    /TRANSFER_ENGINE\("transfer_engine",\s*5\)/.test(code) &&
+    /fun\s+isAvailable\s*\(\s*area\s*:\s*FeatureArea\s*\)\s*:\s*Boolean\s*=\s*area\.deliveredInMilestone\s*<=\s*CURRENT_MILESTONE[ \t]*$/m.test(code);
 }
 
 /** One file's bytes against one digest. */
@@ -572,6 +604,354 @@ const STORAGE_TRANSPORT_TOKENS =
 /** Comments may explain what the port avoids; only code can violate the rule. */
 function stripComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+/* Remove Kotlin comments without mistaking // inside a URI string for a comment. */
+function kotlinWithoutComments(text) {
+  let result = '';
+  let i = 0;
+  while (i < text.length) {
+    if (text.startsWith('//', i)) {
+      const end = text.indexOf('\n', i + 2);
+      if (end < 0) break;
+      result += '\n';
+      i = end + 1;
+    } else if (text.startsWith('/*', i)) {
+      let depth = 1;
+      i += 2;
+      while (i < text.length && depth > 0) {
+        if (text.startsWith('/*', i)) { depth += 1; i += 2; }
+        else if (text.startsWith('*/', i)) { depth -= 1; i += 2; }
+        else { if (text[i] === '\n') result += '\n'; i += 1; }
+      }
+    } else if (text.startsWith('"""', i)) {
+      const end = text.indexOf('"""', i + 3);
+      const next = end < 0 ? text.length : end + 3;
+      result += text.slice(i, next);
+      i = next;
+    } else if (text[i] === '"' || text[i] === "'") {
+      const quote = text[i];
+      result += text[i++];
+      while (i < text.length) {
+        const char = text[i++];
+        result += char;
+        if (char === '\\' && i < text.length) result += text[i++];
+        else if (char === quote) break;
+      }
+    } else {
+      result += text[i++];
+    }
+  }
+  return result;
+}
+
+/** A small balanced-block extractor used only on the pinned Kotlin function shapes below. */
+function kotlinFunctionBody(text, marker) {
+  const code = kotlinWithoutComments(text);
+  const start = code.indexOf(marker);
+  if (start < 0) return null;
+  const open = code.indexOf('{', start + marker.length);
+  if (open < 0) return null;
+  let depth = 0;
+  for (let i = open; i < code.length; i += 1) {
+    if (code[i] === '{') depth += 1;
+    else if (code[i] === '}' && --depth === 0) return code.slice(open + 1, i);
+  }
+  return null;
+}
+
+/** Extract a function body even when a default argument contains its own lambda braces. */
+function kotlinCallableBody(text, marker) {
+  const code = kotlinWithoutComments(text);
+  const start = code.indexOf(marker);
+  if (start < 0) return null;
+  const args = code.indexOf('(', start);
+  if (args < 0) return null;
+  let parentheses = 0;
+  let endArgs = -1;
+  for (let i = args; i < code.length; i += 1) {
+    if (code[i] === '(') parentheses += 1;
+    else if (code[i] === ')' && --parentheses === 0) { endArgs = i; break; }
+  }
+  if (endArgs < 0) return null;
+  const open = code.indexOf('{', endArgs);
+  if (open < 0) return null;
+  let braces = 0;
+  for (let i = open; i < code.length; i += 1) {
+    if (code[i] === '{') braces += 1;
+    else if (code[i] === '}' && --braces === 0) return code.slice(open + 1, i);
+  }
+  return null;
+}
+
+/** The low-level source APIs may be used only by the existing adapters and the typed wrapper. */
+function runtimeBypassesTypedSource(path, text) {
+  if (LOW_LEVEL_SOURCE_FILES.has(path)) return false;
+  const code = kotlinWithoutComments(text);
+  const rawTypes = /\b(?:SourceHandle|SourceOpenResult|ProviderOpenResult|ChannelSourceHandle|StreamSourceHandle)\b/;
+  const rawOpen = /\b(?!TypedSourceReader\b)[A-Za-z_]\w*\s*\.\s*(?:openAt|openAtZero)\s*\(/;
+  const rawHandleRead = /\.\s*handle\s*\.\s*read\s*\(|::\s*(?:openAt|openAtZero)\b/;
+  return rawTypes.test(code) || rawOpen.test(code) || rawHandleRead.test(code);
+}
+
+/** All comparable mismatches must precede missing-metadata and strong-match returns. */
+function sourcePolicyRejectsEveryMismatch(text) {
+  const body = kotlinFunctionBody(text, 'public fun compare(');
+  if (body === null) return false;
+  const required = [
+    /if\s*\(\s*storedId\s*!=\s*null\s*&&\s*currentId\s*!=\s*null\s*&&\s*storedId\s*!=\s*currentId\s*\)\s*\{\s*return\s+FingerprintOutcome\.DEFINITE_CHANGE\s*\}/,
+    /if\s*\(\s*storedSize\s*!=\s*null\s*&&\s*currentSize\s*!=\s*null\s*&&\s*storedSize\s*!=\s*currentSize\s*\)\s*\{\s*return\s+FingerprintOutcome\.DEFINITE_CHANGE\s*\}/,
+    /if\s*\(\s*storedModified\s*!=\s*null\s*&&\s*currentModified\s*!=\s*null\s*&&\s*storedModified\s*!=\s*currentModified\s*\)\s*\{\s*return\s+FingerprintOutcome\.DEFINITE_CHANGE\s*\}/,
+  ];
+  const positions = required.map((pattern) => body.search(pattern));
+  const missing = body.indexOf('FingerprintOutcome.MISSING_METADATA');
+  const strong = body.indexOf('FingerprintOutcome.STRONG_MATCH');
+  const weak = body.indexOf('FingerprintOutcome.WEAK_MATCH');
+  return positions.every((position) => position >= 0) &&
+    positions[0] < positions[1] && positions[1] < positions[2] &&
+    positions[2] < missing && missing < strong && positions[2] < weak;
+}
+
+/** A ready resume must retain the expected digest and use it in the final comparison. */
+function resumeRequiresExpectedDigest(text) {
+  const code = kotlinWithoutComments(text);
+  const body = kotlinFunctionBody(text, 'public fun authorize(');
+  if (body === null) return false;
+  return /private\s+val\s+expectedSha256\s*:\s*Sha256Digest\b/.test(code) &&
+    /private\s+val\s+storedFingerprint\s*:\s*SourceFingerprint\b/.test(code) &&
+    /SourceResumePolicy\.authorize\(storedFingerprint,\s*current,\s*expectedSha256\)/.test(code) &&
+    /session\.verify\(\s*expected\s*=\s*expectedSha256\b/.test(code) &&
+    /FingerprintOutcome\.DEFINITE_CHANGE\s*->\s*SourceResumeDecision\.Refused\([\s\S]*?source_changed_restart_required/.test(body) &&
+    /FingerprintOutcome\.MISSING_METADATA/.test(body) &&
+    /if\s*\(\s*expectedSha256\s*==\s*null\s*\)\s*\{\s*SourceResumeDecision\.Refused\([\s\S]*?expected_sha256_required[\s\S]*?\}\s*else\s*\{\s*SourceResumeDecision\.Ready\(outcome,\s*stored,\s*expectedSha256\)\s*\}/.test(body) &&
+    /current\.error\.category\s*==\s*TransferStorageErrorCategory\.CANCELLED[\s\S]*?TransferStorageError\.Cancelled/.test(body);
+}
+
+/** A resumed destination retains one digest from open through verification and publication. */
+function resumedDestinationRequiresRetainedDigest(text) {
+  const code = kotlinWithoutComments(text);
+  const open = kotlinCallableBody(text, 'public fun open(');
+  const verify = kotlinCallableBody(text, 'public fun verify(');
+  const commit = kotlinCallableBody(text, 'public fun commit(');
+  if (open === null || verify === null || commit === null) return false;
+  const openGuard = open.search(/if\s*\(\s*confirmed\s*>\s*0L\s*&&\s*retainedExpectedSha256\s*==\s*null\s*\)\s*\{\s*return\s+DestinationOpen\.Refused\([\s\S]*?expected_sha256_required/);
+  const opened = open.indexOf('return DestinationOpen.Opened(');
+  const nullGuard = verify.search(/if\s*\(\s*retained\s*!=\s*null\s*&&\s*expected\s*==\s*null\s*\)\s*\{\s*return\s+SessionVerification\.Refused\([\s\S]*?resume_digest_required/);
+  const changedGuard = verify.search(/if\s*\(\s*retained\s*!=\s*null\s*&&\s*!retained\.contentEquals\(expected\)\s*\)\s*\{\s*return\s+SessionVerification\.Refused\([\s\S]*?resume_digest_changed/);
+  const verification = verify.search(/DestinationVerifier\.verify\(source,\s*frontier,\s*retained\s*\?:\s*expected,/);
+  const withoutExpected = verify.search(/is\s+VerifyResult\.VerifiedWithoutExpected\s*->\s*\{\s*if\s*\(\s*retained\s*!=\s*null\s*\)\s*\{\s*return\s+SessionVerification\.Refused/);
+  const commitGuard = commit.search(/if\s*\(\s*retained\s*!=\s*null\s*&&\s*!retained\.contentEquals\(digest\)\s*\)\s*\{\s*return\s+CommitResult\.Refused\([\s\S]*?resume_digest_not_verified/);
+  const publish = commit.indexOf('target.publish(digest)');
+  return /private\s+val\s+retainedExpectedSha256\s*:\s*Sha256Digest\?/.test(code) &&
+    openGuard >= 0 && opened > openGuard &&
+    /retainedExpectedSha256\s*=\s*retainedExpectedSha256/.test(open.slice(opened)) &&
+    /val\s+retained\s*=\s*retainedExpectedSha256/.test(verify) &&
+    nullGuard >= 0 && changedGuard > nullGuard && verification > changedGuard && withoutExpected > verification &&
+    /val\s+retained\s*=\s*retainedExpectedSha256/.test(commit) && commitGuard >= 0 && publish > commitGuard;
+}
+
+/** Provider exception text may be consulted by the classifier, but never passed into a failure. */
+function typedReadDoesNotLeakProviderText(readerText, classifierText) {
+  const reader = kotlinWithoutComments(readerText);
+  const classifier = kotlinWithoutComments(classifierText);
+  const start = classifier.indexOf('fun classify(');
+  const end = classifier.indexOf('private inline fun walk(', start);
+  if (start < 0 || end < 0) return false;
+  const failureConstruction = reader + classifier.slice(start, end);
+  const rawText = /\.\s*(?:message|localizedMessage|stackTrace)\b|\bdiagnostic\s*=|\b(?:error|exception|cause|thrown|e)\s*\.\s*toString\s*\(|\$\{?\s*(?:error|exception|cause|thrown|e)\b/;
+  return !rawText.test(failureConstruction) &&
+    /StorageFailureClassifier\.classifyOrProviderFailure\(error,\s*"read",\s*"read"\)/.test(reader) &&
+    /redactOpenFailure\(opened\.error\)/.test(reader);
+}
+
+/** Legacy open and fingerprint adapters must not put raw provider text into domain values either. */
+function sourceAdaptersDoNotLeakProviderText(texts) {
+  const rawText = /\.\s*(?:message|localizedMessage|stackTrace)\b|\b(?:error|exception|cause|thrown|e)\s*\.\s*toString\s*\(|\$\{?\s*(?:error|exception|cause|thrown|e)\b/;
+  return texts.length === STORAGE_SOURCE_ADAPTER_PATHS.length &&
+    texts.every((text) => !rawText.test(kotlinWithoutComments(text)));
+}
+
+/** Only the classifier may inspect exception text, solely to classify a storage-full signal. */
+function storageDomainDoesNotLeakProviderText(files) {
+  const rawText = /\.\s*(?:message|localizedMessage|stackTrace)\b|\b(?:error|exception|cause|thrown|e)\s*\.\s*toString\s*\(|\$\{?\s*(?:error|exception|cause|thrown|e)\b/;
+  // These pre-existing outcome renderers interpolate a typed TransferStorageError, whose final
+  // toString omits diagnostics. Permit only the exact literals paired with those typed declarations;
+  // an interpolation of an exception anywhere else, including in the same file, remains forbidden.
+  const typedRenderers = [
+    {
+      path: `${STORAGE_PACKAGE}SafCommitCheckpoint.kt`,
+      declaration: /public\s+data\s+class\s+ReconciliationRequired\s*\(\s*public\s+val\s+checkpoint:\s*SafCommitCheckpoint,\s*public\s+val\s+error:\s*TransferStorageError,/,
+      literal: '"SafCommitRecoveryOutcome.ReconciliationRequired(phase=${checkpoint.phase.id}, error=$error, "',
+    },
+    {
+      path: `${STORAGE_PACKAGE}SafCommitCoordinator.kt`,
+      declaration: /public\s+data\s+class\s+Failed\s*\(\s*public\s+val\s+record:\s*SafCommitRecord,\s*public\s+val\s+error:\s*TransferStorageError,/,
+      literal: '"SafCommitOutcome.Failed(state=${record.state.id}, error=$error)"',
+    },
+    {
+      path: `${STORAGE_PACKAGE}SafCommitCoordinator.kt`,
+      declaration: /public\s+data\s+class\s+ReconciliationRequired\s*\(\s*public\s+val\s+record:\s*SafCommitRecord,\s*public\s+val\s+error:\s*TransferStorageError,/,
+      literal: '"SafCommitOutcome.ReconciliationRequired(state=${record.state.id}, error=$error, "',
+    },
+  ];
+  return files.filter((file) => file.path !== STORAGE_CLASSIFIER_PATH).every((file) => {
+    let code = kotlinWithoutComments(file.text);
+    for (const renderer of typedRenderers.filter((item) => item.path === file.path)) {
+      if (!renderer.declaration.test(code) || !code.includes(renderer.literal)) return false;
+      code = code.replace(renderer.literal, '"[typed storage error]"');
+    }
+    return !rawText.test(code);
+  });
+}
+
+/** Real destination opening, writes and verification must classify unexpected provider exceptions. */
+function destinationFailuresAreClassified(sessionText, verifierText, privateText, pendingText) {
+  const write = kotlinCallableBody(sessionText, 'public fun writeAt(');
+  const verification = kotlinCallableBody(verifierText, 'public fun verify(');
+  const create = kotlinCallableBody(pendingText, 'public fun create(');
+  const openDescriptor = kotlinCallableBody(pendingText, 'private fun openDescriptor(');
+  const openWrite = kotlinCallableBody(pendingText, 'public fun openForWrite(');
+  const openRead = kotlinCallableBody(pendingText, 'public fun openForRead(');
+  if ([write, verification, create, openDescriptor, openWrite, openRead].some((body) => body === null)) return false;
+  const sharedWrite = /WriteOutcome\.Failed\(StorageFailureClassifier\.classifyOrProviderFailure\(e,\s*"write",\s*"write"\)\)/;
+  const createCatch = /catch\s*\(e\s*:\s*Exception\)\s*\{\s*PendingCreation\.Refused\(\s*StorageFailureClassifier\.classify\(e,\s*"create",\s*"write"\)\s*\?:\s*TransferStorageError\.ProviderFailure\("media_store"\)/;
+  const descriptorCatch = /catch\s*\(e\s*:\s*Exception\)\s*\{\s*DescriptorOpen\.Refused\(\s*StorageFailureClassifier\.classify\(e,\s*"open",\s*if\s*\(mode\s*==\s*READ_MODE\)\s*"read"\s*else\s*"write"\)\s*\?:\s*TransferStorageError\.ProviderFailure\("media_store"\)/;
+  const writeOpenCatch = /catch\s*\(e\s*:\s*Exception\)\s*\{\s*runCatching\s*\{\s*descriptor\.close\(\)\s*\}\s*PendingOpen\.Refused\(StorageFailureClassifier\.classifyOrProviderFailure\(e,\s*"open",\s*"write"\)\)/;
+  const readOpenCatch = /catch\s*\(e\s*:\s*Exception\)\s*\{\s*runCatching\s*\{\s*descriptor\.close\(\)\s*\}\s*PendingReadOpen\.Refused\(StorageFailureClassifier\.classifyOrProviderFailure\(e,\s*"read",\s*"read"\)\)/;
+  return /catch\s*\(error\s*:\s*Exception\)\s*\{\s*return\s+DestinationWrite\.Failed\(StorageFailureClassifier\.classifyOrProviderFailure\(error,\s*"write",\s*"write"\),\s*frontier\)/.test(write) &&
+    /catch\s*\(error\s*:\s*Exception\)\s*\{\s*return\s+DestinationWrite\.Failed\(StorageFailureClassifier\.classifyOrProviderFailure\(error,\s*"sync",\s*"write"\),\s*frontier\)/.test(write) &&
+    /catch\s*\(error\s*:\s*Exception\)\s*\{\s*return\s+VerifyResult\.Failed\(StorageFailureClassifier\.classifyOrProviderFailure\(error,\s*"read",\s*"read"\)\)/.test(verification) &&
+    /count\s*<\s*-1/.test(verification) && sharedWrite.test(kotlinWithoutComments(privateText)) &&
+    sharedWrite.test(kotlinWithoutComments(pendingText)) && createCatch.test(create) &&
+    /catch\s*\(_\s*:\s*FileNotFoundException\)\s*\{\s*DescriptorOpen\.Refused\(TransferStorageError\.NotFound\("partial"\)\)/.test(openDescriptor) &&
+    descriptorCatch.test(openDescriptor) && writeOpenCatch.test(openWrite) && readOpenCatch.test(openRead);
+}
+
+/** Provider fingerprints must use the current row's identity, not a cached construction-time id. */
+function sourceFingerprintsUseFreshIdentity(mediaText, safText) {
+  const media = kotlinWithoutComments(mediaText);
+  const saf = kotlinWithoutComments(safText);
+  return /val\s+row\s*=\s*queryRow\(\)/.test(media) &&
+    /contentId\s*=\s*row\.id\?\.let\s*\{\s*contentIdFor\(it\)\s*\}/.test(media) &&
+    /val\s+row\s*=\s*queryRow\(\)/.test(saf) &&
+    /contentId\s*=\s*row\.documentId\?\.let\s*\{\s*"doc:\$it"\s*\}/.test(saf);
+}
+
+/** The shared classifier preserves interruption and provider/coroutine cancellation, even wrapped. */
+function classifierPreservesCancellation(text) {
+  const code = kotlinWithoutComments(text);
+  const classification = code.indexOf('isCancellation(error) -> TransferStorageError.Cancelled');
+  const revocation = code.indexOf('isRevocation(error) -> TransferStorageError.PermissionRevoked');
+  return /fun\s+isCancellation\(error:\s*Throwable\)\s*:\s*Boolean\s*=\s*walk\(error\)/.test(code) &&
+    /is\s+InterruptedException\s*->\s*\{\s*Thread\.currentThread\(\)\.interrupt\(\)/.test(code) &&
+    /is\s+CancellationException,\s*is\s+InterruptedIOException,\s*is\s+OperationCanceledException\s*->\s*true/.test(code) &&
+    /depth\s*<\s*MAX_CAUSE_DEPTH/.test(code) && classification >= 0 && revocation > classification;
+}
+
+/** Pin the typed reader's range, progress, cancellation and ownership checks. */
+function typedReadHasBoundedContract(text) {
+  const code = kotlinWithoutComments(text);
+  const body = kotlinFunctionBody(text, 'public fun read(');
+  const opener = kotlinFunctionBody(text, 'public fun openAt(');
+  if (body === null || opener === null) return false;
+  const providerRead = body.search(/handle\.read\(buffer,\s*offset,\s*length\)/);
+  const bounds = body.search(/length\s*>\s*buffer\.size\s*-\s*offset/);
+  const authorization = opener.search(/resumeAuthorization\s*\?:\s*return\s+TypedSourceOpen\.Failed/);
+  const revalidation = opener.search(/authorization\.revalidate\(source\.fingerprint\(\)\)/);
+  const providerOpen = opener.search(/source\.openAt\(offset\)/);
+  return /offset\s*<\s*0/.test(body) && /length\s*<=\s*0/.test(body) &&
+    /offset\s*>\s*buffer\.size/.test(body) && bounds >= 0 && providerRead > bounds &&
+    /count\s*<\s*-1\s*\|\|\s*count\s*>\s*length/.test(body) && /count\s*==\s*0/.test(body) &&
+    /SourceReadResult\.EndOfSource/.test(body) && /SourceReadResult\.Data\(count\)/.test(body) &&
+    /TransferStorageError\.Cancelled/.test(body) && /isCancellation\(error\)/.test(body) &&
+    /StorageFailureClassifier\.isCancellation\(error\)/.test(code) &&
+    /closed\.compareAndSet\(false,\s*true\)/.test(code) && /handle\.close\(\)/.test(code) &&
+    /if\s*\(\s*offset\s*>\s*0L\s*\)/.test(opener) &&
+    authorization >= 0 && revalidation > authorization && providerOpen > revalidation &&
+    /revalidated\s+is\s+SourceResumeDecision\.Refused/.test(opener);
+}
+
+/** Only the handle, close flag and typed terminal outcome may be fields on the reader. */
+function typedReaderFieldsAreAllowlisted(text) {
+  const code = kotlinWithoutComments(text);
+  const marker = 'public class TypedSourceReader(';
+  const start = code.indexOf(marker);
+  if (start < 0) return false;
+  const open = code.indexOf('{', start + marker.length);
+  const body = kotlinFunctionBody(text, marker);
+  if (open < 0 || body === null) return false;
+  const header = code.slice(start, open);
+  const constructorFields = [...header.matchAll(/\b(?:val|var)\s+(\w+)\s*:/g)].map((m) => m[1]);
+  if (constructorFields.length !== 1 || constructorFields[0] !== 'handle' ||
+      !/private\s+val\s+handle\s*:\s*SourceHandle/.test(header)) return false;
+  const fields = [];
+  let depth = 0;
+  let inCompanion = false;
+  for (const line of body.split('\n')) {
+    if (depth === 0 && /\bcompanion\s+object\b/.test(line)) inCompanion = true;
+    if (depth === 0 || (depth === 1 && inCompanion)) {
+      const field = line.match(/^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:private|public|internal|protected|lateinit|const|override)\s+)*(?:val|var)\s+(\w+)\b/);
+      if (field) fields.push(field[1]);
+    }
+    for (const char of line) {
+      if (char === '{') depth += 1;
+      else if (char === '}') depth -= 1;
+    }
+    if (inCompanion && depth === 0) inCompanion = false;
+  }
+  return fields.length === 2 && fields.includes('closed') && fields.includes('terminal') &&
+    /private\s+val\s+closed\s*=\s*AtomicBoolean\(false\)/.test(body) &&
+    /private\s+var\s+terminal\s*:\s*SourceReadResult\?\s*=\s*null/.test(body);
+}
+
+/** A non-seekable positioning read cannot turn cancellation or impossible counts into success. */
+function discardPreservesCancellationAndCounts(text) {
+  const body = kotlinFunctionBody(text, 'public fun reposition(');
+  if (body === null) return false;
+  return /Thread\.currentThread\(\)\.isInterrupted/.test(body) &&
+    /catch\s*\(error\s*:\s*Exception\)\s*\{\s*return\s+RepositionResult\.Failed\(StorageFailureClassifier\.classifyOrProviderFailure\(error,\s*"read",\s*"read"\)\)/.test(body) &&
+    /count\s*<\s*-1\s*\|\|\s*count\s*>\s*toRead/.test(body);
+}
+
+/** Probe failures occur while the descriptor is owned, and cancellation closes it. */
+function sourceProbeClosesOnCancellation(text) {
+  const body = kotlinFunctionBody(text, 'public fun open(');
+  if (body === null) return false;
+  const ownedTry = body.indexOf('return try {');
+  const probe = body.indexOf('probe.probe(descriptor)');
+  return ownedTry >= 0 && probe > ownedTry &&
+    /catch\s*\(_\s*:\s*CancellationException\)\s*\{\s*resource\.close\(\)\s*ProviderOpenResult\.Failed\(TransferStorageError\.Cancelled\)/.test(body) &&
+    /catch\s*\(e\s*:\s*Exception\)\s*\{\s*resource\.close\(\)/.test(body);
+}
+
+/** The reader cannot hold a caller array, a copy, a collection entry or a capturing closure. */
+function typedReadDoesNotRetainBuffer(text) {
+  const code = kotlinWithoutComments(text);
+  return typedReaderFieldsAreAllowlisted(text) &&
+    !/\b(?:val|var)\s+\w+\s*:\s*(?:kotlin\.)?ByteArray\b/.test(code) &&
+    !/\b(?:this\s*\.\s*)?\w+\s*=\s*buffer\b/.test(code) &&
+    !/\]\s*=\s*buffer\b/.test(code) &&
+    !/\bterminal\s*=\s*[^\n;]*\bbuffer\b/.test(code) &&
+    !/SourceReadResult\.(?:Data|Failure)\([^)]*\bbuffer\b/.test(code) &&
+    !/\b(?:add|put|set|offer)\s*\(\s*buffer\b/.test(code) &&
+    !/\b(?:val|var)\s+\w+\s*=\s*\{[^}]*\bbuffer\b/.test(code);
+}
+
+/** A failed or short write must return before the sole optimistic frontier assignment. */
+function failedWriteCannotAdvanceConfirmed(text) {
+  const body = kotlinFunctionBody(text, 'public fun writeAt(');
+  if (body === null) return false;
+  const advances = [...body.matchAll(/\bfrontier\s*(?:=|\+=|-=|\+\+|--)/g)];
+  const finalAdvance = body.indexOf('frontier = offset + length.toLong()');
+  return !/\bconfirmed\b|\backnowledge\s*\(|\bcheckpointSink\b/.test(body) &&
+    advances.length === 1 && finalAdvance >= 0 &&
+    body.indexOf('outcome is WriteOutcome.Failed') >= 0 &&
+    body.indexOf('written.bytes != length') >= 0 &&
+    body.indexOf('durability is FlushDurability.FlushFailed') >= 0 &&
+    body.indexOf('outcome is WriteOutcome.Failed') < finalAdvance &&
+    body.indexOf('written.bytes != length') < finalAdvance &&
+    body.indexOf('durability is FlushDurability.FlushFailed') < finalAdvance &&
+    (body.match(/return\s+DestinationWrite\.Failed\s*\(/g) ?? []).length >= 3;
 }
 
 function storagePortMentionsTransport(text) {
@@ -857,17 +1237,20 @@ function selfTest() {
       '}\n',
     ));
 
-  check('self-test: milestone 2 and the gated engine pass',
-    milestonePinsHold(
-      'public object FeatureReadiness {\n' +
-      '    public const val CURRENT_MILESTONE: Int = 2\n' +
-      '    TRANSFER_ENGINE("transfer_engine", 5),\n' +
-      '}\n',
-    ));
+  const readinessFixture = 'public object FeatureReadiness {\n' +
+    '    public const val CURRENT_MILESTONE: Int = 2\n' +
+    '    TRANSFER_ENGINE("transfer_engine", 5),\n' +
+    '    public fun isAvailable(area: FeatureArea): Boolean = area.deliveredInMilestone <= CURRENT_MILESTONE\n' +
+    '}\n';
+  check('self-test: milestone 2 and the gated engine pass', milestonePinsHold(readinessFixture));
   check('self-test: a bumped milestone is caught',
-    !milestonePinsHold('public const val CURRENT_MILESTONE: Int = 3\nTRANSFER_ENGINE("transfer_engine", 5)'));
+    !milestonePinsHold(readinessFixture.replace('Int = 2', 'Int = 3')));
   check('self-test: an enabled transfer engine is caught',
-    !milestonePinsHold('public const val CURRENT_MILESTONE: Int = 2\nTRANSFER_ENGINE("transfer_engine", 2)'));
+    !milestonePinsHold(readinessFixture.replace('"transfer_engine", 5', '"transfer_engine", 2')));
+  check('self-test: bypassing the readiness comparison is caught',
+    !milestonePinsHold(readinessFixture.replace('area.deliveredInMilestone <= CURRENT_MILESTONE', 'true')));
+  check('self-test: a conditional payload-gate return is caught',
+    !payloadGateRefusesOnly(refusingGate.replace('    return', '    if (condition) return denied\n    return')));
 
   const muxGood = 'matches(prefix, MSR1_MAGIC)\n' +
     'matches(prefix, LanPayloadRecordFormat.magicBytes())\n' +
@@ -998,6 +1381,250 @@ function selfTest() {
   check('self-test: a transport build without storage passes', !transportBuildDependsOnStorage('api(project(":core-transfer"))\n'));
   check('self-test: a transport build depending on storage is caught',
     transportBuildDependsOnStorage('api(project(":core-storage"))\n'));
+
+  // Slice 3 hardening: mutate the actual guarded files in memory, not just toy snippets.
+  const fingerprintSource = readFileSync(join(ROOT, STORAGE_FINGERPRINT_PATH), 'utf8');
+  const resumeSource = readFileSync(join(ROOT, STORAGE_RESUME_PATH), 'utf8');
+  const readerSource = readFileSync(join(ROOT, STORAGE_TYPED_READ_PATH), 'utf8');
+  const classifierSource = readFileSync(join(ROOT, STORAGE_CLASSIFIER_PATH), 'utf8');
+  const discardSource = readFileSync(join(ROOT, STORAGE_DISCARD_PATH), 'utf8');
+  const openerSource = readFileSync(join(ROOT, STORAGE_SOURCE_OPENER_PATH), 'utf8');
+  const sessionSource = readFileSync(join(ROOT, STORAGE_SESSION_PATH), 'utf8');
+  const verifierSource = readFileSync(join(ROOT, STORAGE_VERIFIER_PATH), 'utf8');
+  const privatePartialSource = readFileSync(join(ROOT, STORAGE_PRIVATE_PARTIAL_PATH), 'utf8');
+  const pendingPartialSource = readFileSync(join(ROOT, STORAGE_PENDING_PARTIAL_PATH), 'utf8');
+  const safCheckpointSource = readFileSync(join(ROOT, `${STORAGE_PACKAGE}SafCommitCheckpoint.kt`), 'utf8');
+  const safCoordinatorSource = readFileSync(join(ROOT, `${STORAGE_PACKAGE}SafCommitCoordinator.kt`), 'utf8');
+  const adapterSources = STORAGE_SOURCE_ADAPTER_PATHS.map((path) => readFileSync(join(ROOT, path), 'utf8'));
+  const runtimePath = 'app/src/main/kotlin/app/morsecode/Runtime.kt';
+
+  check('self-test: a typed runtime source is accepted',
+    !runtimeBypassesTypedSource(runtimePath, 'val reader = TypedSourceReader.openAt(source, 0L)\n'));
+  check('self-test: a raw handle read in runtime code is caught',
+    runtimeBypassesTypedSource(runtimePath, 'fun copy(handle: SourceHandle) = handle.read(buffer, 0, size)\n'));
+  check('self-test: an inferred raw handle obtained by openAt is caught',
+    runtimeBypassesTypedSource(runtimePath, 'val raw = source.openAt(0L)\nraw.handle.read(buffer, 0, size)\n'));
+  check('self-test: a URI string does not hide a raw open',
+    runtimeBypassesTypedSource(runtimePath, 'val uri = "content://private/x"; source.openAt(0L)\n'));
+
+  check('self-test: the real fingerprint policy checks every mismatch', sourcePolicyRejectsEveryMismatch(fingerprintSource));
+  const identityAnchor = 'val currentId = current.contentId';
+  check('self-test: identity overriding a size mismatch is caught',
+    fingerprintSource.includes(identityAnchor) && !sourcePolicyRejectsEveryMismatch(fingerprintSource.replace(
+      identityAnchor, `${identityAnchor}\n        if (storedId == currentId) return FingerprintOutcome.STRONG_MATCH`,
+    )));
+  check('self-test: removing the size mismatch check is caught',
+    fingerprintSource.includes('storedSize != currentSize') && !sourcePolicyRejectsEveryMismatch(
+      fingerprintSource.replace('storedSize != currentSize', 'storedSize == currentSize'),
+    ));
+  check('self-test: removing the timestamp mismatch check is caught',
+    fingerprintSource.includes('storedModified != currentModified') && !sourcePolicyRejectsEveryMismatch(
+      fingerprintSource.replace('storedModified != currentModified', 'storedModified == currentModified'),
+    ));
+  check('self-test: the real resume decision retains and verifies the expected digest',
+    resumeRequiresExpectedDigest(resumeSource));
+  check('self-test: allowing a missing expected digest is caught',
+    resumeSource.includes('expectedSha256 == null') && !resumeRequiresExpectedDigest(
+      resumeSource.replace('expectedSha256 == null', 'false'),
+    ));
+  check('self-test: dropping the digest from final verification is caught',
+    resumeSource.includes('expected = expectedSha256') && !resumeRequiresExpectedDigest(
+      resumeSource.replace('expected = expectedSha256', 'expected = null'),
+    ));
+  check('self-test: losing fingerprint cancellation is caught',
+    resumeSource.includes('current.error.category == TransferStorageErrorCategory.CANCELLED') && !resumeRequiresExpectedDigest(
+      resumeSource.replace('current.error.category == TransferStorageErrorCategory.CANCELLED', 'false'),
+    ));
+  check('self-test: a resumed destination binds final verification and commit to its retained digest',
+    resumedDestinationRequiresRetainedDigest(sessionSource));
+  for (const [label, before, after] of [
+    ['opening a resume without a digest', 'confirmed > 0L && retainedExpectedSha256 == null', 'false'],
+    ['accepting null on a resumed verification', 'retained != null && expected == null', 'false'],
+    ['accepting a replacement expected digest', 'retained != null && !retained.contentEquals(expected)', 'false'],
+    ['verifying against the supplied rather than retained digest', 'retained ?: expected', 'expected'],
+    ['allowing a resumed verified-without-expected result',
+      'if (retained != null) {\n                    return SessionVerification.Refused',
+      'if (false) {\n                    return SessionVerification.Refused'],
+    ['committing a digest other than the retained digest', 'retained != null && !retained.contentEquals(digest)', 'false'],
+    ['dropping the retained digest on session construction',
+      'retainedExpectedSha256 = retainedExpectedSha256,', 'retainedExpectedSha256 = null,'],
+  ]) {
+    check(`self-test: ${label} is caught`, sessionSource.includes(before) &&
+      !resumedDestinationRequiresRetainedDigest(sessionSource.replace(before, after)));
+  }
+
+  check('self-test: the real typed reader has a bounded contract', typedReadHasBoundedContract(readerSource));
+  check('self-test: accepting impossible provider counts is caught',
+    readerSource.includes('count < -1 || count > length') && !typedReadHasBoundedContract(
+      readerSource.replace('count < -1 || count > length', 'count < -1'),
+    ));
+  check('self-test: cancellation is classified by the shared bounded classifier',
+    classifierPreservesCancellation(classifierSource));
+  for (const [label, before, after] of [
+    ['interrupted I/O', 'is InterruptedIOException, ', ''],
+    ['Android provider cancellation', ', is OperationCanceledException', ''],
+    ['coroutine cancellation', 'is CancellationException, ', ''],
+    ['cancellation precedence', 'isCancellation(error) -> TransferStorageError.Cancelled',
+      'isCancellation(error) -> TransferStorageError.Io("read")'],
+  ]) {
+    check(`self-test: losing ${label} is caught`, classifierSource.includes(before) &&
+      !classifierPreservesCancellation(classifierSource.replace(before, after)));
+  }
+  check('self-test: bypassing the shared cancellation classifier is caught',
+    readerSource.includes('StorageFailureClassifier.isCancellation(error)') && !typedReadHasBoundedContract(
+      readerSource.replace('StorageFailureClassifier.isCancellation(error)', 'false'),
+    ));
+  check('self-test: a nonzero open that skips resume authorization is caught',
+    readerSource.includes('if (offset > 0L)') && !typedReadHasBoundedContract(
+      readerSource.replace('if (offset > 0L)', 'if (offset > Long.MAX_VALUE)'),
+    ));
+  check('self-test: skipping the fresh fingerprint comparison is caught',
+    readerSource.includes('authorization.revalidate(source.fingerprint())') && !typedReadHasBoundedContract(
+      readerSource.replace('authorization.revalidate(source.fingerprint())', 'authorization'),
+    ));
+  check('self-test: discard preserves cancellation and validates provider counts',
+    discardPreservesCancellationAndCounts(discardSource));
+  check('self-test: accepting an impossible discard count is caught',
+    discardSource.includes('count < -1 || count > toRead') && !discardPreservesCancellationAndCounts(
+      discardSource.replace('count < -1 || count > toRead', 'count < -1'),
+    ));
+  check('self-test: downgrading discard cancellation is caught',
+    discardSource.includes('StorageFailureClassifier.classifyOrProviderFailure(error, "read", "read")') &&
+      !discardPreservesCancellationAndCounts(discardSource.replace(
+        'StorageFailureClassifier.classifyOrProviderFailure(error, "read", "read")',
+        'TransferStorageError.ProviderFailure("document_provider")',
+      )));
+  check('self-test: a probing cancellation closes the owned descriptor', sourceProbeClosesOnCancellation(openerSource));
+  check('self-test: probing outside the descriptor-owning try is caught',
+    openerSource.includes('val capability = probe.probe(descriptor)') && !sourceProbeClosesOnCancellation(
+      openerSource.replace('return try {\n            // Probing also owns the descriptor: a throwing probe must not leak it.\n            val capability = probe.probe(descriptor)',
+        'val capability = probe.probe(descriptor)\n        return try {'),
+    ));
+  check('self-test: the real reader and classifier do not leak exception text',
+    typedReadDoesNotLeakProviderText(readerSource, classifierSource));
+  check('self-test: forwarding a raw read exception message is caught',
+    readerSource.includes('classifyOrProviderFailure(error, "read", "read")') &&
+      !typedReadDoesNotLeakProviderText(readerSource.replace(
+        'StorageFailureClassifier.classifyOrProviderFailure(error, "read", "read")',
+        'TransferStorageError.Io("read", error.message)',
+      ), classifierSource));
+  check('self-test: leaking an exception from the shared classifier is caught',
+    classifierSource.includes('TransferStorageError.Io(operation)') &&
+      !typedReadDoesNotLeakProviderText(readerSource, classifierSource.replace(
+        'TransferStorageError.Io(operation)', 'TransferStorageError.Io(operation, error.message)',
+      )));
+  check('self-test: source fingerprints use the current provider row identity',
+    sourceFingerprintsUseFreshIdentity(adapterSources[2], adapterSources[3]));
+  check('self-test: using a cached media identity is caught',
+    adapterSources[2].includes('row.id?.let { contentIdFor(it) }') && !sourceFingerprintsUseFreshIdentity(
+      adapterSources[2].replace('row.id?.let { contentIdFor(it) }', 'mediaId?.let { contentIdFor(it) }'), adapterSources[3],
+    ));
+  check('self-test: using a cached SAF identity is caught',
+    adapterSources[3].includes('row.documentId?.let { "doc:$it" }') && !sourceFingerprintsUseFreshIdentity(
+      adapterSources[2], adapterSources[3].replace('row.documentId?.let { "doc:$it" }', 'cachedDocumentId'),
+    ));
+  check('self-test: the source open and fingerprint adapters do not retain exception text',
+    sourceAdaptersDoNotLeakProviderText(adapterSources));
+  for (let index = 0; index < adapterSources.length; index += 1) {
+    const mutated = adapterSources.slice();
+    mutated[index] += '\nval unsafeDiagnostic = e.message\n';
+    check(`self-test: raw provider text in ${STORAGE_SOURCE_ADAPTER_PATHS[index]} is caught`,
+      !sourceAdaptersDoNotLeakProviderText(mutated));
+  }
+  check('self-test: the real typed reader does not retain caller buffers', typedReadDoesNotRetainBuffer(readerSource));
+  check('self-test: a retained buffer field is caught',
+    readerSource.includes('private val closed = AtomicBoolean(false)') && !typedReadDoesNotRetainBuffer(
+      readerSource.replace('private val closed = AtomicBoolean(false)',
+        'private val closed = AtomicBoolean(false)\n    private var cached: ByteArray? = null'),
+    ));
+  check('self-test: saving the caller buffer under an Any field is caught',
+    readerSource.includes('terminal?.let { return it }') && !typedReadDoesNotRetainBuffer(
+      readerSource.replace('terminal?.let { return it }', 'cached = buffer\n        terminal?.let { return it }'),
+    ));
+  check('self-test: retaining a buffer inside a collection is caught',
+    readerSource.includes('private val closed = AtomicBoolean(false)') && !typedReadDoesNotRetainBuffer(
+      readerSource.replace('private val closed = AtomicBoolean(false)',
+        'private val closed = AtomicBoolean(false)\n    private var cached: Any? = null')
+        .replace('terminal?.let { return it }', 'cached = listOf(buffer)\n        terminal?.let { return it }'),
+    ));
+  check('self-test: destination create, open, write and verification exceptions are classified',
+    destinationFailuresAreClassified(sessionSource, verifierSource, privatePartialSource, pendingPartialSource));
+  for (const [label, before, after] of [
+    ['limiting pending creation to I/O exceptions',
+      'catch (e: Exception) {\n            // Providers may',
+      'catch (e: IOException) {\n            // Providers may'],
+    ['bypassing pending creation classification',
+      'StorageFailureClassifier.classify(e, "create", "write")', 'TransferStorageError.Io("create")'],
+    ['limiting pending descriptor opening to I/O exceptions',
+      'catch (e: Exception) {\n            DescriptorOpen.Refused(',
+      'catch (e: IOException) {\n            DescriptorOpen.Refused('],
+    ['bypassing pending descriptor classification',
+      'StorageFailureClassifier.classify(e, "open", if (mode == READ_MODE) "read" else "write")',
+      'TransferStorageError.Io("open")'],
+    ['losing the missing-row distinction',
+      'catch (_: FileNotFoundException)', 'catch (_: IOException)'],
+    ['not closing a descriptor after a failed write-phase open',
+      'runCatching { descriptor.close() }\n            PendingOpen.Refused(',
+      'PendingOpen.Refused('],
+    ['not closing a descriptor after a failed read-phase open',
+      'runCatching { descriptor.close() }\n            PendingReadOpen.Refused(',
+      'PendingReadOpen.Refused('],
+  ]) {
+    check(`self-test: ${label} is caught`, pendingPartialSource.includes(before) &&
+      !destinationFailuresAreClassified(sessionSource, verifierSource, privatePartialSource,
+        pendingPartialSource.replace(before, after)));
+  }
+  check('self-test: a throwing write bypassing classification is caught',
+    sessionSource.includes('StorageFailureClassifier.classifyOrProviderFailure(error, "write", "write")') &&
+      !destinationFailuresAreClassified(
+        sessionSource.replace('StorageFailureClassifier.classifyOrProviderFailure(error, "write", "write")',
+          'TransferStorageError.Io("write")'), verifierSource, privatePartialSource, pendingPartialSource,
+      ));
+  check('self-test: a throwing verification read bypassing classification is caught',
+    verifierSource.includes('StorageFailureClassifier.classifyOrProviderFailure(error, "read", "read")') &&
+      !destinationFailuresAreClassified(sessionSource, verifierSource.replace(
+        'StorageFailureClassifier.classifyOrProviderFailure(error, "read", "read")', 'TransferStorageError.Io("read")',
+      ), privatePartialSource, pendingPartialSource));
+  check('self-test: a real private-partial write bypassing classification is caught',
+    privatePartialSource.includes('StorageFailureClassifier.classifyOrProviderFailure(e, "write", "write")') &&
+      !destinationFailuresAreClassified(sessionSource, verifierSource, privatePartialSource.replace(
+        'StorageFailureClassifier.classifyOrProviderFailure(e, "write", "write")', 'TransferStorageError.Io("write")',
+      ), pendingPartialSource));
+  check('self-test: a pending-partial raw exception leak is caught',
+    !storageDomainDoesNotLeakProviderText([{ path: STORAGE_PENDING_PARTIAL_PATH,
+      text: pendingPartialSource + '\nval unsafe = error.message\n' }]));
+  const safeSafRenderers = [
+    { path: `${STORAGE_PACKAGE}SafCommitCheckpoint.kt`, text: safCheckpointSource },
+    { path: `${STORAGE_PACKAGE}SafCommitCoordinator.kt`, text: safCoordinatorSource },
+  ];
+  check('self-test: the existing typed storage-error renderers remain accepted',
+    storageDomainDoesNotLeakProviderText(safeSafRenderers));
+  check('self-test: an exception interpolation in a typed-renderer file is caught',
+    !storageDomainDoesNotLeakProviderText([safeSafRenderers[0], {
+      ...safeSafRenderers[1], text: safCoordinatorSource + '\nval unsafe = "$error"\n',
+    }]));
+  const safeRecoveryDeclaration = 'public data class ReconciliationRequired(\n        public val checkpoint: SafCommitCheckpoint,\n        public val error: TransferStorageError,';
+  check('self-test: changing an approved typed renderer to an exception is caught',
+    safCheckpointSource.includes(safeRecoveryDeclaration) && !storageDomainDoesNotLeakProviderText([{
+      ...safeSafRenderers[0], text: safCheckpointSource.replace(safeRecoveryDeclaration,
+        safeRecoveryDeclaration.replace('error: TransferStorageError', 'error: Exception')),
+    }]));
+  check('self-test: the real write path does not promote confirmed bytes', failedWriteCannotAdvanceConfirmed(sessionSource));
+  check('self-test: a failed write advancing confirmed bytes is caught',
+    sessionSource.includes('if (outcome is WriteOutcome.Failed) {') && !failedWriteCannotAdvanceConfirmed(
+      sessionSource.replace('if (outcome is WriteOutcome.Failed) {',
+        'if (outcome is WriteOutcome.Failed) {\n            confirmed = offset + length.toLong()'),
+    ));
+  check('self-test: a failed write advancing the optimistic frontier is caught',
+    sessionSource.includes('if (outcome is WriteOutcome.Failed) {') && !failedWriteCannotAdvanceConfirmed(
+      sessionSource.replace('if (outcome is WriteOutcome.Failed) {',
+        'if (outcome is WriteOutcome.Failed) {\n            frontier = offset + length.toLong()'),
+    ));
+  for (const [schemaPath, expected] of ROOM_SCHEMA_DIGESTS) {
+    const schema = readFileSync(join(ROOT, schemaPath));
+    check(`self-test: changing ${schemaPath} is caught`,
+      digestMatches(schema, expected) && !digestMatches(Buffer.concat([schema, Buffer.from(' ')]), expected));
+  }
 
   console.log('\nJ-PAKE production boundary self-test');
   console.log(checks.join('\n'));
@@ -1427,12 +2054,22 @@ function verify() {
 
   // 10. The storage bridge is inert: ports with no transport, no platform types and no leaks.
   const storageSession = production.find((f) => f.path === STORAGE_SESSION_PATH);
+  const storageVerifier = production.find((f) => f.path === STORAGE_VERIFIER_PATH);
+  const privatePartial = production.find((f) => f.path === STORAGE_PRIVATE_PARTIAL_PATH);
+  const pendingPartial = production.find((f) => f.path === STORAGE_PENDING_PARTIAL_PATH);
   const storageCapacity = production.find((f) => f.path === STORAGE_CAPACITY_PATH);
+  const typedReader = production.find((f) => f.path === STORAGE_TYPED_READ_PATH);
+  const fingerprintPolicy = production.find((f) => f.path === STORAGE_FINGERPRINT_PATH);
+  const resumePolicy = production.find((f) => f.path === STORAGE_RESUME_PATH);
+  const classifier = production.find((f) => f.path === STORAGE_CLASSIFIER_PATH);
+  const discard = production.find((f) => f.path === STORAGE_DISCARD_PATH);
+  const sourceOpener = production.find((f) => f.path === STORAGE_SOURCE_OPENER_PATH);
+  const sourceAdapters = STORAGE_SOURCE_ADAPTER_PATHS.map((path) => production.find((f) => f.path === path));
   check(
-    'the storage session and capacity ports exist at their exact paths',
-    storageSession !== undefined && storageCapacity !== undefined,
+    'the destination, typed reader and resume-policy ports exist at their exact paths',
+    [storageSession, storageVerifier, privatePartial, pendingPartial, storageCapacity, typedReader, fingerprintPolicy, resumePolicy, classifier, discard, ...sourceAdapters].every(Boolean),
   );
-  const storagePorts = [storageSession, storageCapacity].filter(Boolean);
+  const storagePorts = [storageSession, storageCapacity, typedReader, fingerprintPolicy, resumePolicy].filter(Boolean);
   const transportTouchers = storagePorts
     .filter((f) => storagePortMentionsTransport(f.text))
     .map((f) => f.path);
@@ -1464,6 +2101,74 @@ function verify() {
   check(
     'the session commits once, refuses a duplicate and never aborts a commit',
     storageSession !== undefined && storageSessionCommitsOnce(storageSession.text),
+  );
+  check(
+    'known source identity, size and timestamp mismatches force restart before any match',
+    fingerprintPolicy !== undefined && sourcePolicyRejectsEveryMismatch(fingerprintPolicy.text),
+  );
+  check(
+    'resume retains the expected SHA-256 and uses it for final verification',
+    resumePolicy !== undefined && resumeRequiresExpectedDigest(resumePolicy.text),
+  );
+  check(
+    'a resumed destination requires its retained SHA-256 for final verification and commit',
+    storageSession !== undefined && resumedDestinationRequiresRetainedDigest(storageSession.text),
+  );
+  check(
+    'the shared storage classifier preserves wrapped and Android provider cancellation',
+    classifier !== undefined && classifierPreservesCancellation(classifier.text),
+  );
+  check(
+    'source open and fingerprint adapters never retain raw provider exception text',
+    sourceAdapters.every(Boolean) && sourceAdaptersDoNotLeakProviderText(sourceAdapters.map((f) => f.text)),
+  );
+  check(
+    'source fingerprints use freshly queried media and document identities',
+    sourceAdapters.every(Boolean) && sourceFingerprintsUseFreshIdentity(sourceAdapters[2].text, sourceAdapters[3].text),
+  );
+  check(
+    'storage domain adapters do not retain raw provider exception text',
+    storageDomainDoesNotLeakProviderText(production.filter((f) => f.path.startsWith(STORAGE_PACKAGE))),
+  );
+  check(
+    'destination creation, open, write and verification failures are centrally classified',
+    [storageSession, storageVerifier, privatePartial, pendingPartial].every(Boolean) &&
+      destinationFailuresAreClassified(storageSession.text, storageVerifier.text, privatePartial.text, pendingPartial.text),
+  );
+  check(
+    'the typed reader validates ranges, progress, cancellation and exactly-once close',
+    typedReader !== undefined && typedReadHasBoundedContract(typedReader.text),
+  );
+  check(
+    'typed read and open failures never carry raw provider exception text',
+    typedReader !== undefined && classifier !== undefined &&
+      typedReadDoesNotLeakProviderText(typedReader.text, classifier.text),
+  );
+  check(
+    'non-seekable positioning preserves cancellation and rejects impossible read counts',
+    discard !== undefined && discardPreservesCancellationAndCounts(discard.text),
+  );
+  check(
+    'a cancellation during source probing closes the owned descriptor',
+    sourceOpener !== undefined && sourceProbeClosesOnCancellation(sourceOpener.text),
+  );
+  check(
+    'the typed reader does not retain the caller buffer',
+    typedReader !== undefined && typedReadDoesNotRetainBuffer(typedReader.text),
+  );
+  check(
+    'failed and short destination writes cannot advance confirmed or optimistic bytes',
+    storageSession !== undefined && failedWriteCannotAdvanceConfirmed(storageSession.text),
+  );
+  const otherRuntimeSources = ['transport-nearby', 'webshare-server']
+    .flatMap((module) => loadSources(collect(join(ROOT, module, 'src', 'main'))));
+  const rawSourceReaders = [...production, ...otherRuntimeSources]
+    .filter((file) => runtimeBypassesTypedSource(file.path, file.text))
+    .map((file) => file.path);
+  check(
+    'runtime-facing sources cannot read a raw source handle or bypass the typed opener',
+    rawSourceReaders.length === 0,
+    rawSourceReaders.join(', ') || 'no raw source access',
   );
 
   const androidInCoreTransfer = production
