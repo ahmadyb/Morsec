@@ -648,6 +648,60 @@ jobs:
           if [ "$order_status" -ne 0 ]; then exit "$order_status"; fi
           exit "$status"
 
+      # The emulator action auto-detects /dev/kvm and otherwise falls back to software emulation,
+      # which can time out before the instrumentation script is reached. Apply the action's
+      # recommended Linux udev rule on this ephemeral hosted runner, and publish bounded access
+      # diagnostics even when an emulator cannot start. This does not skip or replace device tests.
+      - name: Enable and report KVM for the API 23 emulator
+        if: ${{ !cancelled() }}
+        timeout-minutes: 2
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          {
+            kvm_access() {
+              if [ ! -e /dev/kvm ]; then
+                printf 'absent'
+              elif [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+                printf 'read-write'
+              else
+                printf 'not-read-write'
+              fi
+            }
+            before="$(kvm_access)"
+            echo "Host kernel: $(uname -sr); CPUs: $(nproc)"
+            echo "KVM access before setup: $before"
+            setup=ok
+            if ! (printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+                | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null && \
+                sudo udevadm control --reload-rules && \
+                sudo udevadm trigger --name-match=kvm); then
+              setup=failed
+            fi
+            after="$(kvm_access)"
+            echo "KVM setup: $setup; access after setup: $after"
+            [ ! -e /dev/kvm ] || ls -l /dev/kvm
+            sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+            accel=unavailable
+            if [ -x "$sdk/emulator/emulator" ]; then
+              if timeout 15s "$sdk/emulator/emulator" -accel-check 2>&1 | head -c 4096; then
+                accel=passed
+              else
+                accel=failed
+              fi
+            else
+              echo "Emulator binary not yet present for acceleration check."
+            fi
+            echo "::notice title=API 23 emulator host::KVM before=$before; setup=$setup; after=$after; accel-check=$accel; CPUs=$(nproc)"
+            if [ "$after" != read-write ]; then
+              echo "::warning title=API 23 emulator host::KVM is not readable and writable; the emulator action may fall back to software acceleration."
+            fi
+            if [ "$setup" != ok ]; then
+              echo "::error title=API 23 emulator host::Failed to apply the KVM udev setup."
+              exit 1
+            fi
+          } 2>&1 | tee ci-logs/58-api23-kvm.log
+
       - name: Run bundled Conscrypt TLS 1.3 compatibility test on API 23
         id: api23
         if: ${{ !cancelled() }}
@@ -679,6 +733,53 @@ jobs:
           # succeeds. Runs 38365708870, 38368188165 and 38370664983 failed that
           # way with 4 of 4 tests passing. The logic lives in the script file.
           script: bash ci/run-api23-instrumentation.sh
+
+      # The instrumentation wrapper cannot create its logs if the action times out during AVD
+      # startup. Capture host-side evidence in that case as well, without changing the action's
+      # failure status or publishing device identifiers or unbounded emulator output.
+      - name: Diagnose API 23 emulator host on failure
+        if: ${{ !cancelled() && steps.api23.outcome == 'failure' }}
+        timeout-minutes: 2
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          kvm=absent
+          if [ -e /dev/kvm ]; then
+            kvm=not-read-write
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then kvm=read-write; fi
+          fi
+          phase=before-instrumentation
+          if [ -f ci-logs/60-api23-device-before.log ]; then phase=instrumentation-started; fi
+          devices=unknown
+          accel=unavailable
+          {
+            echo "KVM access: $kvm; phase: $phase"
+            echo "Host kernel: $(uname -sr); CPUs: $(nproc)"
+            [ ! -e /dev/kvm ] || ls -l /dev/kvm
+            if [ -x "$sdk/emulator/emulator" ]; then
+              timeout 15s "$sdk/emulator/emulator" -version 2>&1 | head -c 4096 || true
+              if timeout 15s "$sdk/emulator/emulator" -accel-check 2>&1 | head -c 4096; then
+                accel=passed
+              else
+                accel=failed
+              fi
+            else
+              echo "Emulator binary unavailable."
+            fi
+            avd="$HOME/.android/avd/test.avd/config.ini"
+            if [ -r "$avd" ]; then
+              echo "Selected AVD settings:"
+              grep -E '^(abi\.type|hw\.cpu\.arch|hw\.cpu\.ncore|hw\.ramSize)=' "$avd" | head -c 4096 || true
+            else
+              echo "AVD configuration unavailable."
+            fi
+            if command -v adb > /dev/null 2>&1 && output="$(timeout 10s adb devices 2>&1)"; then
+              devices="$(printf '%s\n' "$output" | awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }')"
+            fi
+            echo "ADB connected device count: $devices"
+          } > ci-logs/59-api23-emulator-host.log 2>&1
+          echo "::notice title=API 23 emulator host on failure::phase=$phase; KVM=$kvm; accel-check=$accel; connected device count=$devices"
 
       # Reports only. It exits 0 by design: the instrumentation step's own
       # non-zero status is what fails the job, and this step must never convert
