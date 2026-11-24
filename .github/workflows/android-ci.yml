@@ -678,8 +678,15 @@ jobs:
                 sudo udevadm trigger --name-match=kvm); then
               setup=failed
             fi
+            after_udev="$(kvm_access)"
+            # Some hosted images accept the udev trigger without changing an existing node.
+            # The fallback applies the same 0666 mode as the rule, on this ephemeral runner only.
+            chmod_result=not-needed
+            if [ "$after_udev" = not-read-write ]; then
+              if sudo chmod 666 /dev/kvm; then chmod_result=applied; else chmod_result=failed; fi
+            fi
             after="$(kvm_access)"
-            echo "KVM setup: $setup; access after setup: $after"
+            echo "KVM setup: $setup; after udev: $after_udev; chmod: $chmod_result; final access: $after"
             [ ! -e /dev/kvm ] || ls -l /dev/kvm
             sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
             accel=unavailable
@@ -692,7 +699,10 @@ jobs:
             else
               echo "Emulator binary not yet present for acceleration check."
             fi
-            echo "::notice title=API 23 emulator host::KVM before=$before; setup=$setup; after=$after; accel-check=$accel; CPUs=$(nproc)"
+            echo "::notice title=API 23 emulator host::KVM before=$before; setup=$setup; after-udev=$after_udev; chmod=$chmod_result; after=$after; accel-check=$accel; CPUs=$(nproc)"
+            if [ "$chmod_result" = failed ]; then
+              echo "::warning title=API 23 emulator host::The KVM permission fallback failed."
+            fi
             if [ "$after" != read-write ]; then
               echo "::warning title=API 23 emulator host::KVM is not readable and writable; the emulator action may fall back to software acceleration."
             fi
