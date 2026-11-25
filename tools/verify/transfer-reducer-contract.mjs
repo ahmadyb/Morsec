@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /*
- * Payload Slice 4R: static contract and inertness guard. This is supplementary
- * to compiled reducer/store tests; it does not execute effects or prove device
- * durability. --self-test applies independent in-memory source mutations to the
- * real checkout and requires the corresponding guard to fail.
+ * Payload Slices 4R/4A: static contract and inertness guard. This supplements
+ * compiled reducer/runtime/store tests; it does not prove device durability.
+ * --self-test applies independent source mutations to the checkout in memory
+ * and requires the corresponding guard to fail.
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -24,6 +24,8 @@ const paths = {
   frame: `${prefix}protocol/FrameType.kt`,
   payload: `${prefix}protocol/FramePayload.kt`,
   gate: `${prefix}session/SessionContracts.kt`,
+  runtime: `${prefix}runtime/SingleFileRuntime.kt`,
+  runtimePorts: `${prefix}runtime/SingleFilePorts.kt`,
   readiness: 'core-model/src/main/kotlin/app/morsecode/core/model/FeatureReadiness.kt',
   doc: 'doc/transfer-protocol.md',
   workflow: '.github/workflows/android-ci.yml',
@@ -35,6 +37,9 @@ const editableCore = new Set([
   paths.persistence, paths.frame, paths.payload, paths.resume,
   `${prefix}protocol/ResumeDecision.kt`, paths.reducer, paths.table, paths.transition,
 ]);
+// The two reviewed inert runtime sources are the only newly permitted main
+// sources. Every other production source and build file remains fingerprinted.
+const runtimeSources = new Set([paths.runtime, paths.runtimePorts]);
 const pinned = {
   schema1: 'b0bca4243d2f0ba4631e3338e611d3bcaff8ba456de83b79ea0106ae187ac488',
   schema2: '7e6acfd9c03b0214dcaddc2f5d1ceb175588f5cfcf93cca5437617be24b2b074',
@@ -79,7 +84,7 @@ function fingerprint(files, select) {
 }
 function protectedProduction(files) {
   return fingerprint(files, path =>
-    (path.includes('/src/main/') && !editableCore.has(path)) ||
+    (path.includes('/src/main/') && !editableCore.has(path) && !runtimeSources.has(path)) ||
     /(^|\/)build\.gradle\.kts$/.test(path) || path === 'settings.gradle.kts' ||
     path === 'gradle/libs.versions.toml');
 }
@@ -360,11 +365,50 @@ function singleReducerAndEnums(files) {
 function inertProduction(files) {
   const code = [...editableCore].map(path => kotlin(files, path)).join('\n');
   const callers = [...editableCore].filter(path => path !== paths.reducer).map(path => kotlin(files, path)).join('\n');
-  return protectedProduction(files) === pinned.production &&
+  const runtime = [...runtimeSources].map(path => kotlin(files, path)).join('\n');
+  return [...runtimeSources].every(path => files.has(path)) && protectedProduction(files) === pinned.production &&
     !/\b(?:class|object|interface)\s+\w*(?:Runtime|TransferEngine|TransportAdapter|StorageAdapter)\w*/.test(code) &&
-    !/\bimport\s+(?:android\.|java\.net\.|javax\.net\.|app\.morsecode\.transport\.)/.test(code) &&
-    !/\b(?:GlobalScope|Thread|Executors)\b/.test(code) &&
-    !/\bTransferReducer\s*\.\s*(?:apply|enqueue)\s*\(/.test(callers);
+    !/\bimport\s+(?:android\.|java\.net\.|javax\.net\.|app\.morsecode\.transport\.)/.test(code + runtime) &&
+    !/\b(?:GlobalScope|Thread|Executors)\b/.test(code + runtime) &&
+    !/\b(?:SourceHandle|TransferSource|DestinationSession|RoomTransferSnapshotStore)\b/.test(runtime) &&
+    !/\bTransferReducer\s*\.\s*(?:apply|enqueue)\s*\(/.test(callers) &&
+    !/\b(?:SingleFileRuntime|SingleFileSource|SingleFileDestination|SingleFileTransport)\b|app\.morsecode\.core\.transfer\.runtime\b/.test(code);
+}
+function inertRuntimeOrdering(files) {
+  const code = kotlin(files, paths.runtime), drive = fn(code, 'drive'), save = fn(code, 'saveSnapshot');
+  const adjusted = fn(code, 'isCheckpointAdjusted');
+  const commit = fn(code, 'commitDestination'), step = fn(code, 'persistenceStep'), halt = fn(code, 'halt');
+  return ordered(drive, ['for ((index, effect)', 'when (val step = execute(', 'is EffectStep.Fault -> return halt(',
+      'for (event in outcomes)', 'TransferReducer.apply(requireCurrent(), event)']) &&
+    ordered(save, ['store.loadSnapshot(target.transferId)', 'if (requireNew && previous != null)',
+      'if (previous == target)', 'store.saveTransition(previous, target)']) &&
+    save.includes('!isCheckpointAdjusted(previous, expectedPrevious, target)') &&
+    adjusted.includes('stored.confirmedBytes == expected.optimisticBytes') &&
+    adjusted.includes('stored.confirmedBytes == target.confirmedBytes') &&
+    adjusted.includes('stored.lastAcknowledgedSequence == expected.lastAcknowledgedSequence') &&
+    adjusted.includes('stored.verification == expected.verification') &&
+    ordered(commit, ['saveSnapshot(snapshot, expectedPrevious = previous)', 'commitFailure(error)', 'destination.commitVerified()',
+      'TransferEvent.DestinationCommitSucceeded(']) &&
+    step.includes('TransferEvent.ConfirmedOffsetPersistenceFailed(') &&
+    step.includes('PortResult.Indeterminate -> unknownStep(operation)') &&
+    halt.includes('TransferReducer.apply(snapshot, event)') && !halt.includes('drive(') && !halt.includes('execute(') &&
+    !/\bTransferSnapshot\s*\(|\.copy\s*\(/.test(code);
+}
+function inertRuntimeProtocol(files) {
+  const code = kotlin(files, paths.runtime), execute = fn(code, 'execute');
+  const completion = execute.slice(execute.indexOf('is TransferEffect.SendFileComplete'), execute.indexOf('is TransferEffect.NotifyUi'));
+  const ack = execute.slice(execute.indexOf('is TransferEffect.SendAcknowledgement'), execute.indexOf('is TransferEffect.DispatchAllBytesConfirmed'));
+  const receiver = fn(code, 'receiveChunk'), verification = fn(code, 'beginVerification');
+  return code.includes('FrameCodec.decodeSingle(encoded)') && code.includes('FramePayloads.parse(frame)') &&
+    ordered(receiver, ['!metadataReceived', 'destination.writeDurably(', 'TransferEvent.ChunkDurablyStored(']) &&
+    ack.includes('role !is SingleFileRole.Receiver') && ack.includes('!checkpointAwaitingAck') &&
+    completion.includes('role !is SingleFileRole.Receiver') && completion.includes('!publicationSucceeded') &&
+    completion.includes('snapshot.state != TransferState.COMPLETED') && completion.includes('FrameCodec.fileComplete(') &&
+    verification.includes('!metadataReceived || !snapshot.allBytesConfirmed') &&
+    verification.includes('destination.openVerification()') && verification.includes('readDestination(reader,') &&
+    code.includes('TransferEvent.FileCompleteReceived(') && code.includes('payload.resumeFromOffset != 0L') &&
+    code.includes('pendingEmptyEof = effect') && code.includes('snapshot.snapshotVersion != effect.snapshotVersion') &&
+    kotlin(files, paths.runtimePorts).includes('public interface RuntimeTypedReader');
 }
 function gates(files) {
   const readiness = text(files, paths.readiness), gate = text(files, paths.gate);
@@ -415,7 +459,9 @@ const rules = [
   ['FILE_COMPLETE is receiver-to-sender in code and documentation', directionDocumentation],
   ['MSC1 frame names, IDs and payload declarations are unchanged', frameIds],
   ['one reducer and no newly introduced state enum', singleReducerAndEnums],
-  ['no runtime or production wiring is introduced', inertProduction],
+  ['only the isolated runtime is introduced, with no production wiring or raw storage', inertProduction],
+  ['runtime effects fail-stop, reconcile uncertainty, and CAS against the durable row', inertRuntimeOrdering],
+  ['runtime enforces direction, metadata, typed reads, checkpoint and completion barriers', inertRuntimeProtocol],
   ['payload gate and milestone remain unchanged and closed', gates],
   ['Room v1 and v2 are byte-identical', schemas],
   ['CI runs verifier mutations and requires JVM and API-23 test evidence', ciIntegration],
@@ -503,7 +549,19 @@ function runSelfTests() {
     ['FILE_COMPLETE frame id changed', frameIds, () => mutate(source, paths.frame, 'FILE_COMPLETE(14,', 'FILE_COMPLETE(16,')],
     ['second transfer state enum', singleReducerAndEnums, () => mutate(source, paths.events, 'public sealed interface TransferEvent : TransferTarget {', 'public enum class TransferPhase { X }\npublic sealed interface TransferEvent : TransferTarget {')],
     ['second reducer', singleReducerAndEnums, () => mutate(source, paths.reducer, 'public object TransferReducer {', 'public object AlternateReducer {}\npublic object TransferReducer {')],
-    ['new runtime source', inertProduction, () => addFile(source, `${prefix}runtime/SingleFileRuntime.kt`, 'class SingleFileRuntime')],
+    ['unreviewed additional runtime source', inertProduction, () => addFile(source, `${prefix}runtime/ExtraRuntime.kt`, 'class ExtraRuntime')],
+    ['runtime uses a raw source handle', inertProduction, () => mutate(source, paths.runtime, 'private var sourceReader: RuntimeTypedReader? = null', 'private var sourceReader: SourceHandle? = null')],
+    ['runtime has a production networking import', inertProduction, () => mutate(source, paths.runtime, 'package app.morsecode.core.transfer.runtime', 'package app.morsecode.core.transfer.runtime\nimport java.net.Socket')],
+    ['reducer contract source calls the runtime', inertProduction, () => mutate(source, paths.effects, 'public sealed interface TransferEffect {', 'val runtime: SingleFileRuntime? = null\npublic sealed interface TransferEffect {')],
+    ['runtime continues after an effect failure', inertRuntimeOrdering, () => mutate(source, paths.runtime, 'is EffectStep.Fault -> return halt(step.operation, step.error, step.event, step.uncertain)', 'is EffectStep.Fault -> Unit')],
+    ['runtime CAS ignores the durable row', inertRuntimeOrdering, () => mutate(source, paths.runtime, 'store.saveTransition(previous, target)', 'store.saveTransition(null, target)')],
+    ['runtime silently adopts an unexpected predecessor', inertRuntimeOrdering, () => mutate(source, paths.runtime, 'stored.lastAcknowledgedSequence == expected.lastAcknowledgedSequence', 'true')],
+    ['runtime fabricates a snapshot', inertRuntimeOrdering, () => mutate(source, paths.runtime, 'current = result.current', 'current = result.current.copy()')],
+    ['runtime skips provisional precommit persistence', inertRuntimeOrdering, () => mutate(source, paths.runtime, 'when (val saved = saveSnapshot(snapshot, expectedPrevious = previous))', 'when (val saved = PortResult.Success(Unit))')],
+    ['runtime guesses checkpoint success after failure', inertRuntimeOrdering, () => mutate(source, paths.runtime, 'TransferEvent.ConfirmedOffsetPersistenceFailed(', 'TransferEvent.ConfirmedOffsetPersisted(')],
+    ['sender can send file completion', inertRuntimeProtocol, () => mutate(source, paths.runtime, 'if (role !is SingleFileRole.Receiver || !publicationSucceeded || snapshot.state != TransferState.COMPLETED ||', 'if (role !is SingleFileRole.Sender || !publicationSucceeded || snapshot.state != TransferState.COMPLETED ||')],
+    ['runtime can acknowledge without checkpoint success', inertRuntimeProtocol, () => mutate(source, paths.runtime, 'role !is SingleFileRole.Receiver || !checkpointAwaitingAck ||', 'role !is SingleFileRole.Receiver || false ||')],
+    ['runtime verifies before metadata', inertRuntimeProtocol, () => mutate(source, paths.runtime, '!metadataReceived || !snapshot.allBytesConfirmed', 'false || !snapshot.allBytesConfirmed')],
     ['production transport wiring', inertProduction, () => mutate(source, 'transport-lan/src/main/kotlin/app/morsecode/transport/lan/LanPeerDiscoveryProvider.kt', 'package app.morsecode.transport.lan', 'package app.morsecode.transport.lan\nimport app.morsecode.core.transfer.reducer.TransferReducer')],
     ['new reducer caller in editable production source', inertProduction, () => mutate(source, paths.effects, 'public sealed interface TransferEffect {', 'fun start() = TransferReducer.enqueue(x)\npublic sealed interface TransferEffect {')],
     ['changed destination adapter logic', inertProduction, () => mutate(source, 'core-storage/src/main/kotlin/app/morsecode/core/storage/transfer/DestinationSession.kt', 'private var confirmed: Long = initialConfirmedBytes', 'private var confirmed: Long = 0L')],

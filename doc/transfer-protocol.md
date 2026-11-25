@@ -1200,3 +1200,105 @@ provisional verified digest without schema changes. Tests exercise the reducer a
 contracts, not real provider durability. Genuine API-23 storage-provider device tests remain
 mandatory before production activation; the existing API-23 transport suite and Robolectric evidence
 are not that storage-provider evidence.
+
+## 18. Inert single-file runtime (Slice 4A; payload disabled)
+
+`core-transfer` now contains `SingleFileRuntime` and its synchronous ports. This is an isolated
+JVM core, not an app entry point: there is no production construction or implementation of its
+transport, persistence, source, destination or observer ports. The only implementations in this
+slice are test fakes/in-memory components. The payload gate still refuses unconditionally,
+`CURRENT_MILESTONE` remains 2, `TRANSFER_ENGINE` remains unavailable, and the Room v1/v2 schemas
+are unchanged. The description of Slice 4R in §17 remains the reducer contract on which this runtime
+is based, not a claim that the earlier slice contained an executor.
+
+### 18.1 Supported profile and ownership
+
+A runtime owns one fresh delivery in one direction. It requires a known length, an expected SHA-256,
+a plain file and a matching sender or receiver role. It refuses an existing row even if that row
+matches a new queued snapshot. Pause, resume, retry, reconnect, batches, restart, and recovery
+execution are not supported. Peer identity, descriptor, frame CRC, sequence, offsets and direction
+are checked before storage is touched. The sender uses stop-and-wait, with one chunk in flight. It
+advertises no resume support even though the generic reducer's capability vocabulary includes resume.
+
+Source reads use only the bounded `RuntimeTypedReader` result (`Data`, `EndOfSource`, `Cancelled`,
+or `Failed`), never a raw `SourceHandle`. Counts are checked, zero progress is terminal, readers are
+closed, and buffers are bounded by the negotiated chunk size. A test-only bridge exercises this runtime with the
+existing `TypedSourceReader`; there is **no** production bridge to a real provider in this slice.
+A future bridge must delegate to `TypedSourceReader` and preserve its cancellation/error/ownership
+semantics. The sender reads the declared length and probes for an unexpectedly longer source, but
+protocol EOF remains the reducer's revision-bound local effect, not a source EOF frame.
+
+The receiver checks the agreed metadata before any chunk or verification. For an empty file the
+reducer emits implicit EOF during acceptance, before the sender can send metadata. The runtime holds
+that *last* effect until the matching metadata arrives; it does not verify or publish in the interim.
+No new EOF or metadata-acknowledgement frame is introduced. This is an in-memory continuation, not a
+restart mechanism. A mismatched or out-of-order frame halts the runtime without committing.
+
+### 18.2 Serial effects and fail-stop outcomes
+
+Runtime entry methods serialize one delivery and reject reentrant callbacks. Ports are synchronous;
+a transport queues frames rather than delivering a response reentrantly. For every accepted reducer
+transition, the runtime executes the ordered effects one by one. It queues the factual outcome of a
+successful effect until the current effect list has completed, then dispatches that event and executes
+its new program. This preserves the list's order, including the `VERIFYING` notification after the
+verification operation. It does not treat verification success as completion.
+
+The first definitive failed effect abandons the rest of its program, reports the corresponding
+failure event where the reducer defines one, and permanently halts this runtime. The failure event's
+own effects are **not** executed after the halt: in particular no later ACK, completion message, UI
+notification, scheduling or speculative delete is emitted. Observer failures have no corresponding
+reducer event and are reported as runtime failures instead. A post-commit persistence failure can
+produce a failure event the terminal reducer correctly rejects; it must not be relabelled as a failed
+physical commit. The returned halt says whether its event was accepted and whether reconciliation is
+required. The exposed reducer snapshot can be provisional and is not by itself a durable-success
+signal. There is no automatic failure-effect replay in this slice.
+
+The port result distinguishes definite failure or definite cancellation of the claimed success fact
+from an **indeterminate** outcome. Read cancellation is preserved as cancellation, not reclassified
+as I/O; the runtime halts without fabricating a reducer cancellation event or running later reducer
+effects. Closing an owned reader is still best-effort cleanup. A definite write failure can still
+leave partial bytes. A thrown port exception is conservatively
+indeterminate; the runtime halts without guessing a success or failure event. The
+durable receiver row remains available to a future reconciliation owner. A halt with possible
+uncheckpointed partial bytes, a checkpoint before its ACK, or a saved provisional verified revision
+is marked as requiring reconciliation. No reconciliation or notification outbox is implemented here.
+
+### 18.3 Checkpoint, verification and publication
+
+After frame validation and a destination port's successful sequential write **and durability** result,
+the runtime dispatches `ChunkDurablyStored`. It persists that pending snapshot, then checkpoints the
+candidate. Only a successful checkpoint dispatches `ConfirmedOffsetPersisted`; the following program
+persists the confirmed revision before the ACK, UI and implicit EOF. A failed staging save or definite
+checkpoint failure reports `ConfirmedOffsetPersistenceFailed` and halts without an ACK. A checkpoint
+whose result is indeterminate is never acknowledged on a guess.
+
+Every snapshot save first reads the actual durable row. An equal revision is skipped, a new revision
+is compared and saved against that actual row, and a revision gap, identity change or regression is
+refused. This matters on *both* sides: `saveCheckpoint` changes confirmed bytes without changing the
+snapshot revision, so the reducer's in-memory predecessor is no longer the correct CAS predecessor.
+The runtime permits only the expected checkpoint's confirmed-byte adjustment at that same revision;
+other changes to the durable predecessor are refused rather than silently adopted.
+The Slice 4A persistence port deliberately expresses definite/unknown outcomes; it is not wired to
+Room and does not claim that every failure returned by an existing adapter is necessarily definite.
+
+The receiver rereads the partial through a bounded typed reader and hashes it; a digest mismatch is
+reported as `VerificationFailed` and does not commit. A matching digest creates only the reducer's
+provisional verified state. Executing `CommitVerifiedDestination` first saves that exact verified
+revision and only then calls the destination's commit. A definitive preflight or commit failure
+reports `DestinationCommitFailed` without publishing success; an indeterminate result remains
+unresolved. Once publication succeeds, the receiver's completed snapshot is persisted before the
+success result, `FILE_COMPLETE`, UI and scheduling, in that order. A later failure does not roll back
+or delete the published destination. The sender never sends `FILE_COMPLETE` and completes only after
+both peer verification and a matching receiver-to-sender `FILE_COMPLETE`.
+
+The fake destination's successful durability operation is simulated evidence for ordering only, not
+proof of Android fsync or provider persistence. Genuine API-23 storage-provider durability evidence,
+including the unresolved flush/checkpoint semantics in the storage bridge, remains mandatory before
+Slice 4B real-storage composition or any production activation. The generic reducer can send a
+handshake/accept or metadata, or open a stream, before persisting that transition; the runtime
+preserves that order and does not claim crash-atomic negotiation. Fail-stop prevents later effects on
+the failing runtime, but cannot retract an earlier frame or prevent an independent peer from acting
+on it. In particular, an empty receiver can see metadata that the sender emitted before its source
+open or snapshot save subsequently fails. Lost ACKs, implicit EOF, verification results and completion
+frames have no restart re-announcement; a published-but-unresolved destination must be reconciled
+rather than deleted or republished on a guess.

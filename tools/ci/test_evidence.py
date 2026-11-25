@@ -3,7 +3,7 @@
 
 This complements Gradle's exit status, which the workflow must still preserve.
 JVM reports are checked for every current JUnit @Test method in the repository's
-ordinary src/test Kotlin sources, including the Slice 4R reducer and Room tests.
+ordinary src/test Kotlin sources, including the Slice 4R reducer/Room tests and Slice 4A runtime tests.
 The connected check covers the transport-lan API-23 task (not app androidTests).
 A parameterized source method must appear at least once; this check does not
 prove that every possible parameter value was exercised.
@@ -26,8 +26,9 @@ JVM_REQUIRED_MODULES = frozenset({
     "app", "core-model", "core-design", "core-data", "core-storage",
     "core-transfer", "transport-lan",
 })
-# Floors pin the repaired suites as well as discovering all the other source
-# methods. Deliberate test removal requires review and an explicit floor update.
+# Floors pin the repaired and inert-runtime suites as well as discovering all
+# other source methods. Deliberate removal needs review and a floor update. The
+# historical variable name is retained for the validator's independent fixtures.
 JVM_4R_FLOORS = {
     ("core-transfer", "app.morsecode.core.transfer.reducer.RejectionCoverageTest"): 25,
     ("core-transfer", "app.morsecode.core.transfer.reducer.TransferReducerContractRepairTest"): 19,
@@ -38,6 +39,8 @@ JVM_4R_FLOORS = {
     ("core-transfer", "app.morsecode.core.transfer.resume.ResumeNegotiatorTest"): 29,
     ("core-transfer", "app.morsecode.core.transfer.persistence.TransferSnapshotStoreContractTest"): 18,
     ("core-data", "app.morsecode.core.data.db.RoomTransferSnapshotStoreTest"): 16,
+    ("core-transfer", "app.morsecode.core.transfer.runtime.SingleFileRuntimeTest"): 43,
+    ("core-storage", "app.morsecode.core.storage.transfer.SingleFileTypedReaderRuntimeTest"): 3,
 }
 API23_FLOORS = {
     ("transport-lan", "app.morsecode.transport.lan.ControlEstablishmentCapacityTest"): 1,

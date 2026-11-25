@@ -4,6 +4,9 @@ Slice 3 builds the storage side of a transfer — a source that can be re-opened
 destination that can be written sequentially, verified and published — without connecting either of
 them to a transport. Nothing in this slice sends or receives a transfer frame. `TRANSFER_ENGINE`
 stays gated, `CURRENT_MILESTONE` stays 2, and no runtime in the app composes these pieces.
+The later inert Slice 4A runtime uses fake/in-memory ports only; its test-only typed-reader bridge is
+not a production adapter. Real storage composition and genuine API-23 provider durability evidence
+remain outside Slice 4A. See [transfer-protocol.md §18](transfer-protocol.md#18-inert-single-file-runtime-slice-4a-payload-disabled).
 
 This page is the normative description of that bridge. It records the port boundary, the
 sequential-write invariant, the resume and reconciliation rules, and the diagnostics policy that the
