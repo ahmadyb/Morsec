@@ -344,6 +344,23 @@ class RoomTransferSnapshotStoreTest {
                 TransferCommand.Retry(before.sessionId, before.transferId, before.recipientId),
             ) is TransitionResult.Rejected,
         )
+        // Unrelated failures cannot make the ambiguous publication terminal or
+        // make the later reconciled outcome inapplicable.
+        for (event in listOf(
+            TransferEvent.PermissionRevoked(before.sessionId, before.transferId, before.recipientId),
+            TransferEvent.TransportDisconnected(before.sessionId, before.transferId, before.recipientId),
+            TransferEvent.PeerRejected(before.sessionId, before.transferId, before.recipientId),
+        )) {
+            val result = TransferReducer.apply(restored, event)
+            assertTrue(result is TransitionResult.Rejected)
+            assertEquals(restored, (result as TransitionResult.Rejected).snapshot)
+        }
+        assertTrue(
+            TransferReducer.apply(
+                restored,
+                TransferEvent.DestinationCommitSucceeded(before.sessionId, before.transferId, before.recipientId),
+            ) is TransitionResult.Accepted,
+        )
     }
 
     @Test

@@ -170,14 +170,33 @@ class TransferReducerContractRepairTest {
         ))
     }
 
-    @Test fun `a storage failure after provisional verification is legal and does not delete`() {
-        val result = TransferReducer.apply(
-            receiverVerified(),
+    @Test fun `unrelated events cannot terminate an unresolved verified receiver`() {
+        val provisional = receiverVerified()
+        val unrelated = listOf(
             TransferEvent.StorageFailed(Tf.sessionId, Tf.transferId, null, TransferError.StorageFull(1L)),
+            TransferEvent.PermissionRevoked(Tf.sessionId, Tf.transferId, null),
+            TransferEvent.ProtocolFailed(Tf.sessionId, Tf.transferId, null, TransferError.UnexpectedOffset(0L, 1L)),
+            TransferEvent.PeerRejected(Tf.sessionId, Tf.transferId, null),
+            Tf.transportDisconnected(),
+            Tf.transportRestored(),
+            Tf.remoteCancelled(),
+            Tf.sessionEnded(),
+            Tf.allBytesConfirmed(),
         )
-        assertEquals(TransferState.FAILED_RETRYABLE, current(result).state)
-        assertFalse(effects(result).any { it is TransferEffect.DeletePartialDestination || it is TransferEffect.SendFileComplete })
-        assertRejected(TransferReducer.apply(receiverVerified(), Tf.cancelLocally()))
+        for (event in unrelated) {
+            val result = TransferReducer.apply(provisional, event)
+            assertRejected(result)
+            assertEquals(provisional, (result as TransitionResult.Rejected).snapshot)
+        }
+        assertRejected(TransferReducer.apply(provisional, Tf.cancelLocally()))
+        assertRejected(TransferReducer.apply(provisional, Tf.retry()))
+        assertRejected(TransferReducer.apply(provisional, Tf.skip()))
+        // A trusted definitive commit outcome remains applicable afterwards.
+        val outcome = TransferReducer.apply(
+            provisional,
+            TransferEvent.DestinationCommitSucceeded(Tf.sessionId, Tf.transferId, null),
+        )
+        assertEquals(TransferState.COMPLETED, current(outcome).state)
     }
 
     @Test fun `commit outcomes require a verified receiver and never apply to a sender`() {

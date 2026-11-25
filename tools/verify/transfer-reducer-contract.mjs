@@ -154,7 +154,7 @@ function receiverOnlyCommit(files) {
 }
 function precommitContract(files) {
   const effect = text(files, paths.effects), store = text(files, paths.persistence);
-  const code = kotlin(files, paths.reducer);
+  const code = kotlin(files, paths.reducer), guard = fn(code, 'guard');
   return effect.includes('executor MUST durably save the accepted provisional verified snapshot') &&
     effect.includes('at [verifiedSnapshotVersion], using the last durable revision for CAS') &&
     effect.includes('If\n     * that prerequisite fails, do not publish') &&
@@ -162,7 +162,14 @@ function precommitContract(files) {
     store.includes('Before physical\n * publication, that effect must first persist the provisional verified revision') &&
     fn(code, 'onCancelLocally').includes('snapshot.verification?.allowsCommit == true') &&
     fn(code, 'onRetry').includes('snapshot.verification?.allowsCommit == true') &&
-    fn(code, 'onSkip').includes('snapshot.verification?.allowsCommit == true');
+    fn(code, 'onSkip').includes('snapshot.verification?.allowsCommit == true') &&
+    guard.includes('snapshot.direction == SessionDirection.INBOUND') &&
+    guard.includes('snapshot.state == TransferState.VERIFYING') &&
+    guard.includes('snapshot.verification?.allowsCommit == true') &&
+    guard.includes('target is TransferEvent') &&
+    guard.includes('target !is TransferEvent.DestinationCommitSucceeded') &&
+    guard.includes('target !is TransferEvent.DestinationCommitFailed') &&
+    guard.includes('destination commit outcome requires reconciliation');
 }
 function checkpointRequest(files) {
   const body = fn(kotlin(files, paths.reducer), 'onChunkDurablyStored');
@@ -372,13 +379,22 @@ function ciIntegration(files) {
   const workflow = text(files, paths.workflow);
   const branch = /elif \[ "\$script" = tools\/verify\/transfer-reducer-contract\.mjs \]; then([\s\S]*?)\n\s*else/.exec(workflow)?.[1] ?? '';
   const jvm = /- name: JVM unit tests([\s\S]*?)(?=\n      - name:|$)/.exec(workflow)?.[1] ?? '';
+  const fixtures = /- name: Test evidence validator fixtures([\s\S]*?)(?=\n      - name:|$)/.exec(workflow)?.[1] ?? '';
+  const api = /- name: Verify API 23 zero-skip test evidence([\s\S]*?)(?=\n      - name:|$)/.exec(workflow)?.[1] ?? '';
   return /for script in [^\n]*tools\/verify\/transfer-reducer-contract\.mjs/.test(workflow) &&
     branch.includes('node "$script" --self-test || echo "VERIFIER FAILED: $script"') &&
     branch.includes('node "$script" || echo "VERIFIER FAILED: $script"') &&
     workflow.includes('grep -q "VERIFIER FAILED" ci-logs/15-verifiers.log && exit 1') &&
     jvm.includes('gradle_status=${PIPESTATUS[0]}') &&
     jvm.includes('if not paths or total == 0 or failed or skipped or malformed:') &&
-    jvm.includes('if [ "$gradle_status" -ne 0 ]; then exit "$gradle_status"; fi');
+    jvm.includes('if [ "$gradle_status" -ne 0 ]; then exit "$gradle_status"; fi') &&
+    jvm.includes('python3 tools/ci/test_evidence.py jvm\n          coverage_status=$?') &&
+    jvm.includes('exit "$coverage_status"') &&
+    fixtures.includes('if: ${{ !cancelled() }}') && api.includes('if: ${{ !cancelled() }}') &&
+    /^\s*run: python3 -m unittest discover -s tools\/ci -p 'test_test_evidence\.py' -v\s*$/m.test(fixtures) &&
+    /^\s*run: python3 tools\/ci\/test_evidence\.py api23\s*$/m.test(api) &&
+    workflow.indexOf('script: bash ci/run-api23-instrumentation.sh') >= 0 &&
+    workflow.indexOf('script: bash ci/run-api23-instrumentation.sh') < workflow.indexOf('- name: Verify API 23 zero-skip test evidence');
 }
 const rules = [
   ['verification remains provisional and emits no success completion', verificationProvisional],
@@ -402,7 +418,7 @@ const rules = [
   ['no runtime or production wiring is introduced', inertProduction],
   ['payload gate and milestone remain unchanged and closed', gates],
   ['Room v1 and v2 are byte-identical', schemas],
-  ['CI runs verifier mutations and fails on missing or skipped JVM results', ciIntegration],
+  ['CI runs verifier mutations and requires JVM and API-23 test evidence', ciIntegration],
 ];
 function mutate(files, path, oldText, newText) {
   const old = text(files, path);
@@ -431,6 +447,8 @@ function runSelfTests() {
     ['cancellation may discard a provisional destination', precommitContract, () => mutateFn(source, 'onCancelLocally', 'snapshot.verification?.allowsCommit == true', 'false')],
     ['retry may overwrite a provisional destination', precommitContract, () => mutateFn(source, 'onRetry', 'snapshot.verification?.allowsCommit == true', 'false')],
     ['skip may hide a provisional destination', precommitContract, () => mutateFn(source, 'onSkip', 'snapshot.verification?.allowsCommit == true', 'false')],
+    ['unrelated failure may terminate an unresolved publication', precommitContract, () => mutateFn(source, 'guard', 'snapshot.verification?.allowsCommit == true', 'false')],
+    ['commit success cannot resolve a provisional publication', precommitContract, () => mutateFn(source, 'guard', 'target !is TransferEvent.DestinationCommitSucceeded', 'target is TransferEvent.DestinationCommitSucceeded')],
     ['ACK emitted from durability stage', checkpointRequest, () => mutateFn(source, 'onChunkDurablyStored', 'TransferEffect.PersistConfirmedOffset(current.transferId, end)', 'TransferEffect.PersistConfirmedOffset(current.transferId, end), TransferEffect.SendAcknowledgement(current.transferId, 0, 1, end)')],
     ['confirmed bytes advance in persistence request', checkpointRequest, () => mutateFn(source, 'onChunkDurablyStored', 'current.copy(optimisticBytes = end)', 'current.copy(confirmedBytes = end, optimisticBytes = end)')],
     ['checkpoint bypasses staged revision', checkpointRequest, () => mutateFn(source, 'onChunkDurablyStored', 'TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion)', 'TransferEffect.NotifyUi(current.transferId, current.state)')],
@@ -496,6 +514,11 @@ function runSelfTests() {
     ['CI stops running reducer verifier mutations', ciIntegration, () => mutate(source, paths.workflow, 'elif [ "$script" = tools/verify/transfer-reducer-contract.mjs ]; then', 'elif [ "$script" = tools/verify/other.mjs ]; then')],
     ['CI permits skipped JVM tests', ciIntegration, () => mutate(source, paths.workflow, 'if not paths or total == 0 or failed or skipped or malformed:', 'if not paths or total == 0 or failed or malformed:')],
     ['CI masks Gradle failures', ciIntegration, () => mutate(source, paths.workflow, 'if [ "$gradle_status" -ne 0 ]; then exit "$gradle_status"; fi', 'echo done')],
+    ['CI omits source-method coverage', ciIntegration, () => mutate(source, paths.workflow, 'python3 tools/ci/test_evidence.py jvm', 'echo coverage')],
+    ['CI ignores coverage failure', ciIntegration, () => mutate(source, paths.workflow, 'exit "$coverage_status"', 'exit 0')],
+    ['CI omits evidence-validator fixtures', ciIntegration, () => mutate(source, paths.workflow, "run: python3 -m unittest discover -s tools/ci -p 'test_test_evidence.py' -v", 'run: true')],
+    ['CI omits API-23 evidence verification', ciIntegration, () => mutate(source, paths.workflow, 'run: python3 tools/ci/test_evidence.py api23', 'run: true')],
+    ['CI omits the API-23 instrumentation command', ciIntegration, () => mutate(source, paths.workflow, 'script: bash ci/run-api23-instrumentation.sh', 'script: true')],
   ];
   let failures = 0;
   for (const [name, rule, mutation] of cases) {

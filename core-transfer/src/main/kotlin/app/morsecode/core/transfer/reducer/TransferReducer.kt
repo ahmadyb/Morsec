@@ -440,38 +440,38 @@ public object TransferReducer {
             )
         }
         return commit(
-        snapshot,
-        TransferState.CANCELLED,
-        name,
-        transform = { current ->
-            current.copy(
-                optimisticBytes = current.confirmedBytes,
-                failure = if (cancelledRemotely) {
-                    TransferError.CancelledRemotely
-                } else {
-                    TransferError.CancelledLocally
-                },
-            )
-        },
-        effects = { current ->
-            val wire = if (cancelledRemotely) {
-                emptyList()
-            } else {
-                listOf(
-                    TransferEffect.SendCancel(transferId = current.transferId, reason = reason),
+            snapshot,
+            TransferState.CANCELLED,
+            name,
+            transform = { current ->
+                current.copy(
+                    optimisticBytes = current.confirmedBytes,
+                    failure = if (cancelledRemotely) {
+                        TransferError.CancelledRemotely
+                    } else {
+                        TransferError.CancelledLocally
+                    },
                 )
-            }
-            // A verified destination may already have been published if a
-            // commit outcome was interrupted. Never delete it speculatively.
-            val storage = if (current.direction == SessionDirection.INBOUND &&
-                current.verification?.allowsCommit != true
-            ) {
-                listOf(TransferEffect.DeletePartialDestination(current.transferId))
-            } else {
-                emptyList()
-            }
-            wire + storage + persist(current) + schedule(current)
-        },
+            },
+            effects = { current ->
+                val wire = if (cancelledRemotely) {
+                    emptyList()
+                } else {
+                    listOf(
+                        TransferEffect.SendCancel(transferId = current.transferId, reason = reason),
+                    )
+                }
+                // A verified destination may already have been published if a
+                // commit outcome was interrupted. Never delete it speculatively.
+                val storage = if (current.direction == SessionDirection.INBOUND &&
+                    current.verification?.allowsCommit != true
+                ) {
+                    listOf(TransferEffect.DeletePartialDestination(current.transferId))
+                } else {
+                    emptyList()
+                }
+                wire + storage + persist(current) + schedule(current)
+            },
         )
     }
 
@@ -1421,6 +1421,20 @@ public object TransferReducer {
         if (snapshot.state.isTerminal && !isTerminalIdiom(target)) {
             return Rejection.TerminalTransfer(snapshot.state, name)
         }
+        // A durable verified receiver snapshot may already have been published.
+        // Unrelated events must not turn that ambiguity into a terminal failure,
+        // discard the recovery row, or make a later commit outcome impossible.
+        // Only a trusted definitive commit outcome can resolve this phase; a
+        // generic failure, disconnect or peer event must wait for reconciliation.
+        if (snapshot.direction == SessionDirection.INBOUND &&
+            snapshot.state == TransferState.VERIFYING &&
+            snapshot.verification?.allowsCommit == true &&
+            target is TransferEvent &&
+            target !is TransferEvent.DestinationCommitSucceeded &&
+            target !is TransferEvent.DestinationCommitFailed
+        ) {
+            return Rejection.InvalidCommand("destination commit outcome requires reconciliation")
+        }
         return null
     }
 
@@ -1444,13 +1458,6 @@ public object TransferReducer {
         return TransitionResult.rejected(snapshot, rejection)
     }
 
-    /**
-     * Validates a chunk's length, sequence, alignment and bounds.
-     *
-     * Returns a rejection when the chunk cannot possibly be appended, or null
-     * when the caller should go on to decide whether it is new, duplicate,
-     * overlapping or out-of-order.
-     */
     /**
      * Validates a chunk's range and sequence.
      *

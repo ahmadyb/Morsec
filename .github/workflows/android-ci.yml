@@ -205,6 +205,12 @@ jobs:
           node tools/verify/secure-artifact-bytes.mjs 2>&1 | tee ci-logs/17-secure-artifact-bytes-preuse.log
           exit "${PIPESTATUS[0]}"
 
+      # Exercise the evidence gate independently before it is trusted on the
+      # Gradle and device reports below; these fixtures do not replace either run.
+      - name: Test evidence validator fixtures
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest discover -s tools/ci -p 'test_test_evidence.py' -v
+
       - name: JVM unit tests
         if: ${{ !cancelled() }}
         run: |
@@ -244,8 +250,13 @@ jobs:
               sys.exit(1)
           PYEOF
           report_status=$?
+          # Check the complete source-method inventory, not just an aggregate
+          # count that could be green when a module or suite never ran.
+          python3 tools/ci/test_evidence.py jvm
+          coverage_status=$?
           if [ "$gradle_status" -ne 0 ]; then exit "$gradle_status"; fi
-          exit "$report_status"
+          if [ "$report_status" -ne 0 ]; then exit "$report_status"; fi
+          exit "$coverage_status"
 
       # The lock names nine configurations across two projects. Each is resolved and compared, and
       # the reports are kept per project so a configuration is checked against its own project's
@@ -762,6 +773,13 @@ jobs:
           # succeeds. Runs 38365708870, 38368188165 and 38370664983 failed that
           # way with 4 of 4 tests passing. The logic lives in the script file.
           script: bash ci/run-api23-instrumentation.sh
+
+      # The Gradle/action exit code alone does not rule out ignored tests or a
+      # zero-test run. Check the actual API, status, XML cases and all current
+      # transport-lan instrumentation source methods; never replace that exit.
+      - name: Verify API 23 zero-skip test evidence
+        if: ${{ !cancelled() }}
+        run: python3 tools/ci/test_evidence.py api23
 
       # The instrumentation wrapper cannot create its logs if the action times out during AVD
       # startup. Capture host-side evidence in that case as well, without changing the action's

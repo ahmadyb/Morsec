@@ -1168,8 +1168,12 @@ orders the effects as follows:
 
 A definitive `DestinationCommitFailed` instead persists failure, sends a bounded verification
 failure and never emits `FILE_COMPLETE`. A commit outcome must not be guessed: an ambiguous
-publication requires reconciliation. In particular, cancellation/retry must not delete or overwrite
-a potentially published verified destination.
+publication requires reconciliation. While an inbound verified snapshot is still `VERIFYING`, the
+reducer refuses unrelated events, including disconnect, peer rejection and generic storage or
+permission failure, so they cannot turn a possibly published destination into a terminal failure or
+block a later definitive commit outcome. The executor must defer those events and reconcile rather
+than disguising uncertainty as `DestinationCommitFailed`. Cancellation/retry must not delete or
+overwrite a potentially published verified destination.
 
 A sender waits in `VERIFYING`; it never runs the destination verification or commit effect. A
 successful peer verification result records its digest and reported length but is not completion.
@@ -1184,9 +1188,12 @@ published destination must never be rolled back merely because notification fail
 remain incomplete. Because the verified revision is saved before publication, a crash or failure
 between commit and completed-state persistence leaves a verified but nonterminal snapshot that does
 **not** prove whether publication occurred. Inbound retry, cancellation and skip are refused while
-such verification is present; no destination is deleted speculatively. A later slice must reconcile
-publication and notification before acting; this repair does not claim crash-atomicity across the
-destination and snapshot store.
+such verification is present; no destination is deleted speculatively. The reducer does not itself
+replay an ACK, re-dispatch EOF after restart, or re-send a lost `VERIFICATION_RESULT` or
+`FILE_COMPLETE` from a completed snapshot. There is no durable notification outbox or reconnect
+executor in this slice. A later slice must reconcile publication and notification before acting; this
+repair does not claim crash-atomicity or end-to-end recovery liveness across the destination, snapshot
+store and transport.
 
 Room v1/v2 and the existing snapshot fields represent both a pending optimistic candidate and a
 provisional verified digest without schema changes. Tests exercise the reducer and persistence
