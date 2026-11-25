@@ -21,11 +21,11 @@ import app.morsecode.core.transfer.integrity.Sha256Digest
  * Two rules shape the field list.
  *
  * 1. Confirmed and optimistic progress are separate fields, never one number.
- *    `confirmedBytes` only ever moves on a receiver acknowledgement (or on a
- *    receiver's own verified write); `optimisticBytes` moves when this device
- *    writes bytes to the wire. Resume is only ever allowed to start from
- *    `confirmedBytes`, which is what makes "resume after an interruption"
- *    correct rather than optimistic.
+ *    On a sender, optimisticBytes describes bytes sent and confirmedBytes moves
+ *    on a valid receiver acknowledgement. On a receiver, optimisticBytes is the
+ *    frontier of one durably stored chunk awaiting a checkpoint; confirmedBytes
+ *    moves only after that checkpoint succeeds. Resume trusts confirmedBytes,
+ *    never an unpersisted optimistic frontier.
  *
  * 2. There is no clock, no random id and no handle in here. The reducer is a
  *    pure function of (snapshot, command|event); anything time- or
@@ -107,14 +107,19 @@ public data class TransferSnapshot(
     public val batchId: BatchId,
     /** Non-null when this delivery is one leg of a broadcast. */
     public val recipientId: RecipientId?,
+    /** Locally established at enqueue and invariant for the life of the delivery. */
     public val direction: SessionDirection,
     public val descriptor: TransferFileDescriptor,
     public val state: TransferState,
-    /** Bytes the receiving side has confirmed as valid. Never decreases. */
+    /** Receiver-confirmed bytes; on the receiver, checkpoint persistence must have succeeded. */
     public val confirmedBytes: Long,
-    /** Bytes this device has written to the wire; may be ahead of [confirmedBytes]. */
+    /** Sent bytes (sender), or one durably stored checkpoint candidate (receiver). */
     public val optimisticBytes: Long,
-    /** Sequence number of the most recent acknowledgement, null before the first. */
+    /**
+     * Last peer ACK sequence (sender), or last sequence processed after a
+     * checkpoint (receiver). A receiver checkpoint can survive a crash before
+     * this field advances; it is not proof that a wire ACK was delivered.
+     */
     public val lastAcknowledgedSequence: Long?,
     public val retryCount: Int,
     public val failure: TransferError?,
@@ -203,8 +208,10 @@ public data class TransferSnapshot(
         if (state == TransferState.PAUSED_LOCAL || state == TransferState.PAUSED_REMOTE) {
             if (optimisticBytes != confirmedBytes) problems += "paused with optimistic bytes still outstanding"
         }
-        if (state == TransferState.QUEUED && confirmedBytes != 0L) {
-            problems += "QUEUED with a non-zero confirmed offset"
+        // A new queue entry starts at zero; a retry re-enters the queue with
+        // its durable confirmed floor intact until negotiation reconciles it.
+        if (state == TransferState.QUEUED && retryCount == 0 && confirmedBytes != 0L) {
+            problems += "new QUEUED delivery with a non-zero confirmed offset"
         }
         if (retryCount > ProtocolLimits.DEFAULT_MAX_RETRY_COUNT && failure?.retryable != false) {
             problems += "retryCount above the default ceiling without a final failure"

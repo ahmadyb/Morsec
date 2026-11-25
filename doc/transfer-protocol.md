@@ -43,11 +43,12 @@ loop. A 32-bit payload length is summed as a `Long` and bounded against
 `Int.MAX_VALUE` before it is ever narrowed to an `Int`. There is no code path in
 which an untrusted number becomes an allocation.
 
-**3. Confirmed and optimistic bytes are different numbers.** `confirmedBytes` is
-what the peer has acknowledged. `optimisticBytes` is what we have written.
-Optimistic bytes are a hint for progress bars and nothing else: they are reset on
-pause and on disconnect, they are never used as a resume offset, and a process
-restart must never turn one into the other.
+**3. Confirmed and optimistic bytes are different numbers.** On the sender,
+`optimisticBytes` records what was sent and `confirmedBytes` advances on a valid
+receiver acknowledgement. On the receiver, `optimisticBytes` records the one
+physically durable candidate awaiting a checkpoint; `confirmedBytes` advances only
+after that checkpoint succeeds, before sending the ACK. Resume trusts the
+persisted confirmed frontier, never an inferred optimistic value.
 
 **4. Errors are values, and they are redacted.** Every failure is a
 `TransferError` that answers six questions — what is it, can it be retried, is it
@@ -55,8 +56,8 @@ final, who caused it, which subsystem owns the fix, and what can safely be shown
 A detail field is put through `ErrorDetailRedactor` on construction, which strips
 absolute paths, Windows drive paths, control characters, multi-line text and long
 opaque blobs, and cuts the result to a byte budget without splitting a character.
-A SHA-256 digest deliberately survives redaction: an audit trail that cannot name
-the mismatching digest is useless.
+SHA-256 values remain available in typed integrity and snapshot fields where
+needed, but are redacted from diagnostic and default string output.
 
 ---
 
@@ -174,7 +175,7 @@ canonical table lives in `TransferTransitionTable` and is rendered by
 matches the enum, so this document cannot drift from the code.
 
 `TransferTransitionTable` is deliberately **stricter** than
-`TransferState.allowedTransitions`. Three tightenings, each reviewable through
+`TransferState.allowedTransitions`. The main tightenings, reviewable through
 `divergenceFromCoreModel()`:
 
 1. **A paused transfer resumes through `NEGOTIATING`, never straight back into
@@ -187,10 +188,11 @@ matches the enum, so this document cannot drift from the code.
    both-sides pause is representable, but neither may reach anything except
    `NEGOTIATING`, the other paused state, or `CANCELLED`.
 
-`NEGOTIATING → COMPLETED` exists for exactly one case: a
-`ResumeDecision.AlreadyVerified` where the receiver already holds a verified copy
-*and we know the expected digest*. No bytes move. It is not a shortcut past
-verification — the verification happened on the peer, against a digest we hold.
+Only `VERIFYING` can move to `COMPLETED`. A receiver requires a successful local
+commit; a sender requires prior successful peer verification and a matching
+`FILE_COMPLETE`. `ResumeDecision.AlreadyVerified` is retained as a wire/negotiator
+value but the reducer refuses it until a later slice defines reconciliation; it is
+not a completion shortcut.
 
 ---
 
@@ -207,7 +209,8 @@ its number, so a change here breaks a test there.
    same `(state, effects)` pair.
 3. A rejected input leaves the snapshot unchanged, including its
    `snapshotVersion`.
-4. An accepted input advances `snapshotVersion` by exactly one.
+4. An accepted state-changing input advances `snapshotVersion` by exactly one;
+   an idempotent no-op does not.
 
 **States**
 
@@ -219,8 +222,8 @@ its number, so a change here breaks a test there.
 9. No bytes move before negotiation completes.
 10. `SENDING` and `RECEIVING` are entered only from `NEGOTIATING`.
 11. `VERIFYING` is entered only when `confirmedBytes == totalBytes`.
-12. `COMPLETED` is entered only from `VERIFYING`, or from `NEGOTIATING` through
-    `AlreadyVerified` against a known digest.
+12. `COMPLETED` is entered only from `VERIFYING`: receiver commit success or a
+    matching sender-side `FILE_COMPLETE` after peer verification.
 
 **Addressing**
 
@@ -242,8 +245,8 @@ its number, so a change here breaks a test there.
 23. `retryCount` only increases and never passes its ceiling; at the ceiling a
     retry is refused rather than performed.
 24. A `FAILED_RETRYABLE` delivery returns to `QUEUED` before it can be retried.
-25. Optimistic bytes are never promoted to confirmed bytes without an
-    acknowledgement.
+25. Sender optimistic bytes require a receiver ACK to advance the confirmed
+    frontier; receiver optimistic bytes require successful checkpoint persistence.
 26. A restored snapshot keeps optimistic and confirmed bytes separate.
 27. Verification is required before completion; a digest mismatch is a conflict,
     not a success.
@@ -276,9 +279,19 @@ Ten rules, in order:
 7. Both sides know the expected digest and they disagree → restart.
 8. The stored partial already failed its own verification → restart.
 9. A complete partial is *not* a completed file: it still has to be verified.
-   `VERIFIED` gives `AlreadyVerified`; anything else gives restart-from-zero.
-10. An offset that is not on a chunk boundary cannot have been produced by this
-    protocol, so the partial is suspect → restart.
+   An unverified or interrupted verification at EOF returns `ResumeAt(totalBytes)`
+   and requires a full verification. The negotiator can produce `AlreadyVerified`
+   for a verified claim, but the reducer refuses that shortcut pending completion
+   reconciliation. A verified claim for an incomplete partial is inconsistent.
+10. Otherwise resume at the receiver's confirmed offset, including an unaligned
+    offset produced by a valid short chunk. The next sequence is derived from that
+    offset; no previous sequence is guessed. This updates the earlier local
+    alignment/retransmit policy to retain checkpoints after a lost ACK; it does
+    not add a frame, change a frame ID or change the MSC1 version.
+
+A restart decision for a delivery with an existing nonzero confirmed checkpoint
+is refused by the reducer: the monotonic store cannot reset it and the partial
+must not be deleted before an explicit new-delivery or reconciliation policy.
 
 A version check does not appear in that list on purpose: `ProtocolVersion`
 refuses to be constructed outside the supported range, so an undecodable version
@@ -367,12 +380,14 @@ bounded redacted code/detail and classification, never an exception or stack.
 
 The store contract's atomicity rules are part of the interface, not advice:
 
-- `saveTransition` applies the state move *and* durable effects in one
-  transaction. A crash must leave either the complete old row or the complete
-  replacement, never a mixed state/checkpoint.
-- `saveCheckpoint` may be called once per acknowledged chunk, so it must be cheap
-  and idempotent for a given offset.
-- Restoring must never promote optimistic bytes to confirmed bytes.
+- `saveTransition` atomically replaces one stored snapshot revision and only the
+  durable effects included in that transaction. A receiver's pending candidate
+  checkpoint is a later effect, not part of the optimistic staging transaction.
+- `saveCheckpoint` is atomic, monotonic and idempotent; its candidate must not
+  exceed the persisted optimistic frontier or declared length. A receiver sends
+  an ACK only after checkpoint success and live confirmed-frontier advancement.
+- Restoring must never infer confirmed bytes from optimistic bytes. A checkpoint
+  persisted before an ACK remains recoverable as a confirmed offset.
 
 The v2 Room adapter is `:core-data`'s `RoomTransferSnapshotStore`. It persists
 descriptor metadata, reducer state, verification/failure fields, optimistic and
@@ -380,8 +395,10 @@ confirmed progress, and an adapter-owned monotonic `row_revision` as typed
 columns—no serialized blob. Snapshot transitions compare the full previous
 domain value, require the next reducer version, and atomically replace the row;
 exact retries are idempotent, while stale/gapped replacements are typed
-conflicts. Per-ack checkpoints update only `confirmed_bytes` and the CAS revision,
-rejecting regression or an offset beyond the descriptor size.
+conflicts. Checkpoints update `confirmed_bytes` and the row revision, rejecting
+regression or an offset beyond the persisted optimistic frontier or descriptor
+size. After checkpointing, the stored previous row may differ from the reducer's
+in-memory previous snapshot; the next versioned save uses the last durable row.
 
 The Room schema uses one persisted SHA-256 representation: exactly 64 lowercase
 hexadecimal characters, parsed to a 32-byte `Sha256Digest` with defensive
@@ -1077,3 +1094,102 @@ reason: there is one stream, and half of it cannot be trusted afterwards.
   slice, and this section does not authorize them.
 - No claim that the multiplexer is production-ready, reviewed or safe to enable. It is inert code
   with tests, and the gate remains the only thing that decides whether payload may start.
+
+---
+
+## 17. Reducer contract repair (inert; payload disabled)
+
+This section specifies pure reducer events and effects, not a runtime or an activation. The existing
+`TransferState` and the snapshot's locally established immutable direction remain authoritative. No
+frame ID or protocol version changes. There is no production caller, transfer pump, transport adapter
+or storage wiring in this slice; the payload gate remains unconditional, `CURRENT_MILESTONE` is 2,
+and `TRANSFER_ENGINE` remains unavailable.
+
+### 17.1 Ordered effects and receiver checkpoints
+
+An accepted effect list is an **ordered program**, not an unordered set. An eventual executor must
+execute exactly one effect at a time, stop on the first failed effect, report the appropriate success
+or failure event, and never run the remaining effects after a required failure. It must serialize
+outcomes for a delivery, never let UI or scheduling overtake persistence or protocol effects, and
+never treat frame arrival or a CRC check alone as destination durability.
+
+For a receiver, after CRC validation, a sequential write and the required destination durability
+operation have succeeded, a trusted local `ChunkDurablyStored` event advances only `optimisticBytes`.
+Its ordered effects persist the pending snapshot, then request `PersistConfirmedOffset(candidate)`;
+there is no ACK. Only one candidate may be pending. On successful checkpoint persistence,
+`ConfirmedOffsetPersisted(candidate)` advances `confirmedBytes`, persists the next snapshot revision,
+sends the corresponding `CHUNK_ACK`, and only then notifies the UI. Candidate identity, range,
+monotonicity, the single pending frontier and direction are checked; duplicates and stale events are
+refused. A definitive checkpoint failure leaves confirmed bytes unchanged and emits no ACK. An
+ambiguous persistence result must be read back and reconciled, not guessed.
+
+The staging save is required by the existing versioned store: `saveCheckpoint` refuses to advance
+past the stored optimistic frontier. After that checkpoint succeeds, the last durable row already
+contains the new confirmed offset and may differ from the reducer's in-memory previous snapshot. A
+future executor must use the last durable row for the next versioned save, skipping an already-equal
+revision but never skipping a version. A crash after the checkpoint but before the ACK leaves the
+persisted confirmed offset recoverable, including for a short chunk or a complete unverified file.
+The pure resume decision retains that offset; actually reconnecting and re-announcing it is not
+implemented here. The checkpoint event must not be dispatched merely because a store operation was
+attempted. `lastAcknowledgedSequence` can lag the checkpoint and does not prove an ACK was delivered.
+
+The existing storage bridge accepts unsupported or unknown flush outcomes under its own policy;
+neither is proof of fsync-grade durability. Its `acknowledge` method also permits an in-memory-only
+promotion when no checkpoint sink is supplied, and currently passes a supported-flush marker to its
+checkpoint call rather than retaining the original flush result. None of those cases is sufficient
+proof of the stronger durability precondition above. No storage adapter is joined in this slice; a
+future adapter must reconcile those contracts and prove the actual device/provider guarantees.
+
+### 17.2 Implicit EOF and completion
+
+MSC1 v1 has no sender EOF frame. Once the receiver's durably checkpointed confirmed frontier equals
+the descriptor length, its ordered effects end in the local `DispatchAllBytesConfirmed` effect. An
+empty file emits the same local effect after acceptance and opening the partial, without a chunk. A
+sender similarly reports local EOF after its final ACK or acceptance of an empty file. The executor
+must process this effect by dispatching `AllBytesConfirmed` for the named current snapshot revision;
+it is not a frame, and it must not run if an earlier effect failed. Additional chunks are refused.
+No separate metadata-acknowledgement frame is introduced.
+
+The receiver enters `VERIFYING` and requests its full-file check only after all bytes are confirmed.
+`VerificationSucceeded` records the observed digest, remains `VERIFYING`, and emits **only**
+`CommitVerifiedDestination`. That single effect requires persisting the named provisional verified
+revision *before* attempting physical publication; if this precondition fails the executor reports a
+typed persistence failure and does not commit. Thus a crash after publication cannot leave a durable
+snapshot that falsely looks as though verification never succeeded. The provisional snapshot still
+cannot prove whether publication actually happened, so recovery must reconcile it conservatively.
+The effect sends no successful result or `FILE_COMPLETE`. A trusted `DestinationCommitSucceeded`
+event, dispatched only after physical publication succeeds, moves the receiver to `COMPLETED` and
+orders the effects as follows:
+
+1. Confirm the provisional revision is persisted, then persist the completed revision.
+2. Send receiver-to-sender `VERIFICATION_RESULT` success.
+3. Send receiver-to-sender `FILE_COMPLETE` for the matching file, length and digest.
+4. Notify completion and then schedule later work.
+
+A definitive `DestinationCommitFailed` instead persists failure, sends a bounded verification
+failure and never emits `FILE_COMPLETE`. A commit outcome must not be guessed: an ambiguous
+publication requires reconciliation. In particular, cancellation/retry must not delete or overwrite
+a potentially published verified destination.
+
+A sender waits in `VERIFYING`; it never runs the destination verification or commit effect. A
+successful peer verification result records its digest and reported length but is not completion.
+Only a subsequent receiver-to-sender `FILE_COMPLETE` matching session, transfer, recipient, file,
+length and digest completes the sender. Verification failure fails the sender. Duplicates and
+misaddressed completion are refused. The sender never sends `FILE_COMPLETE`.
+
+### 17.3 Post-commit and device limits
+
+After physical commit, a failed snapshot save or later notification stops the effect program. The
+published destination must never be rolled back merely because notification failed; the sender may
+remain incomplete. Because the verified revision is saved before publication, a crash or failure
+between commit and completed-state persistence leaves a verified but nonterminal snapshot that does
+**not** prove whether publication occurred. Inbound retry, cancellation and skip are refused while
+such verification is present; no destination is deleted speculatively. A later slice must reconcile
+publication and notification before acting; this repair does not claim crash-atomicity across the
+destination and snapshot store.
+
+Room v1/v2 and the existing snapshot fields represent both a pending optimistic candidate and a
+provisional verified digest without schema changes. Tests exercise the reducer and persistence
+contracts, not real provider durability. Genuine API-23 storage-provider device tests remain
+mandatory before production activation; the existing API-23 transport suite and Robolectric evidence
+are not that storage-provider evidence.

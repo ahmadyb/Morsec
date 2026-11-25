@@ -30,10 +30,10 @@ import app.morsecode.core.transfer.protocol.ResumeDecision
  *    unrelated delivery cannot be changed by accident and a rejected transition
  *    leaves the input untouched.
  *  * External work is only ever *described*, as a TransferEffect.
- *  * Confirmed progress is monotonic and bounded by the file size. Optimistic
- *    progress may run ahead but is never promoted to confirmed without an
- *    acknowledgement, and is discarded whenever the delivery pauses, disconnects
- *    or is resumed.
+ *  * Confirmed progress is monotonic and bounded by the file size. A receiver
+ *    promotes its one durable candidate only after checkpoint success; a sender
+ *    advances only from the receiver's acknowledgement. Optimistic progress is
+ *    discarded when the delivery pauses, disconnects or is resumed.
  */
 
 public object TransferReducer {
@@ -145,7 +145,11 @@ public object TransferReducer {
 
             is TransferEvent.ChunkSent -> onChunkSent(snapshot, event)
 
-            is TransferEvent.ChunkReceived -> onChunkReceived(snapshot, event)
+            is TransferEvent.ChunkDurablyStored -> onChunkDurablyStored(snapshot, event)
+
+            is TransferEvent.ConfirmedOffsetPersisted -> onConfirmedOffsetPersisted(snapshot, event)
+
+            is TransferEvent.ConfirmedOffsetPersistenceFailed -> onConfirmedOffsetPersistenceFailed(snapshot, event)
 
             is TransferEvent.ChunkAcknowledged -> onChunkAcknowledged(snapshot, event)
 
@@ -162,6 +166,12 @@ public object TransferReducer {
             is TransferEvent.VerificationSucceeded -> onVerificationSucceeded(snapshot, event)
 
             is TransferEvent.VerificationFailed -> onVerificationFailed(snapshot, event)
+
+            is TransferEvent.DestinationCommitSucceeded -> onDestinationCommitSucceeded(snapshot, event)
+
+            is TransferEvent.DestinationCommitFailed -> onDestinationCommitFailed(snapshot, event)
+
+            is TransferEvent.FileCompleteReceived -> onFileCompleteReceived(snapshot, event)
 
             is TransferEvent.StorageFailed -> onFailureEvent(
                 snapshot,
@@ -250,7 +260,7 @@ public object TransferReducer {
                         transferId = current.transferId,
                         expectedOffset = current.confirmedBytes,
                     ),
-                ) + persist(current)
+                ) + persist(current) + reportImplicitEof(current)
             },
         )
     }
@@ -258,19 +268,27 @@ public object TransferReducer {
     private fun onReject(
         snapshot: TransferSnapshot,
         command: TransferCommand.Reject,
-    ): TransitionResult = commit(
-        snapshot,
-        TransferState.SKIPPED,
-        command.commandName,
-        effects = { current ->
-            listOf(
-                TransferEffect.SendHandshakeReject(
-                    transferId = current.transferId,
-                    reason = command.reason,
-                ),
-            ) + persist(current)
-        },
-    )
+    ): TransitionResult {
+        if (snapshot.direction != SessionDirection.INBOUND) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.InvalidCommand("Reject only applies to an inbound delivery"),
+            )
+        }
+        return commit(
+            snapshot,
+            TransferState.SKIPPED,
+            command.commandName,
+            effects = { current ->
+                listOf(
+                    TransferEffect.SendHandshakeReject(
+                        transferId = current.transferId,
+                        reason = command.reason,
+                    ),
+                ) + persist(current)
+            },
+        )
+    }
 
     private fun onStartSending(
         snapshot: TransferSnapshot,
@@ -296,7 +314,7 @@ public object TransferReducer {
                         transferId = current.transferId,
                         fromOffset = current.confirmedBytes,
                     ),
-                ) + persist(current)
+                ) + persist(current) + reportImplicitEof(current)
             },
         )
     }
@@ -321,7 +339,7 @@ public object TransferReducer {
                         transferId = current.transferId,
                         expectedOffset = current.confirmedBytes,
                     ),
-                ) + persist(current)
+                ) + persist(current) + reportImplicitEof(current)
             },
         )
     }
@@ -415,6 +433,12 @@ public object TransferReducer {
         // A late cancellation of a delivery that already finished is a no-op, so
         // a duplicate terminal event can never resurrect or re-cancel anything.
         if (snapshot.state.isTerminal) return noOp(snapshot)
+        if (snapshot.direction == SessionDirection.INBOUND && snapshot.verification?.allowsCommit == true) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.InvalidCommand("destination commit must be reconciled before cancellation"),
+            )
+        }
         return commit(
         snapshot,
         TransferState.CANCELLED,
@@ -437,7 +461,11 @@ public object TransferReducer {
                     TransferEffect.SendCancel(transferId = current.transferId, reason = reason),
                 )
             }
-            val storage = if (current.direction == SessionDirection.INBOUND) {
+            // A verified destination may already have been published if a
+            // commit outcome was interrupted. Never delete it speculatively.
+            val storage = if (current.direction == SessionDirection.INBOUND &&
+                current.verification?.allowsCommit != true
+            ) {
                 listOf(TransferEffect.DeletePartialDestination(current.transferId))
             } else {
                 emptyList()
@@ -451,6 +479,12 @@ public object TransferReducer {
         snapshot: TransferSnapshot,
         command: TransferCommand.Retry,
     ): TransitionResult {
+        if (snapshot.direction == SessionDirection.INBOUND && snapshot.verification?.allowsCommit == true) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.InvalidCommand("a verified destination requires commit reconciliation before retry"),
+            )
+        }
         if (snapshot.retryCount >= command.retryLimit) {
             return TransitionResult.rejected(
                 snapshot,
@@ -476,12 +510,20 @@ public object TransferReducer {
     private fun onSkip(
         snapshot: TransferSnapshot,
         command: TransferCommand.Skip,
-    ): TransitionResult = commit(
-        snapshot,
-        TransferState.SKIPPED,
-        command.commandName,
-        transform = { current -> current.copy(optimisticBytes = current.confirmedBytes) },
-    )
+    ): TransitionResult {
+        if (snapshot.direction == SessionDirection.INBOUND && snapshot.verification?.allowsCommit == true) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.InvalidCommand("a verified destination requires commit reconciliation before skipping"),
+            )
+        }
+        return commit(
+            snapshot,
+            TransferState.SKIPPED,
+            command.commandName,
+            transform = { current -> current.copy(optimisticBytes = current.confirmedBytes) },
+        )
+    }
 
     private fun onApplyResumeDecision(
         snapshot: TransferSnapshot,
@@ -500,67 +542,48 @@ public object TransferReducer {
         return when (val decision = command.decision) {
             is ResumeDecision.ResumeAt -> applyResumeAt(snapshot, command, decision.offset)
 
-            is ResumeDecision.RestartAtZero -> mutate(
-                snapshot,
-                command.commandName,
-                allowedStates = NEGOTIATING_STATES,
-                transform = { current ->
-                    current.copy(
-                        confirmedBytes = 0L,
-                        optimisticBytes = 0L,
-                        lastAcknowledgedSequence = null,
-                        verification = null,
-                    )
-                },
-                effects = { current ->
-                    listOf(
-                        TransferEffect.DeletePartialDestination(current.transferId),
-                        TransferEffect.PersistConfirmedOffset(current.transferId, 0L),
-                    ) + openStreams(current) + persist(current)
-                },
-            )
-
-            ResumeDecision.AlreadyVerified -> {
-                if (snapshot.direction != SessionDirection.OUTBOUND) {
+            is ResumeDecision.RestartAtZero -> {
+                // A store with a monotonic checkpoint cannot safely reset an
+                // existing delivery, and deleting first would destroy bytes
+                // already acknowledged. Starting over needs a new delivery or
+                // explicit reconciliation in a later slice.
+                if (snapshot.confirmedBytes != 0L || snapshot.verification?.allowsCommit == true) {
                     return TransitionResult.rejected(
                         snapshot,
-                        Rejection.InvalidResumeProposal(
-                            "AlreadyVerified is a sender-side decision; this delivery is inbound",
-                        ),
+                        Rejection.InvalidResumeProposal("restart requires a new delivery or reconciliation"),
                     )
                 }
-                val expected = snapshot.descriptor.expectedSha256
-                // "The peer already has this file verified" is only meaningful
-                // against a digest we both know. Without one there is nothing to
-                // compare the claim to, so the honest answer is to send it.
-                if (expected == null) {
-                    return TransitionResult.rejected(
-                        snapshot,
-                        Rejection.InvalidResumeProposal(
-                            "a file with no expected digest cannot be treated as already verified",
-                        ),
-                    )
-                }
-                commit(
+                mutate(
                     snapshot,
-                    TransferState.COMPLETED,
                     command.commandName,
+                    allowedStates = NEGOTIATING_STATES,
                     transform = { current ->
                         current.copy(
-                            confirmedBytes = current.totalBytes,
-                            optimisticBytes = current.totalBytes,
-                            verification = VerificationInfo(
-                                expectedDigest = expected,
-                                observedDigest = expected,
-                                startedSnapshotVersion = current.snapshotVersion,
-                            ),
+                            optimisticBytes = 0L,
+                            lastAcknowledgedSequence = null,
+                            verification = null,
                         )
                     },
                     effects = { current ->
-                        persist(current) + schedule(current)
+                        val destination = if (current.direction == SessionDirection.INBOUND) {
+                            listOf(TransferEffect.DeletePartialDestination(current.transferId))
+                        } else {
+                            emptyList()
+                        }
+                        destination + listOf(
+                            TransferEffect.PersistConfirmedOffset(current.transferId, 0L),
+                        ) + openStreams(current) + persist(current)
                     },
                 )
             }
+
+            // A resume response is not the receiver's FILE_COMPLETE. Do not
+            // turn a verified claim into sender completion; a later resume slice
+            // must define reconciliation of a previously committed destination.
+            ResumeDecision.AlreadyVerified -> TransitionResult.rejected(
+                snapshot,
+                Rejection.InvalidResumeProposal("already verified requires completion reconciliation"),
+            )
 
             is ResumeDecision.Reject -> commit(
                 snapshot,
@@ -606,18 +629,24 @@ public object TransferReducer {
                 current.copy(
                     confirmedBytes = maxOf(current.confirmedBytes, offset),
                     optimisticBytes = maxOf(current.confirmedBytes, offset),
-                    lastAcknowledgedSequence = if (offset == 0L) {
-                        null
+                    // A recovered offset may represent a checkpoint whose ACK
+                    // was lost. It does not reveal the preceding chunk's start,
+                    // so never invent an acknowledged sequence for it.
+                    lastAcknowledgedSequence = if (offset == current.confirmedBytes) {
+                        current.lastAcknowledgedSequence
                     } else {
-                        SequenceNumber.forOffset(offset, current.chunkSize).value - 1L
+                        null
                     },
                 )
             },
             effects = { current ->
+                // A sender may learn a receiver checkpoint beyond its stored
+                // optimistic frontier after a lost ACK. Persist the complete
+                // revision first; saveCheckpoint alone would reject that offset.
                 listOf(
+                    TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion),
                     TransferEffect.SendResume(current.transferId, current.confirmedBytes),
-                    TransferEffect.PersistConfirmedOffset(current.transferId, current.confirmedBytes),
-                ) + openStreams(current) + persist(current)
+                ) + openStreams(current) + listOf(TransferEffect.NotifyUi(current.transferId, current.state))
             },
         )
     }
@@ -651,7 +680,8 @@ public object TransferReducer {
                 listOf(
                     TransferEffect.SendMetadata(current.transferId, current.descriptor),
                     TransferEffect.RequestSourceStream(current.transferId, current.confirmedBytes),
-                ) + persist(current) + schedule(current)
+                ) + persist(current) +
+                    if (current.allBytesConfirmed) reportImplicitEof(current) else schedule(current)
             },
         )
     }
@@ -731,6 +761,9 @@ public object TransferReducer {
                 Rejection.IllegalStateTransition(snapshot.state, null, event.eventName),
             )
         }
+        if (snapshot.direction != SessionDirection.OUTBOUND) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("chunk sending requires outbound direction"))
+        }
         // A chunk may not start past the write frontier: bytes 4096..8192 cannot
         // be written before bytes 0..4096 are, so a gap would make optimisticBytes
         // describe bytes that were never sent.
@@ -753,9 +786,9 @@ public object TransferReducer {
         )
     }
 
-    private fun onChunkReceived(
+    private fun onChunkDurablyStored(
         snapshot: TransferSnapshot,
-        event: TransferEvent.ChunkReceived,
+        event: TransferEvent.ChunkDurablyStored,
     ): TransitionResult {
         if (snapshot.state != TransferState.RECEIVING) {
             return TransitionResult.rejected(
@@ -763,68 +796,126 @@ public object TransferReducer {
                 Rejection.IllegalStateTransition(snapshot.state, null, event.eventName),
             )
         }
+        if (snapshot.direction != SessionDirection.INBOUND) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("durable chunks require inbound direction"))
+        }
         val range = checkChunkRange(
             snapshot, event.offset, event.length, event.sequence,
             frontier = snapshot.confirmedBytes,
         )
         if (range != null) return range
-
         val end = event.offset + event.length
-        return when {
-            event.offset == snapshot.confirmedBytes -> mutate(
-                snapshot,
-                event.eventName,
-                allowedStates = RECEIVING_STATES,
-                transform = { current ->
-                    current.copy(
-                        confirmedBytes = end,
-                        optimisticBytes = end,
-                        lastAcknowledgedSequence = event.sequence,
-                    )
-                },
-                effects = { current ->
-                    listOf(
-                        TransferEffect.SendAcknowledgement(
-                            transferId = current.transferId,
-                            offset = event.offset,
-                            length = event.length,
-                            confirmedOffset = current.confirmedBytes,
-                        ),
-                        TransferEffect.PersistConfirmedOffset(
-                            transferId = current.transferId,
-                            confirmedOffset = current.confirmedBytes,
-                        ),
-                    ) + persist(current)
-                },
-            )
-
-            end <= snapshot.confirmedBytes ->
-                // A duplicate of bytes already confirmed: acknowledge again so the
-                // sender can make progress, but do not move the watermark.
-                TransitionResult.accepted(
-                    snapshot,
-                    snapshot,
-                    listOf(
-                        TransferEffect.SendAcknowledgement(
-                            transferId = snapshot.transferId,
-                            offset = event.offset,
-                            length = event.length,
-                            confirmedOffset = snapshot.confirmedBytes,
-                        ),
-                        TransferEffect.NotifyUi(snapshot.transferId, snapshot.state),
-                    ),
-                )
-
-            event.offset < snapshot.confirmedBytes -> TransitionResult.rejected(
+        if (snapshot.optimisticBytes != snapshot.confirmedBytes) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("a checkpoint is already pending"))
+        }
+        if (event.offset < snapshot.confirmedBytes && end > snapshot.confirmedBytes) {
+            return TransitionResult.rejected(
                 snapshot,
                 Rejection.OverlappingChunk(event.offset, event.length, snapshot.confirmedBytes),
             )
-
-            else -> TransitionResult.rejected(
+        }
+        if (event.offset != snapshot.confirmedBytes || snapshot.allBytesConfirmed) {
+            return TransitionResult.rejected(
                 snapshot,
                 Rejection.UnexpectedOffset(snapshot.confirmedBytes, event.offset),
             )
         }
+        // The event certifies physical durability; it does not certify the
+        // checkpoint. Persist the optimistic candidate first so an existing
+        // versioned store can then atomically checkpoint it. No ACK is emitted.
+        return mutate(
+            snapshot,
+            event.eventName,
+            allowedStates = RECEIVING_STATES,
+            transform = { current -> current.copy(optimisticBytes = end) },
+            effects = { current ->
+                listOf(
+                    TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion),
+                    TransferEffect.PersistConfirmedOffset(current.transferId, end),
+                )
+            },
+        )
+    }
+
+    private fun onConfirmedOffsetPersisted(
+        snapshot: TransferSnapshot,
+        event: TransferEvent.ConfirmedOffsetPersisted,
+    ): TransitionResult {
+        val invalid = validatePendingCheckpoint(snapshot, event.candidateOffset, event.eventName)
+        if (invalid != null) return invalid
+        val offset = snapshot.confirmedBytes
+        val length = (event.candidateOffset - offset).toInt()
+        val sequence = SequenceNumber.forOffset(offset, snapshot.chunkSize).value
+        return mutate(
+            snapshot,
+            event.eventName,
+            allowedStates = RECEIVING_STATES,
+            transform = { current ->
+                current.copy(confirmedBytes = event.candidateOffset, lastAcknowledgedSequence = sequence)
+            },
+            effects = { current ->
+                listOf(
+                    TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion),
+                    TransferEffect.SendAcknowledgement(current.transferId, offset, length, current.confirmedBytes),
+                    TransferEffect.NotifyUi(current.transferId, current.state),
+                ) + reportImplicitEof(current)
+            },
+        )
+    }
+
+    private fun onConfirmedOffsetPersistenceFailed(
+        snapshot: TransferSnapshot,
+        event: TransferEvent.ConfirmedOffsetPersistenceFailed,
+    ): TransitionResult {
+        val invalid = validatePendingCheckpoint(snapshot, event.candidateOffset, event.eventName)
+        if (invalid != null) return invalid
+        val error = TransferError.PersistenceFailure("checkpointed", event.storageFull)
+        val next = if (error.retryable) TransferState.FAILED_RETRYABLE else TransferState.FAILED_FINAL
+        return commit(
+            snapshot,
+            next,
+            event.eventName,
+            transform = { current ->
+                current.copy(optimisticBytes = current.confirmedBytes, failure = error)
+            },
+            effects = { current ->
+                // The staging save may itself have failed. Retrying this exact
+                // revision is idempotent, and never publishes an ACK.
+                listOf(
+                    TransferEffect.PersistSnapshot(snapshot.transferId, snapshot.snapshotVersion),
+                    TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion),
+                    TransferEffect.NotifyUi(current.transferId, current.state),
+                ) + schedule(current)
+            },
+        )
+    }
+
+    private fun validatePendingCheckpoint(
+        snapshot: TransferSnapshot,
+        candidate: Long,
+        name: String,
+    ): TransitionResult? {
+        if (snapshot.state != TransferState.RECEIVING) {
+            return TransitionResult.rejected(snapshot, Rejection.IllegalStateTransition(snapshot.state, null, name))
+        }
+        if (snapshot.direction != SessionDirection.INBOUND) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("checkpoint requires inbound direction"))
+        }
+        if (candidate > snapshot.totalBytes) {
+            return TransitionResult.rejected(snapshot, Rejection.OffsetBeyondTotal(candidate, snapshot.totalBytes))
+        }
+        if (candidate <= snapshot.confirmedBytes) {
+            return TransitionResult.rejected(snapshot, Rejection.OffsetRegression(snapshot.confirmedBytes, candidate))
+        }
+        if (candidate != snapshot.optimisticBytes ||
+            candidate - snapshot.confirmedBytes > snapshot.chunkSize.value.toLong()
+        ) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.InvalidCommand("candidate does not match the durable pending frontier"),
+            )
+        }
+        return null
     }
 
     private fun onChunkAcknowledged(
@@ -837,17 +928,36 @@ public object TransferReducer {
                 Rejection.IllegalStateTransition(snapshot.state, null, event.eventName),
             )
         }
+        if (snapshot.direction != SessionDirection.OUTBOUND) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("peer acknowledgement requires outbound direction"))
+        }
         val range = checkChunkRange(
             snapshot, event.offset, event.length, event.sequence,
             frontier = snapshot.optimisticBytes,
         )
         if (range != null) return range
         // The peer cannot have received bytes this side never put on the wire.
-        if (event.confirmedOffset > snapshot.optimisticBytes) {
+        if (event.confirmedOffset > snapshot.optimisticBytes || event.offset + event.length > snapshot.optimisticBytes) {
             return TransitionResult.rejected(
                 snapshot,
-                Rejection.AcknowledgementBeyondSent(snapshot.optimisticBytes, event.confirmedOffset),
+                Rejection.AcknowledgementBeyondSent(
+                    snapshot.optimisticBytes,
+                    maxOf(event.confirmedOffset, event.offset + event.length),
+                ),
             )
+        }
+        if (event.confirmedOffset < snapshot.confirmedBytes) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.OffsetRegression(snapshot.confirmedBytes, event.confirmedOffset),
+            )
+        }
+        if (event.confirmedOffset != event.offset + event.length) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("acknowledgement range does not match frontier"))
+        }
+        if (event.confirmedOffset == snapshot.confirmedBytes) return noOp(snapshot)
+        if (event.offset != snapshot.confirmedBytes) {
+            return TransitionResult.rejected(snapshot, Rejection.UnexpectedOffset(snapshot.confirmedBytes, event.offset))
         }
         return applyConfirmedProgress(
             snapshot,
@@ -861,18 +971,22 @@ public object TransferReducer {
         snapshot: TransferSnapshot,
         event: TransferEvent.ConfirmedOffsetReceived,
     ): TransitionResult {
-        if (snapshot.state != TransferState.SENDING && snapshot.state != TransferState.RECEIVING) {
+        if (snapshot.state != TransferState.SENDING || snapshot.direction != SessionDirection.OUTBOUND) {
             return TransitionResult.rejected(
                 snapshot,
                 Rejection.IllegalStateTransition(snapshot.state, null, event.eventName),
             )
         }
-        return applyConfirmedProgress(
-            snapshot,
-            event.eventName,
-            event.confirmedOffset,
-            sequence = null,
-        )
+        if (event.confirmedOffset > snapshot.totalBytes) {
+            return TransitionResult.rejected(snapshot, Rejection.OffsetBeyondTotal(event.confirmedOffset, snapshot.totalBytes))
+        }
+        if (event.confirmedOffset > snapshot.confirmedBytes) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.InvalidCommand("a checkpoint report cannot replace a chunk acknowledgement"),
+            )
+        }
+        return applyConfirmedProgress(snapshot, event.eventName, event.confirmedOffset, sequence = null)
     }
 
     private fun applyConfirmedProgress(
@@ -913,7 +1027,7 @@ public object TransferReducer {
                         transferId = current.transferId,
                         confirmedOffset = current.confirmedBytes,
                     ),
-                ) + persist(current)
+                ) + persist(current) + reportImplicitEof(current)
             },
         )
     }
@@ -966,6 +1080,14 @@ public object TransferReducer {
             )
         }
         if (snapshot.state == TransferState.VERIFYING) return noOp(snapshot)
+        if ((snapshot.direction == SessionDirection.INBOUND && snapshot.state != TransferState.RECEIVING) ||
+            (snapshot.direction == SessionDirection.OUTBOUND && snapshot.state != TransferState.SENDING)
+        ) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.IllegalStateTransition(snapshot.state, TransferState.VERIFYING, event.eventName),
+            )
+        }
         return beginVerification(snapshot, event.eventName)
     }
 
@@ -973,34 +1095,26 @@ public object TransferReducer {
         snapshot: TransferSnapshot,
         event: TransferEvent.VerificationStarted,
     ): TransitionResult {
+        if (snapshot.direction != SessionDirection.INBOUND) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("local verification requires inbound direction"))
+        }
         if (!snapshot.allBytesConfirmed) {
             return TransitionResult.rejected(
                 snapshot,
                 Rejection.VerificationTooEarly(snapshot.confirmedBytes, snapshot.totalBytes),
             )
         }
+        if (event.expectedDigest != null && event.expectedDigest != snapshot.descriptor.expectedSha256) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("verification expectation disagrees with descriptor"))
+        }
         if (snapshot.state == TransferState.VERIFYING) return noOp(snapshot)
-        return commit(
-            snapshot,
-            TransferState.VERIFYING,
-            event.eventName,
-            transform = { current ->
-                current.copy(
-                    verification = VerificationInfo.started(
-                        event.expectedDigest ?: current.descriptor.expectedSha256,
-                        current.snapshotVersion,
-                    ),
-                )
-            },
-            effects = { current ->
-                listOf(
-                    TransferEffect.BeginVerification(
-                        transferId = current.transferId,
-                        expectedDigestHex = current.verification?.expectedDigest?.hex,
-                    ),
-                ) + persist(current)
-            },
-        )
+        if (snapshot.state != TransferState.RECEIVING) {
+            return TransitionResult.rejected(
+                snapshot,
+                Rejection.IllegalStateTransition(snapshot.state, TransferState.VERIFYING, event.eventName),
+            )
+        }
+        return beginVerification(snapshot, event.eventName)
     }
 
     private fun onVerificationSucceeded(
@@ -1010,11 +1124,7 @@ public object TransferReducer {
         if (snapshot.state != TransferState.VERIFYING) {
             return TransitionResult.rejected(
                 snapshot,
-                Rejection.IllegalStateTransition(
-                    snapshot.state,
-                    TransferState.COMPLETED,
-                    event.eventName,
-                ),
+                Rejection.IllegalStateTransition(snapshot.state, TransferState.VERIFYING, event.eventName),
             )
         }
         if (!snapshot.allBytesConfirmed) {
@@ -1023,35 +1133,146 @@ public object TransferReducer {
                 Rejection.VerificationTooEarly(snapshot.confirmedBytes, snapshot.totalBytes),
             )
         }
-        val expected = snapshot.verification?.expectedDigest ?: snapshot.descriptor.expectedSha256
+        if (snapshot.verification == null) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("verification was not started"))
+        }
+        if (snapshot.verification.allowsCommit) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("verification was already recorded"))
+        }
+        if (snapshot.direction == SessionDirection.OUTBOUND && event.reportedTotalBytes != snapshot.totalBytes) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("peer verification length does not match the delivery"))
+        }
+        val expected = snapshot.descriptor.expectedSha256
+        if (snapshot.verification?.expectedDigest != expected) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("verification expectation disagrees with descriptor"))
+        }
         val verification = VerificationInfo(
             expectedDigest = expected,
             observedDigest = event.observedDigest,
-            startedSnapshotVersion = snapshot.verification?.startedSnapshotVersion
-                ?: snapshot.snapshotVersion,
+            startedSnapshotVersion = snapshot.verification?.startedSnapshotVersion ?: snapshot.snapshotVersion,
         )
         if (!verification.allowsCommit) {
-            return TransitionResult.rejected(
+            return TransitionResult.rejected(snapshot, Rejection.VerificationConflict(verification.outcome))
+        }
+        return mutate(
+            snapshot,
+            event.eventName,
+            allowedStates = VERIFYING_STATES,
+            transform = { current ->
+                current.copy(optimisticBytes = current.confirmedBytes, verification = verification, failure = null)
+            },
+            effects = { current ->
+                if (current.direction == SessionDirection.INBOUND) {
+                    listOf(TransferEffect.CommitVerifiedDestination(current.transferId, current.snapshotVersion))
+                } else {
+                    // This is the peer's result, not a local destination commit.
+                    persist(current)
+                }
+            },
+        )
+    }
+
+    private fun onDestinationCommitSucceeded(
+        snapshot: TransferSnapshot,
+        event: TransferEvent.DestinationCommitSucceeded,
+    ): TransitionResult {
+        val invalid = validateReceiverCommit(snapshot, event.eventName)
+        if (invalid != null) return invalid
+        return commit(
+            snapshot,
+            TransferState.COMPLETED,
+            event.eventName,
+            transform = { current -> current.copy(failure = null) },
+            effects = { current ->
+                listOf(
+                    // VerificationSucceeded was deliberately provisional and
+                    // emitted only CommitVerifiedDestination. Persist that
+                    // revision before the completed revision in a CAS store.
+                    TransferEffect.PersistSnapshot(snapshot.transferId, snapshot.snapshotVersion),
+                    TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion),
+                    TransferEffect.SendVerificationResult(
+                        current.transferId, true, current.totalBytes, current.verification?.observedDigest,
+                    ),
+                    TransferEffect.SendFileComplete(
+                        current.transferId, current.fileId, current.totalBytes, current.verification?.observedDigest,
+                    ),
+                    TransferEffect.NotifyUi(current.transferId, current.state),
+                ) + schedule(current)
+            },
+        )
+    }
+
+    private fun onDestinationCommitFailed(
+        snapshot: TransferSnapshot,
+        event: TransferEvent.DestinationCommitFailed,
+    ): TransitionResult {
+        val invalid = validateReceiverCommit(snapshot, event.eventName)
+        if (invalid != null) return invalid
+        // Preserve the useful failure category without ever retaining a
+        // provider's exception text, path, URI or other adapter-owned string.
+        val error = when (val reported = event.error) {
+            is TransferError.DestinationUnavailable ->
+                TransferError.DestinationUnavailable("verified destination commit failed")
+            is TransferError.StorageFull -> TransferError.StorageFull(snapshot.totalBytes)
+            is TransferError.PermissionRevoked -> TransferError.PermissionRevoked("destination permission revoked")
+            is TransferError.PersistenceFailure -> TransferError.PersistenceFailure("committed", reported.storageFull)
+            else -> return TransitionResult.rejected(
                 snapshot,
-                Rejection.VerificationConflict(verification.outcome),
+                Rejection.InvalidCommand("destination commit requires a local storage failure"),
             )
+        }
+        val next = if (error.retryable) TransferState.FAILED_RETRYABLE else TransferState.FAILED_FINAL
+        return commit(
+            snapshot,
+            next,
+            event.eventName,
+            transform = { current -> current.copy(failure = error) },
+            effects = { current ->
+                listOf(
+                    TransferEffect.PersistSnapshot(snapshot.transferId, snapshot.snapshotVersion),
+                    TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion),
+                    TransferEffect.SendVerificationResult(current.transferId, false, current.totalBytes, null),
+                    TransferEffect.NotifyUi(current.transferId, current.state),
+                ) + schedule(current)
+            },
+        )
+    }
+
+    private fun validateReceiverCommit(snapshot: TransferSnapshot, name: String): TransitionResult? {
+        if (snapshot.direction != SessionDirection.INBOUND) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("destination commit requires inbound direction"))
+        }
+        if (snapshot.state != TransferState.VERIFYING) {
+            return TransitionResult.rejected(snapshot, Rejection.IllegalStateTransition(snapshot.state, null, name))
+        }
+        if (!snapshot.allBytesConfirmed || snapshot.verification?.allowsCommit != true) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("destination commit requires successful verification"))
+        }
+        return null
+    }
+
+    private fun onFileCompleteReceived(
+        snapshot: TransferSnapshot,
+        event: TransferEvent.FileCompleteReceived,
+    ): TransitionResult {
+        if (snapshot.direction != SessionDirection.OUTBOUND) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("FILE_COMPLETE is received only by a sender"))
+        }
+        if (snapshot.state != TransferState.VERIFYING || !snapshot.allBytesConfirmed ||
+            snapshot.verification?.allowsCommit != true
+        ) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("FILE_COMPLETE requires peer verification"))
+        }
+        if (event.fileId != snapshot.fileId || event.totalBytes != snapshot.totalBytes ||
+            event.digest != snapshot.verification.observedDigest
+        ) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("FILE_COMPLETE does not match the delivery"))
         }
         return commit(
             snapshot,
             TransferState.COMPLETED,
             event.eventName,
-            transform = { current ->
-                current.copy(
-                    optimisticBytes = current.confirmedBytes,
-                    verification = verification,
-                    failure = null,
-                )
-            },
-            effects = { current ->
-                listOf(
-                    TransferEffect.CommitVerifiedDestination(current.transferId),
-                ) + persist(current) + schedule(current)
-            },
+            effects = { current -> persist(current) + schedule(current) },
         )
     }
 
@@ -1068,6 +1289,9 @@ public object TransferReducer {
                     event.eventName,
                 ),
             )
+        }
+        if (snapshot.verification?.allowsCommit == true) {
+            return TransitionResult.rejected(snapshot, Rejection.InvalidCommand("verification was already recorded"))
         }
         val error = if (event.expectedDigest != null && event.observedDigest != null) {
             TransferError.FileChecksumMismatch(event.expectedDigest.hex, event.observedDigest.hex)
@@ -1090,7 +1314,15 @@ public object TransferReducer {
                     failure = error,
                 )
             },
-            effects = { current -> persist(current) },
+            effects = { current ->
+                val result = if (current.direction == SessionDirection.INBOUND) {
+                    listOf(TransferEffect.SendVerificationResult(current.transferId, false, current.totalBytes, null))
+                } else {
+                    emptyList()
+                }
+                listOf(TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion)) +
+                    result + listOf(TransferEffect.NotifyUi(current.transferId, current.state)) + schedule(current)
+            },
         )
     }
 
@@ -1125,7 +1357,13 @@ public object TransferReducer {
                     failure = error,
                 )
             },
-            effects = { current -> persist(current) + schedule(current) },
+            effects = { current ->
+                // The preceding effect may have failed before its snapshot was
+                // saved. Re-saving the prior revision is idempotent when it was
+                // already stored and preserves strict CAS revision ordering.
+                listOf(TransferEffect.PersistSnapshot(snapshot.transferId, snapshot.snapshotVersion)) +
+                    persist(current) + schedule(current)
+            },
         )
     }
 
@@ -1142,12 +1380,19 @@ public object TransferReducer {
             )
         },
         effects = { current ->
-            listOf(
-                TransferEffect.BeginVerification(
-                    transferId = current.transferId,
-                    expectedDigestHex = current.verification?.expectedDigest?.hex,
-                ),
-            ) + persist(current)
+            val verify = if (current.direction == SessionDirection.INBOUND) {
+                listOf(
+                    TransferEffect.BeginVerification(
+                        transferId = current.transferId,
+                        expectedDigest = current.verification?.expectedDigest,
+                    ),
+                )
+            } else {
+                // A sender waits for the receiver's verification result.
+                emptyList()
+            }
+            listOf(TransferEffect.PersistSnapshot(current.transferId, current.snapshotVersion)) +
+                verify + listOf(TransferEffect.NotifyUi(current.transferId, current.state))
         },
     )
 
@@ -1319,6 +1564,14 @@ public object TransferReducer {
         TransferEffect.ScheduleNextEligibleItem(current.sessionId),
     )
 
+    /** Local implicit EOF, after earlier persistence and wire effects; never a frame. */
+    private fun reportImplicitEof(current: TransferSnapshot): List<TransferEffect> =
+        if (current.allBytesConfirmed) {
+            listOf(TransferEffect.DispatchAllBytesConfirmed(current.transferId, current.snapshotVersion))
+        } else {
+            emptyList()
+        }
+
     /** The stream-open effect appropriate for this delivery's direction. */
     private fun openStreams(current: TransferSnapshot): List<TransferEffect> =
         if (current.direction == SessionDirection.OUTBOUND) {
@@ -1333,6 +1586,7 @@ public object TransferReducer {
 
     private val SENDING_STATES: Set<TransferState> = setOf(TransferState.SENDING)
     private val RECEIVING_STATES: Set<TransferState> = setOf(TransferState.RECEIVING)
+    private val VERIFYING_STATES: Set<TransferState> = setOf(TransferState.VERIFYING)
     private val STREAMING_STATES: Set<TransferState> =
         setOf(TransferState.SENDING, TransferState.RECEIVING)
     private val NEGOTIATING_STATES: Set<TransferState> = setOf(TransferState.NEGOTIATING)

@@ -144,13 +144,17 @@ text. The frontier stays where it was, which turns the next write at that offset
 The caller's only way forward is an explicit `truncateTo(...)` to a legal offset, and then a retry.
 That is intentional: the session refuses to build a story about bytes it did not see accepted.
 
-**The runtime, not the adapter, promotes optimistic bytes.** `writeAt` advances the *optimistic*
-frontier — the high-water mark this process believes it has written. The *confirmed* frontier moves
-only when `acknowledge(offset)` is called, which is the caller's statement that the peer has
-acknowledged those bytes. `acknowledge` is monotonic, bounded by the frontier, and persists the
-checkpoint before it moves the floor. If the checkpoint fails, the confirmed frontier does not move
-and the error is returned. This is the one place where the storage layer's idea of "done" is
-deliberately weaker than the runtime's.
+**The eventual receiver, not the adapter, decides when to acknowledge.** `writeAt` advances the
+*optimistic* frontier — the high-water mark this process believes it has written. The local
+`acknowledge(offset)` promotion is monotonic and bounded by that frontier. When a checkpoint sink is
+present it persists before moving the floor; a failed checkpoint leaves the floor unchanged. Without
+a checkpoint sink it only changes in-memory state and cannot authorize a wire ACK. The receiver must
+complete its required durability and checkpoint before it sends `CHUNK_ACK`, not wait for a peer to
+acknowledge received bytes. Unsupported or unknown flush outcomes are not fsync-grade guarantees;
+the current `acknowledge` call passes a supported-flush marker to its checkpoint sink rather than
+retaining the actual earlier flush outcome. No runtime is connected here. The stronger reducer
+barrier and the unresolved adapter/device evidence are specified in
+[transfer-protocol.md §17](transfer-protocol.md#17-reducer-contract-repair-inert-payload-disabled).
 
 ## Resume
 

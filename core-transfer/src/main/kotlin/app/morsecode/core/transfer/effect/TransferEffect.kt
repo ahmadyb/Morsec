@@ -2,22 +2,30 @@ package app.morsecode.core.transfer.effect
 
 import app.morsecode.core.model.TransferState
 import app.morsecode.core.transfer.identity.ChunkSize
+import app.morsecode.core.transfer.identity.FileId
 import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
+import app.morsecode.core.transfer.integrity.Sha256Digest
 import app.morsecode.core.transfer.model.TransferFileDescriptor
 
 /*
  * Effects: work the reducer has decided must happen, described as values.
  *
- * Nothing in this file is executed. The reducer returns a list of these and
- * stops; an Android adapter (still gated behind TRANSFER_ENGINE) walks the list
- * and turns each one into a socket write, a stream open, a database write or a
- * UI emission. That is what keeps the reducer a pure function: it can be tested
- * on the JVM with no sockets, no files and no clock, and the same decision list
- * can be replayed after a process restart.
+ * Nothing in this file is executed. The reducer returns an ordered program, not
+ * a collection of independent notifications. A future executor must perform
+ * one effect at a time in list order, stop on the first failure, and dispatch
+ * the corresponding success or failure event before processing further work.
+ * No UI or scheduling effect may overtake a preceding persistence or wire
+ * effect. Effect execution and all production payload paths remain disabled.
+ *
+ * In particular, a receiver checkpoint follows destination durability, and an
+ * ACK follows successful checkpoint persistence. A receiver's commit effect
+ * must succeed before completed-state persistence, verification success,
+ * FILE_COMPLETE, and UI completion, in that order. See TransitionResult and
+ * TransferSnapshotStore for the required persistence revision handling.
  */
 
-/** Something an adapter must do as a result of an accepted transition. */
+/** Something an eventual executor must do as part of an ordered program. */
 public sealed interface TransferEffect {
     /** The delivery this effect belongs to, where one delivery is involved. */
     public val transferId: TransferId?
@@ -66,6 +74,22 @@ public sealed interface TransferEffect {
         public val confirmedOffset: Long,
     ) : TransferEffect
 
+    /** Receiver-to-sender verification result; success is emitted only after commit. */
+    public data class SendVerificationResult(
+        override val transferId: TransferId,
+        public val success: Boolean,
+        public val totalBytes: Long,
+        public val observedDigest: Sha256Digest?,
+    ) : TransferEffect
+
+    /** Receiver-to-sender acknowledgement of a committed, verified file. */
+    public data class SendFileComplete(
+        override val transferId: TransferId,
+        public val fileId: FileId,
+        public val totalBytes: Long,
+        public val digest: Sha256Digest?,
+    ) : TransferEffect
+
     /** Tells the peer we are pausing. */
     public data class SendPause(override val transferId: TransferId) : TransferEffect
 
@@ -100,26 +124,61 @@ public sealed interface TransferEffect {
 
     /** --- persistence ----------------------------------------------------- */
 
-    /** Writes the whole snapshot; the adapter must make it atomic. */
+    /**
+     * Atomically writes the snapshot identified by [snapshotVersion]. It may
+     * name either the previous or current snapshot in an accepted transition;
+     * provisional revisions must not be skipped by a versioned store.
+     */
     public data class PersistSnapshot(
         override val transferId: TransferId,
         public val snapshotVersion: Long,
     ) : TransferEffect
 
-    /** Writes just the confirmed checkpoint; cheap enough to do per chunk. */
+    /**
+     * Persists a checkpoint. For a receiver, [confirmedOffset] is the pending
+     * durable candidate, not yet the live confirmed frontier. Dispatch
+     * ConfirmedOffsetPersisted only after this effect succeeds; on failure
+     * dispatch ConfirmedOffsetPersistenceFailed and do not ACK.
+     */
     public data class PersistConfirmedOffset(
         override val transferId: TransferId,
         public val confirmedOffset: Long,
     ) : TransferEffect
 
+    /**
+     * Report local implicit EOF for this exact snapshot revision by dispatching
+     * AllBytesConfirmed after every preceding effect has succeeded. This is not
+     * a wire frame. The executor must revalidate the current revision and must
+     * not run this effect after a preceding persistence or protocol failure.
+     */
+    public data class DispatchAllBytesConfirmed(
+        override val transferId: TransferId,
+        public val snapshotVersion: Long,
+    ) : TransferEffect
+
     /** Starts the full-file SHA-256 pass over the confirmed partial file. */
     public data class BeginVerification(
         override val transferId: TransferId,
-        public val expectedDigestHex: String?,
+        public val expectedDigest: Sha256Digest?,
     ) : TransferEffect
 
-    /** Moves the verified partial file to its final destination. */
-    public data class CommitVerifiedDestination(override val transferId: TransferId) : TransferEffect
+    /**
+     * Commit the verified receiver destination. Before any physical publication,
+     * the executor MUST durably save the accepted provisional verified snapshot
+     * at [verifiedSnapshotVersion], using the last durable revision for CAS. If
+     * that prerequisite fails, do not publish; report the typed persistence
+     * failure. After it succeeds, attempt publication and report its actual
+     * outcome. This precondition is part of this single commit effect, not an
+     * extra wire message or permission to execute effects out of order.
+     *
+     * The durable provisional snapshot means "publication may have happened":
+     * after a crash it requires reconciliation and must not be deleted or
+     * committed again on a guess. See TransferSnapshotStore.
+     */
+    public data class CommitVerifiedDestination(
+        override val transferId: TransferId,
+        public val verifiedSnapshotVersion: Long,
+    ) : TransferEffect
 
     /** Deletes the partial file; used on cancellation and on restart-from-zero. */
     public data class DeletePartialDestination(override val transferId: TransferId) : TransferEffect
@@ -141,7 +200,8 @@ public sealed interface TransferEffect {
         /** True when this effect produces bytes on the wire. */
         public fun isWireEffect(effect: TransferEffect): Boolean = when (effect) {
             is SendHandshake, is SendHandshakeAccept, is SendHandshakeReject, is SendMetadata,
-            is SendChunk, is SendAcknowledgement, is SendPause, is SendResume, is SendCancel,
+            is SendChunk, is SendAcknowledgement, is SendVerificationResult, is SendFileComplete,
+            is SendPause, is SendResume, is SendCancel,
             -> true
 
             else -> false

@@ -135,7 +135,7 @@ class RejectionCoverageTest {
         val rejected = rejection(
             TransferReducer.apply(
                 receiving,
-                TransferEvent.ChunkReceived(
+                TransferEvent.ChunkDurablyStored(
                     sessionId = Tf.sessionId,
                     transferId = Tf.transferId,
                     recipientId = null,
@@ -154,7 +154,7 @@ class RejectionCoverageTest {
         val receiving = Tf.receiving()
         val skipped = 2L * Tf.chunk.value
         val rejected = rejection(
-            TransferReducer.apply(receiving, Tf.chunkReceived(offset = skipped)),
+            TransferReducer.apply(receiving, Tf.chunkDurablyStored(offset = skipped)),
         )
         assertEquals("unexpected_offset", rejected.code)
         assertEquals(0L, (rejected as Rejection.UnexpectedOffset).expected)
@@ -162,14 +162,14 @@ class RejectionCoverageTest {
     }
 
     @Test fun `overlapping_chunk - a chunk straddling the watermark is refused`() {
-        val receiving = Tf.receiving() + Tf.chunkReceived(offset = 0L)
+        val receiving = Tf.receiveChunk(Tf.receiving(), offset = 0L)
         assertEquals(Tf.chunk.value.toLong(), receiving.confirmedBytes)
         // Starts inside the confirmed bytes but ends past them: neither a
         // duplicate (which would be idempotent) nor the next chunk.
         val rejected = rejection(
             TransferReducer.apply(
                 receiving,
-                Tf.chunkReceived(offset = Tf.chunk.value / 2L, length = Tf.chunk.value),
+                Tf.chunkDurablyStored(offset = Tf.chunk.value / 2L, length = Tf.chunk.value),
             ),
         )
         assertEquals("overlapping_chunk", rejected.code)
@@ -179,7 +179,7 @@ class RejectionCoverageTest {
     @Test fun `invalid_chunk_length - a zero length chunk is refused`() {
         val receiving = Tf.receiving()
         val rejected = rejection(
-            TransferReducer.apply(receiving, Tf.chunkReceived(offset = 0L, length = 0)),
+            TransferReducer.apply(receiving, Tf.chunkDurablyStored(offset = 0L, length = 0)),
         )
         assertEquals("invalid_chunk_length", rejected.code)
         assertEquals(0, (rejected as Rejection.InvalidChunkLength).length)

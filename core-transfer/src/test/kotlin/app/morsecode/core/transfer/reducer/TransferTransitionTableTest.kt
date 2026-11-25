@@ -52,10 +52,10 @@ class TransferTransitionTableTest {
         assertFalse(targets.contains(TransferState.VERIFYING))
     }
 
-    @Test fun `nothing moves straight to completed except verifying and the already verified edge`() {
+    @Test fun `nothing moves straight to completed except verifying`() {
         for (state in TransferTransitionTable.states) {
             val canComplete = TransferTransitionTable.canMove(state, TransferState.COMPLETED)
-            if (state == TransferState.VERIFYING || state == TransferState.NEGOTIATING) {
+            if (state == TransferState.VERIFYING) {
                 assertTrue("$state must be able to reach COMPLETED", canComplete)
             } else {
                 assertFalse("$state must not reach COMPLETED directly", canComplete)
@@ -115,8 +115,6 @@ class TransferTransitionTableTest {
                 // A queued delivery can be ended by a final error (a revoked
                 // permission, for instance) without ever occupying a slot.
                 TransferState.QUEUED to TransferState.FAILED_FINAL,
-                // The receiving side reports a verified copy; no bytes move.
-                TransferState.NEGOTIATING to TransferState.COMPLETED,
             ),
             TransferTransitionTable.additionsBeyondCoreModel().toSet(),
         )

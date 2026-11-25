@@ -8,6 +8,10 @@ import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
 import app.morsecode.core.transfer.model.TransferSnapshot
 import app.morsecode.core.transfer.model.VerificationInfo
+import app.morsecode.core.transfer.event.TransferEvent
+import app.morsecode.core.transfer.reducer.TransferReducer
+import app.morsecode.core.transfer.current
+import app.morsecode.core.transfer.effects
 import app.morsecode.core.transfer.plus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -89,7 +93,7 @@ class TransferSnapshotStoreContractTest {
 
     @Test fun `saveCheckpoint is idempotent for a given offset`() {
         val store = InMemorySnapshotStore()
-        val snapshot = Tf.receiving()
+        val snapshot = current(TransferReducer.apply(Tf.receiving(), Tf.chunkDurablyStored(0L)))
         store.saveTransition(null, snapshot, emptyList())
         val offset = ConfirmedOffset(4_096L)
         assertEquals(StoreResult.Ok, store.saveCheckpoint(snapshot.transferId, offset))
@@ -101,7 +105,8 @@ class TransferSnapshotStoreContractTest {
 
     @Test fun `a checkpoint never moves backwards`() {
         val store = InMemorySnapshotStore()
-        val snapshot = Tf.receiving()
+        val first = Tf.receiveChunk(Tf.receiving(), 0L)
+        val snapshot = current(TransferReducer.apply(first, Tf.chunkDurablyStored(4_096L)))
         store.saveTransition(null, snapshot, emptyList())
         store.saveCheckpoint(snapshot.transferId, ConfirmedOffset(8_192L))
         val result = store.saveCheckpoint(snapshot.transferId, ConfirmedOffset(4_096L))
@@ -109,6 +114,46 @@ class TransferSnapshotStoreContractTest {
         // late acknowledgement cannot rewind a resumed transfer.
         assertTrue(result is StoreResult.Failed)
         assertEquals(8_192L, store.checkpointFor(snapshot.transferId)!!.value)
+    }
+
+    @Test fun `a persisted receiver checkpoint survives a crash before acknowledgement`() {
+        val store = InMemorySnapshotStore()
+        val before = Tf.receiving()
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val staged = TransferReducer.apply(before, Tf.chunkDurablyStored(0L))
+        val pending = current(staged)
+        assertEquals(0L, pending.confirmedBytes)
+        assertEquals(
+            listOf(
+                TransferEffect.PersistSnapshot(pending.transferId, pending.snapshotVersion),
+                TransferEffect.PersistConfirmedOffset(pending.transferId, 4_096L),
+            ),
+            effects(staged),
+        )
+        assertEquals(StoreResult.Ok, store.saveTransition(before, pending, effects(staged).take(1)))
+        assertEquals(StoreResult.Ok, store.saveCheckpoint(pending.transferId, ConfirmedOffset(4_096L)))
+
+        val restarted = InMemorySnapshotStore()
+        restarted.importAll(store.exportAll())
+        val restored = restarted.loadedTransfer(pending.transferId)!!
+        assertEquals(4_096L, restored.confirmedBytes)
+        assertEquals(4_096L, restored.optimisticBytes)
+        // The in-memory pending transition has not yet acknowledged anything.
+        assertEquals(0L, pending.confirmedBytes)
+        val acknowledged = TransferReducer.apply(
+            pending,
+            TransferEvent.ConfirmedOffsetPersisted(pending.sessionId, pending.transferId, pending.recipientId, 4_096L),
+        )
+        assertEquals(4_096L, current(acknowledged).confirmedBytes)
+        assertTrue(effects(acknowledged).any { it is TransferEffect.SendAcknowledgement })
+    }
+
+    @Test fun `a checkpoint cannot exceed the saved optimistic frontier`() {
+        val store = InMemorySnapshotStore()
+        val snapshot = Tf.receiving()
+        store.saveTransition(null, snapshot, emptyList())
+        assertTrue(store.saveCheckpoint(snapshot.transferId, ConfirmedOffset(4_096L)) is StoreResult.Failed)
+        assertEquals(0L, store.loadedTransfer(snapshot.transferId)!!.confirmedBytes)
     }
 
     @Test fun `a verification result is stored and restored`() {
@@ -362,15 +407,17 @@ private class InMemorySnapshotStore : TransferSnapshotStore {
     }
 
     override fun saveCheckpoint(transferId: TransferId, confirmedOffset: ConfirmedOffset): StoreResult {
-        val existing = checkpoints[transferId]
-        if (existing != null && confirmedOffset.value < existing.value) {
-            return StoreResult.Failed(
-                TransferError.UnexpectedOffset(
-                    expected = existing.value,
-                    actual = confirmedOffset.value,
-                ),
-            )
+        val snapshot = when (val loaded = loadTransfer(transferId)) {
+            is StoreReadResult.Found -> loaded.value
+            StoreReadResult.Missing -> return StoreResult.Failed(TransferError.PersistenceConflict("snapshot_missing"))
+            is StoreReadResult.Failed -> return StoreResult.Failed(loaded.error)
         }
+        if (confirmedOffset.value < snapshot.confirmedBytes ||
+            confirmedOffset.value > snapshot.optimisticBytes || confirmedOffset.value > snapshot.totalBytes
+        ) {
+            return StoreResult.Failed(TransferError.PersistenceConflict("checkpoint_out_of_bounds"))
+        }
+        rows[transferId] = TransferSnapshotCodec.serialize(snapshot.copy(confirmedBytes = confirmedOffset.value))
         checkpoints[transferId] = confirmedOffset
         return StoreResult.Ok
     }

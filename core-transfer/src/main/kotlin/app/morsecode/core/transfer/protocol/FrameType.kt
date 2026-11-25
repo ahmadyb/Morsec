@@ -52,10 +52,10 @@ public enum class FrameType(
     /** Receiver → sender: the full-file SHA-256 outcome. */
     VERIFICATION_RESULT(13, "verification_result", hasPayload = true),
 
-    /** Sender → receiver: this file is finished and verified here. */
+    /** Receiver → sender: the verified file was committed; completion is acknowledged. */
     FILE_COMPLETE(14, "file_complete", hasPayload = true),
 
-    /** Either direction: the whole batch is finished. */
+    /** Sender → receiver: the whole session is finished. */
     SESSION_COMPLETE(15, "session_complete", hasPayload = true),
     ;
 

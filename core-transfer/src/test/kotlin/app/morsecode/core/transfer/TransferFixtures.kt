@@ -227,13 +227,13 @@ internal object Tf {
         sequence = offset / chunk.value,
     )
 
-    fun chunkReceived(
+    fun chunkDurablyStored(
         offset: Long,
         length: Int = chunk.value,
         sessionId: SessionId = this.sessionId,
         transferId: TransferId = this.transferId,
         recipientId: RecipientId? = null,
-    ): TransferEvent.ChunkReceived = TransferEvent.ChunkReceived(
+    ): TransferEvent.ChunkDurablyStored = TransferEvent.ChunkDurablyStored(
         sessionId, transferId, recipientId,
         offset = offset,
         length = length,
@@ -369,10 +369,11 @@ internal object Tf {
         val verifying = receiveEverything(
             receiving(transferId, sessionId, recipientId, descriptor),
         ) + allBytesConfirmed(sessionId, transferId, recipientId)
-        return verifying + TransferEvent.VerificationSucceeded(
+        val verified = verifying + TransferEvent.VerificationSucceeded(
             sessionId, transferId, recipientId,
             descriptor.expectedSha256 ?: Sha256Accumulator.EMPTY,
         )
+        return verified + TransferEvent.DestinationCommitSucceeded(sessionId, transferId, recipientId)
     }
 
     /** A delivery the user paused, holding a confirmed offset. */
@@ -441,24 +442,30 @@ internal object Tf {
     ): TransferSnapshot = sending(transferId, sessionId, recipientId, descriptor) +
         TransferEvent.PermissionRevoked(sessionId, transferId, recipientId, "grant revoked")
 
-    /** Drives a whole file through ChunkReceived events and returns the result. */
+    /** Drives a chunk through durable storage and a successful checkpoint. */
+    fun receiveChunk(snapshot: TransferSnapshot, offset: Long, length: Int = chunk.value): TransferSnapshot {
+        val pending = snapshot + TransferEvent.ChunkDurablyStored(
+            sessionId = snapshot.sessionId,
+            transferId = snapshot.transferId,
+            recipientId = snapshot.recipientId,
+            offset = offset,
+            length = length,
+            sequence = offset / snapshot.chunkSize.value,
+        )
+        return pending + TransferEvent.ConfirmedOffsetPersisted(
+            pending.sessionId, pending.transferId, pending.recipientId, offset + length,
+        )
+    }
+
+    /** Drives a whole file through the two receiver checkpoint stages. */
     fun receiveEverything(snapshot: TransferSnapshot): TransferSnapshot {
         var current = snapshot
         val chunkSize = current.descriptor.chunkSize.value
-        var offset = 0L
-        var sequence = 0L
+        var offset = current.confirmedBytes
         while (offset < current.totalBytes) {
             val length = minOf(chunkSize.toLong(), current.totalBytes - offset).toInt()
-            current = current + TransferEvent.ChunkReceived(
-                sessionId = current.sessionId,
-                transferId = current.transferId,
-                recipientId = current.recipientId,
-                offset = offset,
-                length = length,
-                sequence = sequence,
-            )
+            current = receiveChunk(current, offset, length)
             offset += length.toLong()
-            sequence++
         }
         return current
     }

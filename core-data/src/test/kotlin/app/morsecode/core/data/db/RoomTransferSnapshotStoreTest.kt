@@ -5,7 +5,10 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import app.morsecode.core.model.SessionDirection
 import app.morsecode.core.model.TransferState
+import app.morsecode.core.transfer.command.TransferCommand
+import app.morsecode.core.transfer.effect.TransferEffect
 import app.morsecode.core.transfer.error.TransferError
+import app.morsecode.core.transfer.event.TransferEvent
 import app.morsecode.core.transfer.identity.BatchId
 import app.morsecode.core.transfer.identity.ChunkSize
 import app.morsecode.core.transfer.identity.FileId
@@ -21,6 +24,13 @@ import app.morsecode.core.transfer.model.VerificationInfo
 import app.morsecode.core.transfer.persistence.StoreReadResult
 import app.morsecode.core.transfer.persistence.StoreResult
 import app.morsecode.core.transfer.identity.ConfirmedOffset
+import app.morsecode.core.transfer.protocol.ResumeDecision
+import app.morsecode.core.transfer.reducer.TransferReducer
+import app.morsecode.core.transfer.resume.ReceiverResumeState
+import app.morsecode.core.transfer.resume.ReceiverVerificationState
+import app.morsecode.core.transfer.resume.ResumeNegotiator
+import app.morsecode.core.transfer.resume.ResumeProposal
+import app.morsecode.core.transfer.reducer.TransitionResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -62,6 +72,336 @@ class RoomTransferSnapshotStoreTest {
         assertTrue(restored is StoreReadResult.Found)
         val snapshot = (restored as StoreReadResult.Found).value
         assertEquals(initial.copy(confirmedBytes = 4_096L), snapshot)
+    }
+
+    @Test
+    fun `staged receiver checkpoint survives reopen before acknowledgement`() {
+        val name = databaseName()
+        val database = openDatabase(name)
+        val store = RoomTransferSnapshotStore(database, Dispatchers.IO)
+        val before = receivingSnapshot().copy(optimisticBytes = 0L)
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val staged = TransferReducer.apply(
+            before,
+            TransferEvent.ChunkDurablyStored(before.sessionId, before.transferId, before.recipientId, 0L, 4_096, 0L),
+        ) as TransitionResult.Accepted
+        assertEquals(0L, staged.current.confirmedBytes)
+        assertEquals(4_096L, staged.current.optimisticBytes)
+        assertEquals(StoreResult.Ok, store.saveTransition(before, staged.current, staged.effects.take(1)))
+        assertEquals(StoreResult.Ok, store.saveCheckpoint(before.transferId, ConfirmedOffset(4_096L)))
+        database.close()
+        databases.remove(database)
+
+        val reopened = openDatabase(name)
+        val restoredStore = RoomTransferSnapshotStore(reopened, Dispatchers.IO)
+        val restored = (restoredStore.loadTransfer(before.transferId) as StoreReadResult.Found).value
+        assertEquals(4_096L, restored.confirmedBytes)
+        assertEquals(4_096L, restored.optimisticBytes)
+        assertEquals(1L, restored.nextExpectedSequence.value)
+        assertEquals(ResumeDecision.ResumeAt(4_096L), negotiateRestored(restored))
+        // saveCheckpoint does not advance this field; it cannot prove an ACK was sent.
+        assertEquals(null, restored.lastAcknowledgedSequence)
+        assertEquals(0L, staged.current.confirmedBytes)
+        // The old in-memory pending candidate is gone after a crash. Replaying
+        // its success against the restored snapshot is refused, not re-ACKed.
+        assertTrue(
+            TransferReducer.apply(
+                restored,
+                TransferEvent.ConfirmedOffsetPersisted(before.sessionId, before.transferId, before.recipientId, 4_096L),
+            ) is TransitionResult.Rejected,
+        )
+    }
+
+    @Test
+    fun `short chunk checkpoint survives reopen at its exact unaligned offset`() {
+        val name = databaseName()
+        val database = openDatabase(name)
+        val store = RoomTransferSnapshotStore(database, Dispatchers.IO)
+        val before = receivingSnapshot().copy(optimisticBytes = 0L)
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val staged = TransferReducer.apply(
+            before,
+            TransferEvent.ChunkDurablyStored(before.sessionId, before.transferId, before.recipientId, 0L, 2_048, 0L),
+        ) as TransitionResult.Accepted
+        assertEquals(StoreResult.Ok, store.saveTransition(before, staged.current, staged.effects.take(1)))
+        assertEquals(StoreResult.Ok, store.saveCheckpoint(before.transferId, ConfirmedOffset(2_048L)))
+        database.close()
+        databases.remove(database)
+        val restored = (RoomTransferSnapshotStore(openDatabase(name), Dispatchers.IO)
+            .loadTransfer(before.transferId) as StoreReadResult.Found).value
+        assertEquals(2_048L, restored.confirmedBytes)
+        assertEquals(ResumeDecision.ResumeAt(2_048L), negotiateRestored(restored))
+        assertEquals(0L, restored.nextExpectedSequence.value)
+        assertEquals(null, restored.lastAcknowledgedSequence)
+    }
+
+    @Test
+    fun `sender persists a recovered peer checkpoint as a snapshot before announcing resume`() {
+        val store = RoomTransferSnapshotStore(openDatabase(), Dispatchers.IO)
+        val before = receivingSnapshot().copy(
+            direction = SessionDirection.OUTBOUND,
+            state = TransferState.NEGOTIATING,
+            optimisticBytes = 0L,
+        )
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val resumed = TransferReducer.apply(
+            before,
+            TransferCommand.ApplyResumeDecision(
+                before.sessionId, before.transferId, before.recipientId, ResumeDecision.ResumeAt(2_048L),
+            ),
+        ) as TransitionResult.Accepted
+        assertEquals(2_048L, resumed.current.confirmedBytes)
+        assertEquals(null, resumed.current.lastAcknowledgedSequence)
+        assertTrue(resumed.effects[0] is TransferEffect.PersistSnapshot)
+        assertTrue(resumed.effects[1] is TransferEffect.SendResume)
+        assertEquals(StoreResult.Ok, store.saveTransition(before, resumed.current, resumed.effects.take(1)))
+        assertEquals(StoreReadResult.Found(resumed.current), store.loadTransfer(before.transferId))
+    }
+
+    @Test
+    fun `live checkpoint promotion uses the durable row as the CAS predecessor`() {
+        val store = RoomTransferSnapshotStore(openDatabase(), Dispatchers.IO)
+        val before = receivingSnapshot().copy(optimisticBytes = 0L)
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val staged = TransferReducer.apply(
+            before,
+            TransferEvent.ChunkDurablyStored(before.sessionId, before.transferId, before.recipientId, 0L, 4_096, 0L),
+        ) as TransitionResult.Accepted
+        assertEquals(StoreResult.Ok, store.saveTransition(before, staged.current, staged.effects.take(1)))
+        assertEquals(StoreResult.Ok, store.saveCheckpoint(before.transferId, ConfirmedOffset(4_096L)))
+        val durable = (store.loadTransfer(before.transferId) as StoreReadResult.Found).value
+        assertEquals(staged.current.snapshotVersion, durable.snapshotVersion)
+        assertEquals(4_096L, durable.confirmedBytes)
+        val accepted = TransferReducer.apply(
+            staged.current,
+            TransferEvent.ConfirmedOffsetPersisted(before.sessionId, before.transferId, before.recipientId, 4_096L),
+        ) as TransitionResult.Accepted
+        assertTrue(store.saveTransition(staged.current, accepted.current, accepted.effects.take(1)) is StoreResult.Failed)
+        assertEquals(StoreResult.Ok, store.saveTransition(durable, accepted.current, accepted.effects.take(1)))
+        assertEquals(StoreReadResult.Found(accepted.current), store.loadTransfer(before.transferId))
+        assertTrue(accepted.effects[1] is TransferEffect.SendAcknowledgement)
+    }
+
+    @Test
+    fun `a final checkpoint reopened before ACK can start local verification`() {
+        val name = databaseName()
+        val database = openDatabase(name)
+        val store = RoomTransferSnapshotStore(database, Dispatchers.IO)
+        val before = receivingSnapshot().let { it.copy(descriptor = it.descriptor.copy(totalBytes = 4_096L), optimisticBytes = 0L) }
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val staged = TransferReducer.apply(
+            before,
+            TransferEvent.ChunkDurablyStored(before.sessionId, before.transferId, before.recipientId, 0L, 4_096, 0L),
+        ) as TransitionResult.Accepted
+        assertEquals(StoreResult.Ok, store.saveTransition(before, staged.current, staged.effects.take(1)))
+        assertEquals(StoreResult.Ok, store.saveCheckpoint(before.transferId, ConfirmedOffset(4_096L)))
+        database.close()
+        databases.remove(database)
+        val restored = (RoomTransferSnapshotStore(openDatabase(name), Dispatchers.IO)
+            .loadTransfer(before.transferId) as StoreReadResult.Found).value
+        assertTrue(restored.allBytesConfirmed)
+        assertEquals(ResumeDecision.ResumeAt(4_096L), negotiateRestored(restored))
+        val verifying = TransferReducer.apply(
+            restored,
+            TransferEvent.AllBytesConfirmed(before.sessionId, before.transferId, before.recipientId),
+        ) as TransitionResult.Accepted
+        assertEquals(TransferState.VERIFYING, verifying.current.state)
+        assertTrue(verifying.effects.any { it is TransferEffect.BeginVerification })
+        assertTrue(verifying.effects.none { it is TransferEffect.SendAcknowledgement })
+    }
+
+    @Test
+    fun `a failed checkpoint leaves the durable floor unchanged and cannot authorize an ACK`() {
+        val name = databaseName()
+        val database = openDatabase(name)
+        val store = RoomTransferSnapshotStore(database, Dispatchers.IO)
+        val before = receivingSnapshot().copy(optimisticBytes = 0L)
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val staged = TransferReducer.apply(
+            before,
+            TransferEvent.ChunkDurablyStored(before.sessionId, before.transferId, before.recipientId, 0L, 4_096, 0L),
+        ) as TransitionResult.Accepted
+        assertEquals(StoreResult.Ok, store.saveTransition(before, staged.current, staged.effects.take(1)))
+        rejectSnapshotUpdates(database, before)
+        assertTrue(store.saveCheckpoint(before.transferId, ConfirmedOffset(4_096L)) is StoreResult.Failed)
+        assertEquals(StoreReadResult.Found(staged.current), store.loadTransfer(before.transferId))
+        val failed = TransferReducer.apply(
+            staged.current,
+            TransferEvent.ConfirmedOffsetPersistenceFailed(before.sessionId, before.transferId, before.recipientId, 4_096L),
+        ) as TransitionResult.Accepted
+        assertEquals(0L, failed.current.confirmedBytes)
+        assertTrue(failed.current.failure is TransferError.PersistenceFailure)
+        assertTrue(failed.effects.none { it is TransferEffect.SendAcknowledgement })
+        database.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_contract_update")
+        // The staged revision already exists; the failure revision is next.
+        assertEquals(StoreResult.Ok, store.saveTransition(staged.current, failed.current, failed.effects.drop(1).take(1)))
+        database.close()
+        databases.remove(database)
+        val restored = (RoomTransferSnapshotStore(openDatabase(name), Dispatchers.IO)
+            .loadTransfer(before.transferId) as StoreReadResult.Found).value
+        assertEquals(0L, restored.confirmedBytes)
+        assertEquals(0L, restored.optimisticBytes)
+        assertEquals("persistence_io", restored.failure?.code)
+    }
+
+    @Test
+    fun `failed final snapshot persistence cannot run its later ACK`() {
+        val database = openDatabase()
+        val store = RoomTransferSnapshotStore(database, Dispatchers.IO)
+        val before = receivingSnapshot().copy(optimisticBytes = 0L)
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val staged = TransferReducer.apply(
+            before,
+            TransferEvent.ChunkDurablyStored(before.sessionId, before.transferId, before.recipientId, 0L, 4_096, 0L),
+        ) as TransitionResult.Accepted
+        assertEquals(StoreResult.Ok, store.saveTransition(before, staged.current, staged.effects.take(1)))
+        assertEquals(StoreResult.Ok, store.saveCheckpoint(before.transferId, ConfirmedOffset(4_096L)))
+        val durable = (store.loadTransfer(before.transferId) as StoreReadResult.Found).value
+        val confirmed = TransferReducer.apply(
+            staged.current,
+            TransferEvent.ConfirmedOffsetPersisted(before.sessionId, before.transferId, before.recipientId, 4_096L),
+        ) as TransitionResult.Accepted
+        rejectSnapshotUpdates(database, before)
+        assertTrue(store.saveTransition(durable, confirmed.current, confirmed.effects.take(1)) is StoreResult.Failed)
+        assertTrue(confirmed.effects[1] is TransferEffect.SendAcknowledgement)
+        // The ordered program stops on the failed first effect; the surviving
+        // row retains the checkpoint, not a claim that the ACK was delivered.
+        val restored = (store.loadTransfer(before.transferId) as StoreReadResult.Found).value
+        assertEquals(4_096L, restored.confirmedBytes)
+        assertEquals(null, restored.lastAcknowledgedSequence)
+    }
+
+    @Test
+    fun `failed commit preflight leaves the unverified row and must not publish`() {
+        val database = openDatabase()
+        val store = RoomTransferSnapshotStore(database, Dispatchers.IO)
+        val digest = requireNotNull(Sha256Digest.fromHex("a".repeat(64)))
+        val before = receivingSnapshot().let { base ->
+            base.copy(
+                descriptor = base.descriptor.copy(expectedSha256 = digest),
+                state = TransferState.VERIFYING,
+                confirmedBytes = base.totalBytes,
+                optimisticBytes = base.totalBytes,
+                verification = VerificationInfo(digest, null, base.snapshotVersion),
+            )
+        }
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val verified = TransferReducer.apply(
+            before,
+            TransferEvent.VerificationSucceeded(before.sessionId, before.transferId, before.recipientId, digest),
+        ) as TransitionResult.Accepted
+        rejectSnapshotUpdates(database, before)
+        assertTrue(store.saveTransition(before, verified.current, emptyList()) is StoreResult.Failed)
+        assertEquals(StoreReadResult.Found(before), store.loadTransfer(before.transferId))
+        val commit = verified.effects.single() as TransferEffect.CommitVerifiedDestination
+        assertEquals(verified.current.snapshotVersion, commit.verifiedSnapshotVersion)
+        // No publisher is joined in this test or in production by this slice.
+    }
+
+    @Test
+    fun `a post publication save failure retains provisional state for reconciliation`() {
+        val name = databaseName()
+        val database = openDatabase(name)
+        val store = RoomTransferSnapshotStore(database, Dispatchers.IO)
+        val digest = requireNotNull(Sha256Digest.fromHex("a".repeat(64)))
+        val before = receivingSnapshot().let { base ->
+            base.copy(
+                descriptor = base.descriptor.copy(expectedSha256 = digest),
+                state = TransferState.VERIFYING,
+                confirmedBytes = base.totalBytes,
+                optimisticBytes = base.totalBytes,
+                verification = VerificationInfo(digest, null, base.snapshotVersion),
+            )
+        }
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val verified = TransferReducer.apply(
+            before,
+            TransferEvent.VerificationSucceeded(before.sessionId, before.transferId, before.recipientId, digest),
+        ) as TransitionResult.Accepted
+        assertEquals(StoreResult.Ok, store.saveTransition(before, verified.current, emptyList()))
+        // Simulate a trusted report that publication succeeded, without joining a publisher.
+        val committed = TransferReducer.apply(
+            verified.current,
+            TransferEvent.DestinationCommitSucceeded(before.sessionId, before.transferId, before.recipientId),
+        ) as TransitionResult.Accepted
+        rejectSnapshotUpdates(database, before)
+        assertTrue(store.saveTransition(verified.current, committed.current, committed.effects.drop(1).take(1)) is StoreResult.Failed)
+        assertTrue(committed.effects[2] is TransferEffect.SendVerificationResult)
+        database.close()
+        databases.remove(database)
+        val restored = (RoomTransferSnapshotStore(openDatabase(name), Dispatchers.IO)
+            .loadTransfer(before.transferId) as StoreReadResult.Found).value
+        assertEquals(verified.current, restored)
+        assertTrue(
+            TransferReducer.apply(
+                restored,
+                TransferCommand.CancelLocally(before.sessionId, before.transferId, before.recipientId),
+            ) is TransitionResult.Rejected,
+        )
+        assertTrue(
+            TransferReducer.apply(
+                restored,
+                TransferCommand.Retry(before.sessionId, before.transferId, before.recipientId),
+            ) is TransitionResult.Rejected,
+        )
+    }
+
+    @Test
+    fun `provisional verified and completed revisions use the existing columns`() {
+        val name = databaseName()
+        val database = openDatabase(name)
+        val store = RoomTransferSnapshotStore(database, Dispatchers.IO)
+        val digest = requireNotNull(Sha256Digest.fromHex("a".repeat(64)))
+        val before = receivingSnapshot().let { base ->
+            base.copy(
+                descriptor = base.descriptor.copy(expectedSha256 = digest),
+                state = TransferState.VERIFYING,
+                confirmedBytes = base.totalBytes,
+                optimisticBytes = base.totalBytes,
+                verification = VerificationInfo(digest, null, base.snapshotVersion),
+            )
+        }
+        assertEquals(StoreResult.Ok, store.saveTransition(null, before, emptyList()))
+        val verified = TransferReducer.apply(
+            before,
+            TransferEvent.VerificationSucceeded(before.sessionId, before.transferId, before.recipientId, digest),
+        ) as TransitionResult.Accepted
+        assertEquals(TransferState.VERIFYING, verified.current.state)
+        assertEquals(
+            listOf(TransferEffect.CommitVerifiedDestination(before.transferId, verified.current.snapshotVersion)),
+            verified.effects,
+        )
+        assertEquals(StoreReadResult.Found(before), store.loadTransfer(before.transferId))
+
+        // The commit effect's required preflight save happens before publication.
+        assertEquals(StoreResult.Ok, store.saveTransition(before, verified.current, emptyList()))
+        database.close()
+        databases.remove(database)
+        val recoveredDb = openDatabase(name)
+        val recoveredStore = RoomTransferSnapshotStore(recoveredDb, Dispatchers.IO)
+        val provisional = (recoveredStore.loadTransfer(before.transferId) as StoreReadResult.Found).value
+        assertEquals(verified.current, provisional)
+        assertTrue(
+            TransferReducer.apply(
+                provisional,
+                TransferCommand.CancelLocally(before.sessionId, before.transferId, before.recipientId),
+            ) is TransitionResult.Rejected,
+        )
+
+        // Only a trusted, reconciled publication outcome may resume completion.
+        val committed = TransferReducer.apply(
+            provisional,
+            TransferEvent.DestinationCommitSucceeded(before.sessionId, before.transferId, before.recipientId),
+        ) as TransitionResult.Accepted
+        assertEquals(TransferEffect.PersistSnapshot(before.transferId, provisional.snapshotVersion), committed.effects[0])
+        // The first effect is already satisfied by the preflight row.
+        assertEquals(StoreResult.Ok, recoveredStore.saveTransition(provisional, committed.current, committed.effects.drop(1).take(1)))
+        recoveredDb.close()
+        databases.remove(recoveredDb)
+        val reopened = RoomTransferSnapshotStore(openDatabase(name), Dispatchers.IO)
+        assertEquals(StoreReadResult.Found(committed.current), reopened.loadTransfer(before.transferId))
+        assertTrue(committed.effects[2] is TransferEffect.SendVerificationResult)
+        assertTrue(committed.effects[3] is TransferEffect.SendFileComplete)
     }
 
     @Test
@@ -187,6 +527,41 @@ class RoomTransferSnapshotStoreTest {
         assertTrue(result is StoreReadResult.Failed)
         val error = (result as StoreReadResult.Failed).error as TransferError.PersistedSnapshotInvalid
         assertEquals("unknown_transfer_state", error.reason)
+    }
+
+    private fun rejectSnapshotUpdates(database: MorseDatabase, snapshot: TransferSnapshot) {
+        database.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER reject_contract_update " +
+                "BEFORE UPDATE ON transfer_snapshots WHEN OLD.transfer_id = '${snapshot.transferId.value}' " +
+                "BEGIN SELECT RAISE(ABORT, 'test failure'); END",
+        )
+    }
+
+    private fun negotiateRestored(snapshot: TransferSnapshot): ResumeDecision {
+        val descriptor = snapshot.descriptor
+        return ResumeNegotiator.negotiate(
+            ResumeProposal(
+                protocolVersion = descriptor.protocolVersion,
+                fileId = descriptor.fileId,
+                totalBytes = descriptor.totalBytes,
+                chunkSize = descriptor.chunkSize,
+                expectedSha256 = descriptor.expectedSha256,
+                relativePath = descriptor.relativePath,
+                lastModifiedEpochMillis = descriptor.lastModifiedEpochMillis,
+                descriptorFingerprint = descriptor.descriptorFingerprint,
+            ),
+            ReceiverResumeState(
+                knownTransfer = true,
+                fileId = descriptor.fileId,
+                totalBytes = descriptor.totalBytes,
+                confirmedBytes = snapshot.confirmedBytes,
+                descriptorFingerprint = descriptor.descriptorFingerprint,
+                chunkSize = descriptor.chunkSize,
+                verification = ReceiverVerificationState.NOT_STARTED,
+                expectedSha256 = descriptor.expectedSha256,
+                lastModifiedEpochMillis = descriptor.lastModifiedEpochMillis,
+            ),
+        )
     }
 
     private fun queuedSnapshot(): TransferSnapshot = snapshot(TransferState.QUEUED, optimisticBytes = 0L)

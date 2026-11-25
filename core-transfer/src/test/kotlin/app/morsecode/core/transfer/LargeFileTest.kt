@@ -314,9 +314,8 @@ class LargeFileTest {
     @Test fun `a five gibibyte final resume offset is valid`() {
         val receiver = receiverState(confirmedBytes = FIVE_GIB, total = FIVE_GIB)
         val decision = ResumeNegotiator.negotiate(proposal(FIVE_GIB), receiver)
-        // Complete but not yet verified, so it is retransmitted rather than
-        // trusted — the size is not what makes it unverified.
-        assertTrue(decision is ResumeDecision.RestartAtZero)
+        // The durable EOF is retained, but still requires full verification.
+        assertEquals(ResumeDecision.ResumeAt(FIVE_GIB), decision)
     }
 
     @Test fun `a five gibibyte verified file is already verified`() {

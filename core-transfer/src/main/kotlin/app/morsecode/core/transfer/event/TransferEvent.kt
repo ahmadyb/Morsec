@@ -3,6 +3,7 @@ package app.morsecode.core.transfer.event
 import app.morsecode.core.transfer.command.TransferTarget
 import app.morsecode.core.transfer.error.TransferError
 import app.morsecode.core.transfer.identity.ChunkSize
+import app.morsecode.core.transfer.identity.FileId
 import app.morsecode.core.transfer.identity.RecipientId
 import app.morsecode.core.transfer.identity.SessionId
 import app.morsecode.core.transfer.identity.TransferId
@@ -102,12 +103,14 @@ public sealed interface TransferEvent : TransferTarget {
     }
 
     /**
-     * A chunk arrived and passed its CRC32 check.
+     * A receiver chunk passed CRC, was written sequentially, and the required
+     * destination durability operation succeeded. Only a trusted local effect
+     * executor may report this fact; receiving a frame is not enough.
      *
-     * The codec rejects a corrupt chunk before this event is ever produced, so
-     * reaching the reducer means the bytes are intact.
+     * At most one chunk may be awaiting its confirmed-offset checkpoint. The
+     * reducer records its end in optimisticBytes but does not confirm or ACK it.
      */
-    public data class ChunkReceived(
+    public data class ChunkDurablyStored(
         override val sessionId: SessionId,
         override val transferId: TransferId,
         override val recipientId: RecipientId?,
@@ -118,7 +121,40 @@ public sealed interface TransferEvent : TransferTarget {
         override val eventName: String get() = NAME
 
         public companion object {
-            public const val NAME: String = "ChunkReceived"
+            public const val NAME: String = "ChunkDurablyStored"
+        }
+    }
+
+    /** The requested receiver checkpoint was durably persisted by the local executor. */
+    public data class ConfirmedOffsetPersisted(
+        override val sessionId: SessionId,
+        override val transferId: TransferId,
+        override val recipientId: RecipientId?,
+        public val candidateOffset: Long,
+    ) : TransferEvent {
+        override val eventName: String get() = NAME
+
+        public companion object {
+            public const val NAME: String = "ConfirmedOffsetPersisted"
+        }
+    }
+
+    /**
+     * The pending receiver checkpoint definitively did not persist. An unknown
+     * persistence outcome must be reconciled with the store before dispatching
+     * either this event or ConfirmedOffsetPersisted; it must not be ACKed.
+     */
+    public data class ConfirmedOffsetPersistenceFailed(
+        override val sessionId: SessionId,
+        override val transferId: TransferId,
+        override val recipientId: RecipientId?,
+        public val candidateOffset: Long,
+        public val storageFull: Boolean = false,
+    ) : TransferEvent {
+        override val eventName: String get() = NAME
+
+        public companion object {
+            public const val NAME: String = "ConfirmedOffsetPersistenceFailed"
         }
     }
 
@@ -207,12 +243,17 @@ public sealed interface TransferEvent : TransferTarget {
         }
     }
 
-    /** The full-file SHA-256 matched (or there was nothing to compare against). */
+    /**
+     * The receiver verified the file, or the sender received a successful peer
+     * verification result. Neither fact by itself completes a delivery.
+     */
     public data class VerificationSucceeded(
         override val sessionId: SessionId,
         override val transferId: TransferId,
         override val recipientId: RecipientId?,
         public val observedDigest: Sha256Digest?,
+        /** Required for the sender: the total carried by the peer's result. */
+        public val reportedTotalBytes: Long? = null,
     ) : TransferEvent {
         override val eventName: String get() = NAME
 
@@ -233,6 +274,57 @@ public sealed interface TransferEvent : TransferTarget {
 
         public companion object {
             public const val NAME: String = "VerificationFailed"
+        }
+    }
+
+    /** The local receiver's requested destination commit succeeded. */
+    public data class DestinationCommitSucceeded(
+        override val sessionId: SessionId,
+        override val transferId: TransferId,
+        override val recipientId: RecipientId?,
+    ) : TransferEvent {
+        override val eventName: String get() = NAME
+
+        public companion object {
+            public const val NAME: String = "DestinationCommitSucceeded"
+        }
+    }
+
+    /**
+     * A receiver commit definitively failed without publishing the destination.
+     * An ambiguous outcome requires reconciliation, not this event or deletion.
+     */
+    public data class DestinationCommitFailed(
+        override val sessionId: SessionId,
+        override val transferId: TransferId,
+        override val recipientId: RecipientId?,
+        /** A typed local destination or persistence failure, never an exception message. */
+        public val error: TransferError = TransferError.DestinationUnavailable("destination commit failed"),
+    ) : TransferEvent {
+        override val eventName: String get() = NAME
+
+        // TransferError subclasses can carry adapter-owned fields. Never print
+        // those fields, even when a caller violates the diagnostic contract.
+        override fun toString(): String = "DestinationCommitFailed(error=${error.code})"
+
+        public companion object {
+            public const val NAME: String = "DestinationCommitFailed"
+        }
+    }
+
+    /** A sender received the receiver's FILE_COMPLETE for this file. */
+    public data class FileCompleteReceived(
+        override val sessionId: SessionId,
+        override val transferId: TransferId,
+        override val recipientId: RecipientId?,
+        public val fileId: FileId,
+        public val totalBytes: Long,
+        public val digest: Sha256Digest?,
+    ) : TransferEvent {
+        override val eventName: String get() = NAME
+
+        public companion object {
+            public const val NAME: String = "FileCompleteReceived"
         }
     }
 

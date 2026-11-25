@@ -158,7 +158,7 @@ jobs:
           set -uo pipefail
           mkdir -p ci-logs
           {
-            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs tools/verify/secure-dependency-governance.mjs tools/verify/secure-authority-surface.mjs tools/verify/jpake-production-boundary.mjs tools/verify/security-dependency-lock.mjs; do
+            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs tools/verify/secure-dependency-governance.mjs tools/verify/secure-authority-surface.mjs tools/verify/jpake-production-boundary.mjs tools/verify/security-dependency-lock.mjs tools/verify/transfer-reducer-contract.mjs; do
               echo "== $script =="
               if [ "$script" = tools/verify/room-schema.mjs ]; then
                 node "$script" --baseline-only || echo "VERIFIER FAILED: $script"
@@ -171,6 +171,11 @@ jobs:
                 # --self-test runs the mutation fixtures; the plain run checks the committed lock
                 # and the task-graph wiring. Both, because a lock whose mutations all still pass
                 # proves nothing.
+                node "$script" --self-test || echo "VERIFIER FAILED: $script"
+                node "$script" || echo "VERIFIER FAILED: $script"
+              elif [ "$script" = tools/verify/transfer-reducer-contract.mjs ]; then
+                # Prove the reducer ordering/direction/barrier guards fail on mutations,
+                # then verify the real sources and inert payload boundary.
                 node "$script" --self-test || echo "VERIFIER FAILED: $script"
                 node "$script" || echo "VERIFIER FAILED: $script"
               else
@@ -206,18 +211,25 @@ jobs:
           set -uo pipefail
           mkdir -p ci-logs
           ./gradlew --no-daemon --stacktrace --continue test 2>&1 | tee ci-logs/20-unit-tests.log
+          gradle_status=${PIPESTATUS[0]}
 
-          # Gradle names the failed *task*, not the failed test, and from some environments
-          # neither the job log nor the uploaded HTML report can be retrieved. Publish the failing
-          # test names and messages as check-run annotations so a red run says what actually
-          # failed instead of only "There were failing tests".
-          python3 - <<'PYEOF' || true
+          # Publish failing names and enforce actual test evidence: a successful
+          # Gradle exit with missing reports or skipped JVM tests is not a pass.
+          # Preserve Gradle's exit status even after collecting diagnostics.
+          python3 - <<'PYEOF'
           import glob
+          import sys
           import xml.etree.ElementTree as ET
-          for path in glob.glob('**/build/test-results/**/*.xml', recursive=True):
+          paths = glob.glob('**/build/test-results/**/*.xml', recursive=True)
+          total = failed = skipped = malformed = 0
+          for path in paths:
               try:
                   root = ET.parse(path).getroot()
-              except Exception:
+                  total += int(root.get('tests', '0'))
+                  failed += int(root.get('failures', '0')) + int(root.get('errors', '0'))
+                  skipped += int(root.get('skipped', '0'))
+              except (ET.ParseError, ValueError, OSError):
+                  malformed += 1
                   continue
               for case in root.iter('testcase'):
                   for kind in ('failure', 'error'):
@@ -226,7 +238,14 @@ jobs:
                           text = ' '.join(text.split())[:500]
                           name = f"{case.get('classname')} > {case.get('name')}"
                           print(f"::error title=failing test::{name} :: {text}")
+          print(f"::notice title=JVM test evidence::{total} tests, {failed} failed, {skipped} skipped, {malformed} malformed reports")
+          if not paths or total == 0 or failed or skipped or malformed:
+              print('::error title=JVM test evidence::Missing, failed, skipped or malformed JVM test results')
+              sys.exit(1)
           PYEOF
+          report_status=$?
+          if [ "$gradle_status" -ne 0 ]; then exit "$gradle_status"; fi
+          exit "$report_status"
 
       # The lock names nine configurations across two projects. Each is resolved and compared, and
       # the reports are kept per project so a configuration is checked against its own project's

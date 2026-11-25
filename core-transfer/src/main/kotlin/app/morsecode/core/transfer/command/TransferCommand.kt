@@ -220,11 +220,10 @@ public sealed interface TransferCommand : TransferTarget {
     /**
      * Applies the outcome of resume negotiation to this delivery.
      *
-     * This is the command form of `ResumeNegotiator`'s decision and the only way
-     * `confirmedBytes` may move outside of a receiver acknowledgement. It is
-     * listed here as an explicit addition to the master prompt's command list:
-     * without it the resume rules would live outside the state machine and could
-     * not be tested against the transition table.
+     * This is the command form of `ResumeNegotiator`'s decision. A receiver's
+     * ordinary streaming progress instead moves through the durable checkpoint
+     * events; a sender's streaming progress requires a peer acknowledgement.
+     * `AlreadyVerified` is refused until completion reconciliation is specified.
      */
     public data class ApplyResumeDecision(
         override val sessionId: SessionId,

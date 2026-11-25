@@ -178,7 +178,7 @@ class TransferReducerInvariantTest {
 
     @Test fun `invariant 11 - verifying is entered only when every byte is confirmed`() {
         val receiving = Tf.receiving()
-        val partial = receiving + Tf.chunkReceived(offset = 0L, length = Tf.chunk.value)
+        val partial = receiving + Tf.chunkDurablyStored(offset = 0L, length = Tf.chunk.value)
         assertFalse(partial.allBytesConfirmed)
         assertTrue(
             "AllBytesConfirmed must be refused while bytes are missing",
@@ -190,30 +190,16 @@ class TransferReducerInvariantTest {
         assertEquals(TransferState.VERIFYING, verifying.state)
     }
 
-    @Test fun `invariant 12 - completion comes only from verifying, or from an already verified resume`() {
+    @Test fun `invariant 12 - completion comes only from verifying and requires its direction specific outcome`() {
         for (state in TransferState.entries) {
             if (!TransferTransitionTable.canMove(state, TransferState.COMPLETED)) continue
-            assertTrue(
-                "$state must not reach COMPLETED",
-                state == TransferState.VERIFYING || state == TransferState.NEGOTIATING,
-            )
+            assertEquals("$state must not reach COMPLETED", TransferState.VERIFYING, state)
         }
-        // The NEGOTIATING edge is the resume shortcut, and it needs a known digest.
         val descriptor = Tf.descriptor(digest = Tf.knownDigest)
         val negotiating = Tf.queued(descriptor = descriptor) + Tf.beginNegotiation()
-        val result = TransferReducer.apply(
-            negotiating,
-            Tf.applyResume(ResumeDecision.AlreadyVerified),
-        )
-        assertTrue(result is TransitionResult.Accepted)
-        assertEquals(TransferState.COMPLETED, current(result).state)
-        // Without a digest the same claim is refused.
-        val unknownDigest = Tf.queued(descriptor = Tf.descriptor(digest = null)) + Tf.beginNegotiation()
         assertTrue(
-            TransferReducer.apply(
-                unknownDigest,
-                Tf.applyResume(ResumeDecision.AlreadyVerified),
-            ) is TransitionResult.Rejected,
+            TransferReducer.apply(negotiating, Tf.applyResume(ResumeDecision.AlreadyVerified))
+                is TransitionResult.Rejected,
         )
     }
 
@@ -530,11 +516,13 @@ class TransferReducerInvariantTest {
         val succeeded = current(
             TransferReducer.apply(verifyingNoDigest, Tf.verificationSucceeded(Tf.knownDigest)),
         )
-        assertEquals(TransferState.COMPLETED, succeeded.state)
+        assertEquals(TransferState.VERIFYING, succeeded.state)
         assertEquals(
             app.morsecode.core.transfer.model.VerificationOutcome.VERIFIED_WITHOUT_EXPECTED,
             succeeded.verification?.outcome,
         )
+        val completed = succeeded + TransferEvent.DestinationCommitSucceeded(Tf.sessionId, Tf.transferId, null)
+        assertEquals(TransferState.COMPLETED, completed.state)
     }
 
     @Test fun `invariant 28 - every rejection carries a typed, bounded and redacted error`() {
@@ -582,7 +570,7 @@ class TransferReducerInvariantTest {
         Tf.reject(),
         Tf.peerAccepted(),
         Tf.chunkSent(offset = 0L),
-        Tf.chunkReceived(offset = 0L),
+        Tf.chunkDurablyStored(offset = 0L),
         Tf.chunkAck(offset = 0L, length = Tf.chunk.value, confirmedOffset = Tf.chunk.value.toLong()),
         Tf.allBytesConfirmed(),
         Tf.verificationSucceeded(),

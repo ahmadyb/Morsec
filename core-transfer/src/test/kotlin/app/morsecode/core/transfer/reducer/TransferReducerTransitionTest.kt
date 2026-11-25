@@ -149,7 +149,7 @@ class TransferReducerTransitionTest {
         val result = TransferReducer.apply(sending, Tf.chunkAck(0L, 4_096, 4_096L))
         assertTrue(isAccepted(result))
         assertEquals(4_096L, current(result).confirmedBytes)
-        assertEquals(before + 1L, current(result).snapshotVersion)
+        assertEquals(before, current(result).snapshotVersion)
     }
 
     @Test fun `optimistic bytes are never promoted to confirmed without an acknowledgement`() {
@@ -165,45 +165,41 @@ class TransferReducerTransitionTest {
         assertEquals(TransferState.FAILED_RETRYABLE, disconnected.state)
     }
 
-    @Test fun `receiving a chunk advances confirmed progress and acknowledges it`() {
+    @Test fun `durable storage stages optimistic progress without acknowledgement`() {
         val receiving = Tf.receiving()
-        val result = TransferReducer.apply(receiving, Tf.chunkReceived(0L))
-        assertEquals(4_096L, current(result).confirmedBytes)
-        assertTrue(effects(result).hasEffectOf(TransferEffect.SendAcknowledgement::class))
+        val result = TransferReducer.apply(receiving, Tf.chunkDurablyStored(0L))
+        assertEquals(0L, current(result).confirmedBytes)
+        assertEquals(4_096L, current(result).optimisticBytes)
+        assertFalse(effects(result).hasEffectOf(TransferEffect.SendAcknowledgement::class))
+        assertTrue(effects(result).hasEffectOf(TransferEffect.PersistConfirmedOffset::class))
     }
 
-    @Test fun `a duplicate already confirmed chunk is re acknowledged without advancing`() {
-        var receiving = Tf.receiving()
-        receiving = receiving + Tf.chunkReceived(0L)
-        val result = TransferReducer.apply(receiving, Tf.chunkReceived(0L))
-        assertEquals(4_096L, current(result).confirmedBytes)
-        assertEquals(receiving.snapshotVersion, current(result).snapshotVersion)
-        val ack = effects(result).filterIsInstance<TransferEffect.SendAcknowledgement>().first()
-        assertEquals(4_096L, ack.confirmedOffset)
+    @Test fun `a duplicate confirmed chunk is refused without another acknowledgement`() {
+        val receiving = Tf.receiveChunk(Tf.receiving(), 0L)
+        val result = TransferReducer.apply(receiving, Tf.chunkDurablyStored(0L))
+        assertEquals("unexpected_offset", rejection(result).code)
+        assertEquals(4_096L, (result as TransitionResult.Rejected).snapshot!!.confirmedBytes)
     }
 
-    @Test fun `a stale chunk below the confirmed offset is re acknowledged idempotently`() {
-        var receiving = Tf.receiving()
-        receiving = receiving + Tf.chunkReceived(0L)
-        receiving = receiving + Tf.chunkReceived(4_096L)
-        val result = TransferReducer.apply(receiving, Tf.chunkReceived(0L))
-        assertTrue(isAccepted(result))
-        assertEquals(8_192L, current(result).confirmedBytes)
+    @Test fun `a stale chunk below the confirmed offset is refused`() {
+        val receiving = Tf.receiveChunk(Tf.receiveChunk(Tf.receiving(), 0L), 4_096L)
+        val result = TransferReducer.apply(receiving, Tf.chunkDurablyStored(0L))
+        assertEquals("unexpected_offset", rejection(result).code)
+        assertEquals(8_192L, (result as TransitionResult.Rejected).snapshot!!.confirmedBytes)
     }
 
     @Test fun `a chunk ahead of the confirmed offset is refused`() {
         val receiving = Tf.receiving()
-        val result = TransferReducer.apply(receiving, Tf.chunkReceived(4_096L))
+        val result = TransferReducer.apply(receiving, Tf.chunkDurablyStored(4_096L))
         assertEquals("unexpected_offset", rejection(result).code)
     }
 
     @Test fun `an overlapping chunk is refused`() {
-        var receiving = Tf.receiving()
-        receiving = receiving + Tf.chunkReceived(0L)
+        val receiving = Tf.receiveChunk(Tf.receiving(), 0L)
         // Starts inside the confirmed range but ends past it.
         val result = TransferReducer.apply(
             receiving,
-            TransferEvent.ChunkReceived(
+            TransferEvent.ChunkDurablyStored(
                 Tf.sessionId, Tf.transferId, null,
                 offset = 2_048L, length = 4_096, sequence = 0L,
             ),
@@ -215,7 +211,7 @@ class TransferReducerTransitionTest {
         val receiving = Tf.receiving()
         val result = TransferReducer.apply(
             receiving,
-            TransferEvent.ChunkReceived(
+            TransferEvent.ChunkDurablyStored(
                 Tf.sessionId, Tf.transferId, null,
                 offset = 0L, length = 4_096, sequence = 7L,
             ),
@@ -224,20 +220,14 @@ class TransferReducerTransitionTest {
     }
 
     @Test fun `a chunk past the end of the file is refused`() {
-        val receiving = Tf.receiving()
-        val result = TransferReducer.apply(
-            receiving,
-            TransferEvent.ChunkSent(
-                Tf.sessionId, Tf.transferId, null,
-                offset = Tf.THREE_CHUNKS, length = 4_096, sequence = 3L,
-            ),
-        )
-        assertEquals("illegal_state_transition", rejection(result).code)
+        val receiving = Tf.receiveEverything(Tf.receiving())
+        val result = TransferReducer.apply(receiving, Tf.chunkDurablyStored(Tf.THREE_CHUNKS))
+        assertEquals("offset_beyond_total", rejection(result).code)
     }
 
     @Test fun `a zero length chunk is refused`() {
         val receiving = Tf.receiving()
-        val result = TransferReducer.apply(receiving, Tf.chunkReceived(0L, 0))
+        val result = TransferReducer.apply(receiving, Tf.chunkDurablyStored(0L, 0))
         assertEquals("invalid_chunk_length", rejection(result).code)
     }
 
@@ -257,7 +247,7 @@ class TransferReducerTransitionTest {
         assertEquals("verification_too_early", rejection(result).code)
     }
 
-    @Test fun `a matching digest completes the delivery and commits the destination`() {
+    @Test fun `a matching digest is provisional until destination commit succeeds`() {
         val verifying = Tf.receiveEverything(Tf.receiving()) + Tf.allBytesConfirmed()
         val result = TransferReducer.apply(
             verifying,
@@ -265,9 +255,14 @@ class TransferReducerTransitionTest {
                 Tf.sessionId, Tf.transferId, null, Sha256Accumulator.EMPTY,
             ),
         )
-        assertEquals(TransferState.COMPLETED, current(result).state)
-        assertTrue(effects(result).hasEffectOf(TransferEffect.CommitVerifiedDestination::class))
-        assertTrue(current(result).isInternallyConsistent())
+        assertEquals(TransferState.VERIFYING, current(result).state)
+        assertEquals(
+            listOf(TransferEffect.CommitVerifiedDestination(Tf.transferId, current(result).snapshotVersion)),
+            effects(result),
+        )
+        val committed = current(result) + TransferEvent.DestinationCommitSucceeded(Tf.sessionId, Tf.transferId, null)
+        assertEquals(TransferState.COMPLETED, committed.state)
+        assertTrue(committed.isInternallyConsistent())
     }
 
     @Test fun `a mismatched digest never produces a completed delivery`() {
@@ -307,9 +302,9 @@ class TransferReducerTransitionTest {
     }
 
     @Test fun `a zero byte file follows the empty verification path`() {
-        val sending = Tf.sending(descriptor = Tf.descriptor(totalBytes = 0L))
-        assertTrue(sending.allBytesConfirmed)
-        val verifying = sending + Tf.allBytesConfirmed()
+        val receiving = Tf.receiving(descriptor = Tf.descriptor(totalBytes = 0L))
+        assertTrue(receiving.allBytesConfirmed)
+        val verifying = receiving + Tf.allBytesConfirmed()
         assertEquals(TransferState.VERIFYING, verifying.state)
         val result = TransferReducer.apply(
             verifying,
@@ -317,13 +312,15 @@ class TransferReducerTransitionTest {
                 Tf.sessionId, Tf.transferId, null, Sha256Accumulator.EMPTY,
             ),
         )
-        assertEquals(TransferState.COMPLETED, current(result).state)
-        assertEquals(0L, current(result).totalBytes)
-        assertTrue(current(result).isInternallyConsistent())
+        assertEquals(TransferState.VERIFYING, current(result).state)
+        val completed = current(result) + TransferEvent.DestinationCommitSucceeded(Tf.sessionId, Tf.transferId, null)
+        assertEquals(TransferState.COMPLETED, completed.state)
+        assertEquals(0L, completed.totalBytes)
+        assertTrue(completed.isInternallyConsistent())
     }
 
     @Test fun `a zero byte file with a known digest must agree with it`() {
-        val verifying = Tf.sending(
+        val verifying = Tf.receiving(
             descriptor = Tf.descriptor(totalBytes = 0L, digest = Tf.knownDigest),
         ) + Tf.allBytesConfirmed()
         val result = TransferReducer.apply(
@@ -619,34 +616,34 @@ class TransferReducerTransitionTest {
         assertEquals("offset_beyond_total", rejection(result).code)
     }
 
-    @Test fun `restarting from zero deletes the partial file and reopens the streams`() {
-        var receiving = Tf.receiving()
-        receiving = receiving + Tf.chunkReceived(0L)
+    @Test fun `restart refuses to discard an existing confirmed checkpoint`() {
+        val receiving = Tf.receiveChunk(Tf.receiving(), 0L)
         val negotiating = receiving + Tf.pauseLocally() + Tf.resumeLocally()
         val result = TransferReducer.apply(
             negotiating,
             Tf.applyResume(ResumeDecision.RestartAtZero("descriptor changed")),
         )
-        val snapshot = current(result)
-        assertEquals(0L, snapshot.confirmedBytes)
-        assertEquals(0L, snapshot.optimisticBytes)
+        assertEquals("invalid_resume_proposal", rejection(result).code)
+        assertEquals(negotiating, (result as TransitionResult.Rejected).snapshot)
+    }
+
+    @Test fun `restart at an empty inbound checkpoint can reset the partial`() {
+        val negotiating = Tf.queued(direction = SessionDirection.INBOUND) + Tf.beginNegotiation()
+        val result = TransferReducer.apply(
+            negotiating,
+            Tf.applyResume(ResumeDecision.RestartAtZero("descriptor changed")),
+        )
+        assertEquals(0L, current(result).confirmedBytes)
         assertTrue(effects(result).hasEffectOf(TransferEffect.DeletePartialDestination::class))
         assertTrue(effects(result).hasEffectOf(TransferEffect.RequestDestinationPartial::class))
     }
 
-    @Test fun `an already verified file completes the outbound delivery`() {
+    @Test fun `an already verified resume claim cannot complete the sender`() {
         val negotiating = Tf.queued(descriptor = Tf.descriptor(digest = Tf.knownDigest)) +
             Tf.beginNegotiation()
-        val result = TransferReducer.apply(
-            negotiating,
-            Tf.applyResume(ResumeDecision.AlreadyVerified),
-        )
-        assertEquals(TransferState.COMPLETED, current(result).state)
-        assertEquals(Tf.THREE_CHUNKS, current(result).confirmedBytes)
-        assertEquals(
-            app.morsecode.core.transfer.model.VerificationOutcome.MATCHED,
-            current(result).verification?.outcome,
-        )
+        val result = TransferReducer.apply(negotiating, Tf.applyResume(ResumeDecision.AlreadyVerified))
+        assertEquals("invalid_resume_proposal", rejection(result).code)
+        assertEquals(negotiating, (result as TransitionResult.Rejected).snapshot)
     }
 
     @Test fun `a file with no known digest is never treated as already verified`() {

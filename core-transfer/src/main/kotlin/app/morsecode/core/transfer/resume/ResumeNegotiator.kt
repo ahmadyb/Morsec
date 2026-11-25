@@ -197,26 +197,23 @@ public object ResumeNegotiator {
 
         val offset = receiver.confirmedBytes
 
-        // 9. A complete partial file is not a completed file: it still has to be
-        //     verified, and only a verified one may be skipped.
-        if (offset == proposal.totalBytes) {
-            return if (receiver.verification == ReceiverVerificationState.VERIFIED) {
+        // 9. A successful full-file verification cannot describe a partial
+        // file. The verified-complete claim still requires reconciliation in
+        // the reducer; it is not an independently sufficient completion.
+        if (receiver.verification == ReceiverVerificationState.VERIFIED) {
+            return if (offset == proposal.totalBytes) {
                 ResumeDecision.AlreadyVerified
             } else {
-                ResumeDecision.RestartAtZero(
-                    "a complete but unverified partial must be retransmitted",
-                )
+                ResumeDecision.RestartAtZero("verification requires a complete partial")
             }
         }
 
-        // 10. Alignment: a stored offset that is not on a chunk boundary cannot
-        //     be produced by this protocol, so the partial file is suspect.
-        if (offset % proposal.chunkSize.value.toLong() != 0L) {
-            return ResumeDecision.RestartAtZero(
-                "stored offset $offset is not aligned to ${proposal.chunkSize.value} bytes",
-            )
-        }
-
+        // 10. The receiver's durable checkpoint remains authoritative even if
+        // the last ACK was lost, including at EOF. A complete unverified
+        // partial must be verified, not retransmitted or treated as completed.
+        // MSC1 permits a short chunk before EOF, so an unaligned checkpoint is
+        // not by itself evidence of corruption; sequence is derived from the
+        // next offset, not reconstructed from a guessed previous chunk length.
         return ResumeDecision.ResumeAt(offset)
     }
 

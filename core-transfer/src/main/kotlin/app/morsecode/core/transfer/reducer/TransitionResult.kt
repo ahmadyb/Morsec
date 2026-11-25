@@ -20,7 +20,16 @@ import app.morsecode.core.transfer.model.TransferSnapshot
 
 public sealed class TransitionResult {
 
-    /** A legal transition. [effects] is ordered and may repeat. */
+    /**
+     * A legal transition. [effects] is an ordered program, not a set: execute
+     * one at a time, stop on the first failure, and report the corresponding
+     * outcome to the reducer. Never run later effects after a required failure.
+     * UI and scheduling work cannot overtake persistence or protocol work.
+     *
+     * A snapshot can be provisional while an effect is pending. In particular,
+     * neither a pending receiver checkpoint nor a pending commit authorizes a
+     * wire acknowledgement. See the persistence contract for versioned saves.
+     */
     public data class Accepted(
         public val previous: TransferSnapshot?,
         public val current: TransferSnapshot,

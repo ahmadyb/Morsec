@@ -11,7 +11,6 @@ import app.morsecode.core.transfer.integrity.Sha256Digest
 import app.morsecode.core.transfer.model.TransferFileDescriptor
 import app.morsecode.core.transfer.protocol.ResumeDecision
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -22,10 +21,10 @@ import org.junit.Test
  * may or may not already have.
  *
  * The rule is *never trust, always verify*. The only number that becomes a resume
- * offset is the receiver's own confirmed byte count: a descriptor match proves
- * the two ends are discussing the same file, not that the bytes are intact, so a
- * complete partial is retransmitted rather than believed. The sender's own write
- * position is carried but never read.
+ * offset is the receiver's own confirmed byte count. A descriptor match proves
+ * the peers are discussing the same file, not that its contents are verified:
+ * a complete checkpoint still requires verification before commit. The sender's
+ * own write position is carried but never read.
  */
 class ResumeNegotiatorTest {
 
@@ -56,19 +55,16 @@ class ResumeNegotiatorTest {
         )
     }
 
-    @Test fun `an unaligned partial restarts because the offsets would drift`() {
-        assertTrue(
-            negotiate(receiver = receiver(confirmedBytes = 8_192L + 1L)) is ResumeDecision.RestartAtZero,
-        )
-        assertTrue(
-            (negotiate(receiver = receiver(confirmedBytes = 8_193L)) as ResumeDecision.RestartAtZero)
-                .reason.contains("not aligned"),
+    @Test fun `a checkpoint from a short intermediate chunk resumes at its exact offset`() {
+        assertEquals(
+            ResumeDecision.ResumeAt(8_193L),
+            negotiate(receiver = receiver(confirmedBytes = 8_193L)),
         )
     }
 
-    @Test fun `a complete but unverified partial is retransmitted rather than trusted`() {
+    @Test fun `a complete but unverified checkpoint resumes at EOF for verification`() {
         assertEquals(
-            ResumeDecision.RestartAtZero("a complete but unverified partial must be retransmitted"),
+            ResumeDecision.ResumeAt(12L),
             negotiate(
                 proposal = proposal(Tf.descriptor(totalBytes = 12L, digest = Tf.knownDigest)),
                 receiver = receiver(
@@ -80,8 +76,9 @@ class ResumeNegotiatorTest {
         )
     }
 
-    @Test fun `a partial still being verified is retransmitted too`() {
-        assertTrue(
+    @Test fun `interrupted verification resumes at the durable EOF`() {
+        assertEquals(
+            ResumeDecision.ResumeAt(12L),
             negotiate(
                 proposal = proposal(Tf.descriptor(totalBytes = 12L, digest = Tf.knownDigest)),
                 receiver = receiver(
@@ -89,7 +86,7 @@ class ResumeNegotiatorTest {
                     verification = ReceiverVerificationState.PENDING,
                     descriptor = Tf.descriptor(totalBytes = 12L, digest = Tf.knownDigest),
                 ),
-            ) is ResumeDecision.RestartAtZero,
+            ),
         )
     }
 
@@ -286,32 +283,18 @@ class ResumeNegotiatorTest {
         }
     }
 
-    @Test fun `a deterministic sweep of every offset up to three chunks classifies correctly`() {
-        // A deterministic sweep stands in for a property test: the offset is the
-        // seed, so a failure names the exact input.
-        val chunkSize = Tf.chunk.value.toLong()
-        // One byte short of the end, so every offset in range is still a partial.
-        val maximum = 3L * chunkSize - 1L
-        var resumed = 0
+    @Test fun `a deterministic sweep retains each valid checkpoint up to EOF`() {
+        val maximum = 3L * Tf.chunk.value.toLong()
         for (confirmed in 0L..maximum) {
-            val decision = negotiate(receiver = receiver(confirmedBytes = confirmed))
-            when (decision) {
-                is ResumeDecision.ResumeAt -> {
-                    assertEquals("offset $confirmed", confirmed, decision.offset)
-                    assertEquals("offset $confirmed should be aligned", 0L, confirmed % chunkSize)
-                    resumed += 1
-                }
-                is ResumeDecision.RestartAtZero -> assertFalse(
-                    "offset $confirmed should have resumed",
-                    confirmed % chunkSize == 0L,
-                )
-                else -> throw AssertionError("unexpected decision at $confirmed: $decision")
-            }
+            assertEquals(
+                "offset $confirmed",
+                ResumeDecision.ResumeAt(confirmed),
+                negotiate(receiver = receiver(confirmedBytes = confirmed)),
+            )
         }
-        assertEquals("zero, one chunk and two chunks", 3, resumed)
     }
 
-    @Test fun `large aligned offsets resume and their neighbours do not`() {
+    @Test fun `large offsets and their short-chunk neighbours resume exactly`() {
         val big = Tf.descriptor(totalBytes = 2_000_000L, digest = Tf.knownDigest)
         for (confirmed in listOf(4_096L, 8_192L, 262_144L, 1_048_576L)) {
             assertEquals(
@@ -324,12 +307,13 @@ class ResumeNegotiatorTest {
             )
         }
         for (confirmed in listOf(4_095L, 4_097L, 8_191L, 8_193L)) {
-            assertTrue(
+            assertEquals(
                 "offset $confirmed",
+                ResumeDecision.ResumeAt(confirmed),
                 negotiate(
                     proposal = proposal(big),
                     receiver = receiver(confirmedBytes = confirmed, descriptor = big),
-                ) is ResumeDecision.RestartAtZero,
+                ),
             )
         }
     }

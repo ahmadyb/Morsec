@@ -17,17 +17,40 @@ import app.morsecode.core.transfer.model.VerificationInfo
  * which is what keeps the reducer testable on the JVM and keeps the engine
  * portable.
  *
- * The atomicity requirements below are part of the contract, not advice:
+ * Atomicity requirements are part of the contract, not advice:
  *
- *  * [saveTransition] must apply the previous-to-current move and the durable
- *    parts of the accompanying effects in one transaction. A crash between
- *    writing the new state and writing its checkpoint must leave the *old* state
- *    on disk, never a new state over an old offset.
- *  * [saveCheckpoint] may be called once per acknowledged chunk, so it must be
- *    cheap and idempotent for a given offset.
- *  * Restoring a snapshot must never promote optimistic bytes to confirmed bytes.
- *    A conforming adapter persists and validates the two positions separately
- *    rather than inferring one from the other.
+ *  * [saveTransition] atomically replaces one persisted snapshot revision and
+ *    any durable effects actually included in that call. Do not fold a pending
+ *    receiver checkpoint into the optimistic staging transition: its candidate
+ *    intentionally differs from that transition's confirmedBytes.
+ *  * After destination durability succeeds, first persist the pending snapshot
+ *    (optimisticBytes = candidate, confirmedBytes unchanged), then call
+ *    [saveCheckpoint] for that candidate. Dispatch ConfirmedOffsetPersisted
+ *    only after checkpoint success. A definitive checkpoint failure dispatches
+ *    ConfirmedOffsetPersistenceFailed; an unknown outcome requires a store read
+ *    and reconciliation, never an ACK based on a guess.
+ *  * [saveCheckpoint] is atomic, monotonic and idempotent. It must not advance
+ *    beyond the persisted optimistic frontier or the descriptor length. After it
+ *    succeeds, a restart reads the persisted confirmed offset even if no ACK was
+ *    sent. Resume/retry reconciliation is outside this contract.
+ *  * PersistSnapshot effects can name the previous or current revision in an
+ *    accepted transition. Read the last durable snapshot; skip an identical
+ *    revision, otherwise use it as `previous` in [saveTransition], in order.
+ *    After saveCheckpoint, that durable previous row already contains the new
+ *    confirmed offset and may differ from the reducer's in-memory `previous`.
+ *    Never skip revisions in stores requiring sequential compare-and-set.
+ *  * Restoring a snapshot must never infer confirmed bytes from optimistic
+ *    bytes. The two values are persisted and validated separately.
+ *
+ * A receiver's VerificationSucceeded has only a commit effect. Before physical
+ * publication, that effect must first persist the provisional verified revision;
+ * if that prerequisite fails, do not attempt the commit. Once the revision is
+ * durable, a crash may have occurred before, during or after publication, so
+ * recovery must conservatively reconcile and must not delete or republish on a
+ * guess. On a commit outcome, the provisional save is idempotent and is followed
+ * by the completed or failed revision before any wire/UI effects. A post-commit
+ * save or notification failure must never roll back a published destination.
+ * These fields do not themselves prove whether physical publication happened.
  */
 
 /** How long a finished delivery's row is kept. */
@@ -97,9 +120,11 @@ public interface TransferSnapshotStore {
     /**
      * Persists one accepted transition atomically.
      *
-     * [effects] is passed so the adapter can fold the durable ones
-     * (`PersistConfirmedOffset`, verification results) into the same transaction
-     * as the state change.
+     * [previous] is the last durably stored row, which can differ from the
+     * reducer transition's previous value after [saveCheckpoint]. [effects]
+     * contains only work actually committed with this replacement. In
+     * particular, do not include a receiver's pending checkpoint effect in the
+     * earlier optimistic-staging save.
      */
     public fun saveTransition(
         previous: TransferSnapshot?,
@@ -107,7 +132,11 @@ public interface TransferSnapshotStore {
         effects: List<TransferEffect>,
     ): StoreResult
 
-    /** Persists just the confirmed checkpoint; idempotent for a given offset. */
+    /**
+     * Atomically persists a monotonic confirmed checkpoint no greater than the
+     * stored optimistic frontier and descriptor length; idempotent for an
+     * existing offset. A successful result survives restart before any ACK.
+     */
     public fun saveCheckpoint(transferId: TransferId, confirmedOffset: ConfirmedOffset): StoreResult
 
     /** Persists the outcome of the full-file verification pass. */

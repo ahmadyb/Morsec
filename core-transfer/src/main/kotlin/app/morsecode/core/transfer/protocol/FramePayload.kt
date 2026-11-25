@@ -128,14 +128,14 @@ public sealed interface FramePayload {
         public val observedDigest: Sha256Digest?,
     ) : FramePayload
 
-    /** Sender's confirmation that one file is complete and verified. */
+    /** Receiver's acknowledgement that one verified file has been committed. */
     public data class FileComplete(
         public val fileId: FileId,
         public val totalBytes: Long,
         public val digest: Sha256Digest?,
     ) : FramePayload
 
-    /** Whole batch finished. */
+    /** Sender's notification that the whole session is finished. */
     public data class SessionComplete(
         public val itemCount: Int,
         public val totalBytes: Long,

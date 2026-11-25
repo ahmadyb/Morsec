@@ -35,9 +35,9 @@ import java.io.Closeable
  *   confirmed frontier is a floor it may not cut below.
  *
  * WHO PROMOTES BYTES
- *   This adapter never decides that the peer acknowledged anything. [writeAt] advances only the
- *   optimistic frontier; [acknowledge] is the runtime's separate, monotonic promotion, and it is the
- *   only call that reaches the checkpoint.
+ *   This adapter never decides to send a peer acknowledgement. [writeAt] advances only the
+ *   optimistic frontier; [acknowledge] is the caller's separate, monotonic local checkpoint
+ *   promotion. A future receiver must complete its required checkpoint before sending an ACK.
  *
  * WHAT IS DELIBERATELY ABSENT
  *   No Android type, no `Uri`, no path, no `File`, no provider exception, no logging and no buffer
@@ -138,7 +138,7 @@ public enum class SequentialRejection(public val id: String) {
 
 /** The outcome of one write. */
 public sealed interface DestinationWrite {
-    /** The bytes are in the partial and flushed; [frontier] is now the expected position. */
+    /** The bytes were written and flush was attempted; [durability] describes the result. */
     public data class Written(
         public val frontier: Long,
         public val durability: FlushDurability,
@@ -328,9 +328,12 @@ public class DestinationSession private constructor(
     /**
      * Promotes [offset] bytes to confirmed.
      *
-     * Called by the runtime after the peer acknowledges the range. Must be between the current
-     * confirmed frontier and the optimistic frontier; the checkpoint is written first, so a failure
-     * leaves the in-memory floor where it was.
+     * A future receiver must invoke checkpoint promotion before sending its acknowledgement, not
+     * after receiving one. The offset must be between the current confirmed and optimistic frontiers.
+     * If a checkpoint sink is supplied it is written first and failure leaves the floor unchanged;
+     * without a sink this method advances only in memory and cannot itself authorize a wire ACK.
+     * The existing flush policy can report unsupported or unknown durability, which is not an
+     * fsync-grade guarantee. No runtime or production adapter is joined here.
      */
     public fun acknowledge(offset: Long): TransferStorageError? {
         if (offset < confirmed || offset > frontier) {

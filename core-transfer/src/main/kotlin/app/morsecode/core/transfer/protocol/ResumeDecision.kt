@@ -19,9 +19,9 @@ public sealed class ResumeDecision {
     /**
      * Continue from [offset] bytes.
      *
-     * For an outbound delivery this adopts the receiver's confirmed offset. For
-     * an inbound delivery it can only ever rewind to a point this device has
-     * already confirmed, never forward.
+     * For an outbound delivery this adopts the receiver's confirmed offset. An
+     * inbound delivery can retain only its own confirmed offset, never invent
+     * a newer checkpoint or regress the durable floor.
      */
     public data class ResumeAt(public val offset: Long) : ResumeDecision() {
         init {
@@ -39,7 +39,8 @@ public sealed class ResumeDecision {
     public data class RestartAtZero(public val reason: String) : ResumeDecision()
 
     /**
-     * The receiver already holds a verified copy of this file; nothing to send.
+     * The receiver claims a verified copy. The reducer refuses this decision:
+     * sender completion still requires FILE_COMPLETE and future reconciliation.
      */
     public data object AlreadyVerified : ResumeDecision()
 
