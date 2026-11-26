@@ -1196,10 +1196,10 @@ repair does not claim crash-atomicity or end-to-end recovery liveness across the
 store and transport.
 
 Room v1/v2 and the existing snapshot fields represent both a pending optimistic candidate and a
-provisional verified digest without schema changes. Tests exercise the reducer and persistence
-contracts, not real provider durability. Genuine API-23 storage-provider device tests remain
-mandatory before production activation; the existing API-23 transport suite and Robolectric evidence
-are not that storage-provider evidence.
+provisional verified digest without schema changes. The Slice 4R tests exercised reducer and
+persistence contracts, not real provider durability. The transport suite and Robolectric evidence are
+not storage-device evidence; Slice 4S adds the separately bounded API-23 observations in §19, without
+establishing arbitrary-provider durability or enabling production.
 
 ## 18. Inert single-file runtime (Slice 4A; payload disabled)
 
@@ -1292,9 +1292,9 @@ or delete the published destination. The sender never sends `FILE_COMPLETE` and 
 both peer verification and a matching receiver-to-sender `FILE_COMPLETE`.
 
 The fake destination's successful durability operation is simulated evidence for ordering only, not
-proof of Android fsync or provider persistence. Genuine API-23 storage-provider durability evidence,
-including the unresolved flush/checkpoint semantics in the storage bridge, remains mandatory before
-Slice 4B real-storage composition or any production activation. The generic reducer can send a
+proof of Android fsync or provider persistence. Slice 4S adds separate API-23 storage observations
+(§19); it does not resolve the flush/checkpoint semantics or supply the Slice 4B real-storage
+composition. The generic reducer can send a
 handshake/accept or metadata, or open a stream, before persisting that transition; the runtime
 preserves that order and does not claim crash-atomic negotiation. Fail-stop prevents later effects on
 the failing runtime, but cannot retract an earlier frame or prevent an independent peer from acting
@@ -1302,3 +1302,29 @@ on it. In particular, an empty receiver can see metadata that the sender emitted
 open or snapshot save subsequently fails. Lost ACKs, implicit EOF, verification results and completion
 frames have no restart re-announcement; a published-but-unresolved destination must be reconciled
 rather than deleted or republished on a guess.
+
+## 19. API 23 storage evidence (Slice 4S, payload disabled)
+
+Slice 4S adds framework instrumentation, not a production runtime, networking, authority or storage
+composition. `core-storage` exercises a non-exported provider in the instrumentation APK and real
+app-private files; `core-data` opens and reopens a real Room v2 database. A single bounded API-23 CI
+run executes those suites alongside `transport-lan` and inventories each source method. The new
+source/manifest/build boundary has mutation tests; a separate check inspects the built test and app
+APK manifests and dex. Room v1/v2, milestone readiness and the payload refusal are pinned unchanged.
+
+In a passing API-23 run, the controlled reliable-pipe writer's error follows a partial read as raw
+EOF in the production typed opener; `ParcelFileDescriptor.checkError()` separately reports it. The
+explicit declared-length check and full-file digest mismatch each refuse the short content. The
+private file test records `FileChannel.force(true)` for the adapter and, separately,
+`FileDescriptor.sync()` before close/reopen and byte/length comparison; a test-provider write handle
+also invokes `sync()` but honestly reports unknown provider durability. These are the observations,
+not proof of physical flash persistence through power loss or of arbitrary provider behavior. The
+exact test construction, injected failure boundaries and the destination session's need for an
+external declared-length gate are specified in [the storage bridge](transfer-storage-bridge.md#api-23-coverage-and-deterministic-failure-tests-slice-4s).
+
+The Room tests use a fresh database, not a migration; an injected SQLite failure preserves a
+provisional, unresolved row after a simulated publication report, and a separate simulated commit
+outcome produces a completed row after reopen. They do not prove real publication, restart dispatch,
+ACK delivery, reconciliation or cross-component crash atomicity. The Slice 4A runtime and existing
+storage adapters remain disconnected, and the payload gate remains unconditionally closed. Stop
+before Slice 4B.

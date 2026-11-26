@@ -158,7 +158,7 @@ jobs:
           set -uo pipefail
           mkdir -p ci-logs
           {
-            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs tools/verify/secure-dependency-governance.mjs tools/verify/secure-authority-surface.mjs tools/verify/jpake-production-boundary.mjs tools/verify/security-dependency-lock.mjs tools/verify/transfer-reducer-contract.mjs; do
+            for script in tools/verify/refs.mjs tools/verify/token-parity.mjs tools/verify/transfer-limits.mjs tools/verify/room-schema.mjs tools/verify/secure-dependency-governance.mjs tools/verify/secure-authority-surface.mjs tools/verify/jpake-production-boundary.mjs tools/verify/security-dependency-lock.mjs tools/verify/transfer-reducer-contract.mjs tools/verify/slice4s-test-boundary.mjs; do
               echo "== $script =="
               if [ "$script" = tools/verify/room-schema.mjs ]; then
                 node "$script" --baseline-only || echo "VERIFIER FAILED: $script"
@@ -176,6 +176,10 @@ jobs:
               elif [ "$script" = tools/verify/transfer-reducer-contract.mjs ]; then
                 # Prove the reducer ordering/direction/barrier guards fail on mutations,
                 # then verify the real sources and inert payload boundary.
+                node "$script" --self-test || echo "VERIFIER FAILED: $script"
+                node "$script" || echo "VERIFIER FAILED: $script"
+              elif [ "$script" = tools/verify/slice4s-test-boundary.mjs ]; then
+                # Mutation-test test-only isolation, the closed gate and device CI.
                 node "$script" --self-test || echo "VERIFIER FAILED: $script"
                 node "$script" || echo "VERIFIER FAILED: $script"
               else
@@ -210,6 +214,10 @@ jobs:
       - name: Test evidence validator fixtures
         if: ${{ !cancelled() }}
         run: python3 -m unittest discover -s tools/ci -p 'test_test_evidence.py' -v
+
+      - name: Test built APK boundary validator fixtures
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest discover -s tools/ci -p 'test_storage_apk_boundary.py' -v
 
       - name: JVM unit tests
         if: ${{ !cancelled() }}
@@ -586,7 +594,14 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p ci-logs
-          ./gradlew --no-daemon --stacktrace :app:assembleDebugAndroidTest :transport-lan:assembleDebugAndroidTest 2>&1 | tee ci-logs/45-android-test.log
+          ./gradlew --no-daemon --stacktrace :app:assembleDebugAndroidTest :transport-lan:assembleDebugAndroidTest \
+            :core-storage:assembleDebugAndroidTest :core-data:assembleDebugAndroidTest 2>&1 | tee ci-logs/45-android-test.log
+
+      - name: Verify the built storage test provider is isolated from the app APK
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          python3 tools/ci/verify_storage_apk_boundary.py --aapt "$ANDROID_HOME/build-tools/36.0.0/aapt"
 
       - name: Verify the tested APK carries the crypto the instrumentation APK does not
         if: ${{ !cancelled() }}
@@ -776,7 +791,8 @@ jobs:
 
       # The Gradle/action exit code alone does not rule out ignored tests or a
       # zero-test run. Check the actual API, status, XML cases and all current
-      # transport-lan instrumentation source methods; never replace that exit.
+      # transport-lan, core-storage and core-data instrumentation source methods;
+      # never replace that exit.
       - name: Verify API 23 zero-skip test evidence
         if: ${{ !cancelled() }}
         run: python3 tools/ci/test_evidence.py api23

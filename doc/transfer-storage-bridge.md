@@ -5,8 +5,9 @@ destination that can be written sequentially, verified and published — without
 them to a transport. Nothing in this slice sends or receives a transfer frame. `TRANSFER_ENGINE`
 stays gated, `CURRENT_MILESTONE` stays 2, and no runtime in the app composes these pieces.
 The later inert Slice 4A runtime uses fake/in-memory ports only; its test-only typed-reader bridge is
-not a production adapter. Real storage composition and genuine API-23 provider durability evidence
-remain outside Slice 4A. See [transfer-protocol.md §18](transfer-protocol.md#18-inert-single-file-runtime-slice-4a-payload-disabled).
+not a production adapter. Slice 4S adds the separate API-23 storage observations below, not a real
+runtime/storage composition. See [transfer-protocol.md §18](transfer-protocol.md#18-inert-single-file-runtime-slice-4a-payload-disabled)
+and [§19](transfer-protocol.md#19-api-23-storage-evidence-slice-4s-payload-disabled).
 
 This page is the normative description of that bridge. It records the port boundary, the
 sequential-write invariant, the resume and reconciliation rules, and the diagnostics policy that the
@@ -156,8 +157,8 @@ complete its required durability and checkpoint before it sends `CHUNK_ACK`, not
 acknowledge received bytes. Unsupported or unknown flush outcomes are not fsync-grade guarantees;
 the current `acknowledge` call passes a supported-flush marker to its checkpoint sink rather than
 retaining the actual earlier flush outcome. No runtime is connected here. The stronger reducer
-barrier and the unresolved adapter/device evidence are specified in
-[transfer-protocol.md §17](transfer-protocol.md#17-reducer-contract-repair-inert-payload-disabled).
+barrier is specified in [transfer-protocol.md §17](transfer-protocol.md#17-reducer-contract-repair-inert-payload-disabled);
+the separate, limited API-23 observations below do not reconcile that contract mismatch.
 
 ## Resume
 
@@ -317,31 +318,46 @@ cannot be wiped at all. This document therefore claims **no** erasure property. 
 code does meet is narrower and checkable: no reference is retained, nothing is written to a log, and
 every buffer is bounded.
 
-## API 23 coverage and deterministic failure tests
+## API 23 coverage and deterministic failure tests (Slice 4S)
 
-`StorageBridgeApi23Test` runs on the host under Robolectric with `sdk = [23]`, using a simulated
-`ContentResolver` and provider with file-backed `ParcelFileDescriptor`s. It exercises the typed
-reader, seekable and simulated non-seekable opens, unknown length, empty and multi-chunk files,
-nonzero resume, pre-open revocation, app-private partials and filename behavior. It is **not** device
-instrumentation. The CI API 23 device run currently instruments `transport-lan`, not `core-storage`.
+`StorageBridgeApi23Test` remains a host-side Robolectric test, **not** device evidence. Slice 4S adds
+`StorageSourceApi23Test` and `StorageDestinationApi23Test` in `core-storage/src/androidTest`, and
+`RoomStorageApi23Test` in `core-data/src/androidTest`. CI runs those suites and `transport-lan` on the
+actual API 23 emulator, inventories every source test method against its XML, and rejects any failure,
+skip, missing module or missing method. The test methods assert the device API level. Only a passing
+run on the exact committed SHA establishes the following observations; the source code alone does not.
 
-| Failure or ownership case | Evidence and limitation |
+The storage test APK supplies a uniquely named, non-exported provider with URI grants disabled. Its
+manifest and controls exist only in `androidTest`. The installed-manifest test checks the provider's
+flags and that its UID is the instrumentation process's UID before opening it through the real
+`ContentResolver`. The build also inspects the actual test and application APK manifests and dex for
+leakage. All documents, pipe ends and writer threads are bounded and cleaned up. The SAF grant check
+is deliberately injected; this does **not** demonstrate taking or revoking a persisted platform grant.
+
+| Device case | Assertions and boundaries of the evidence |
 | --- | --- |
-| provider read fault after a successful read | `TypedSourceReaderTest` uses a controlled JVM stream; a provider-thrown mid-read exception has not been demonstrated on an API 23 device descriptor |
-| destination write fault after a successful write | `DestinationSessionTest` uses a controlled sink that appends a partial chunk, then reports classified `ENOSPC`; no disk is filled |
-| short write and reconciliation | `DestinationSessionTest` checks physical length, unchanged confirmed frontier, overlap refusal, explicit truncation and continuation |
-| failure redaction and cancellation | `TypedSourceReaderTest` checks classifier categories, discarded raw diagnostics, interruption/cancellation and exactly-once close |
-| destination provider failures | `MediaStorePendingDestinationTest` exercises redacted creation/open/reconciliation failures with a Robolectric provider; `StorageBridgeApi23Test` checks a sanitized app-private open failure |
-| cancellation during descriptor probing | `StorageBridgeApi23Test` checks the Robolectric provider descriptor is closed; this is not a device-instrumentation claim |
-| SAF commit, rename fallback and copy | existing `SafCommitOrderTest`, `SafCommitRecoveryTest`, `SafRenameHistoryTest` and `SafCommitDestinationClosureTest` suites |
-| process-local restoration | existing `TransferRestorationCoordinatorTest` and `TransferRestorationRoomReconstructionTest` suites |
-| no network/socket activity | static checks in `tools/verify/jpake-production-boundary.mjs` |
+| source | A seekable `content://` file and non-seekable reliable pipes supply empty, unknown-length and multi-chunk content; nonzero seek or bounded discard reaches the exact offset. EOF before an offset is refused. Changed known-size metadata requires restart. A denied grant prevents open, and a provider `SecurityException` becomes a redacted typed failure. |
+| descriptor and stream ownership | A real `ProviderSourceOpener` pipe handle closes its owned descriptor and derived stream once at EOF, even when the reader is closed repeatedly; the early-EOF open failure also leaves its descriptor invalid. The counters measure close attempts, while descriptor validity is separately observed. |
+| mid-read provider fault | The test writer delivers 17 of 128 bytes and calls `closeWithError`. The API 23 raw `FileInputStream` path used by the typed opener sees premature EOF, not a thrown provider exception; a separately opened reliable descriptor reports `IOException` when `checkError()` is explicitly called after EOF. The declared-length `DestinationVerifier` fails, the expected full-file digest mismatches, and the test publisher is not called. |
+| sequential private file | A real app-private partial receives sequential chunks and calls `FileChannel.force(true)`; the descriptor is closed. Separately, a `RandomAccessFile` descriptor invokes `FileDescriptor.sync()` successfully, is closed, and the same file is reopened with the expected bytes, length and digest. The two operations are not conflated. |
+| provider write | A real `SafWriteHandle.flush()` calls `FileDescriptor.sync()` on this test provider's regular-file descriptor, closes once, and reopens with the expected bytes and length. The adapter still returns `FlushAttemptedGuaranteeUnknown`, not a provider durability guarantee. |
+| short/full write | A test-only wrapper writes at most five real bytes, then reports a short write or throws a synthetic `ENOSPC`. Confirmed progress remains unchanged, overlap is refused, explicit truncation to the confirmed frontier is forced, and the resulting private file is closed and reopened. No disk is filled; the checkpoint sink here is test-only. |
+| verification and lifecycle | Full digest verification after reopen precedes the test publisher; a mismatch cannot publish, duplicate commit is refused and abort closes/deletes the test partial once. The publisher is a test file copy, not the production SAF commit coordinator. |
+| Room v2 | A new real v2 Room/SQLite file retains a checkpoint, rejects a stale CAS predecessor, and retains a provisional verified state across close/reopen. An injected SQLite trigger makes a completion save fail after an explicitly simulated publication report; the reopened row remains unresolved. A separate simulated commit event yields a completed row after reopen. No publisher, migration, schema change or process-restart executor is joined. |
 
-Android may keep an already-open descriptor usable after a grant is revoked, and a provider's
-mid-stream exception does not necessarily propagate through that descriptor. The controlled JVM
-read-failure test is the authoritative evidence for the typed boundary; no unexecuted API 23 device
-failure case is claimed as passing. A controlled sink tests disk-full behavior without exhausting a
-real device disk.
+The declared-length check above is an explicit caller of `DestinationVerifier`; the destination
+session's own `verify` hashes its current frontier and is not, by itself, a declared-length gate.
+The digest mismatch independently prevents this particular short source from being committed. A
+future real composition must enforce both the confirmed declared length and the expected digest;
+these separate tests are not evidence that one is wired today. Android may keep an already-open
+descriptor usable after revocation, and behavior of external providers may differ from this controlled
+provider. Existing JVM tests additionally exercise cancellation and typed exception classification.
+
+**Durability limit:** the only device claim is successful invocation of the specified force/sync,
+closing the descriptor, and reopening to observe the expected bytes and length. Neither this nor the
+provider's `sync()` proves physical flash persistence through power loss; filesystem, kernel, emulator,
+hardware and provider behavior remain outside the observation. Closing/reopening Room is likewise not
+a crash, power-loss or cross-process recovery test.
 
 ## Inert composition
 

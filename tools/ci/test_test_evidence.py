@@ -43,12 +43,27 @@ class EvidenceGateTest(unittest.TestCase):
             return gate.verify(self.root, "jvm")
 
     def check_api(self):
-        with patch.object(gate, "API23_FLOORS", {("transport-lan", "sample.FooTest"): 1}):
+        with patch.object(gate, "API23_REQUIRED_MODULES", frozenset({"transport-lan"})), \
+             patch.object(gate, "API23_FLOORS", {("transport-lan", "sample.FooTest"): 1}):
             return gate.verify(self.root, "api23")
+
+    def check_all_api_modules(self):
+        floors = {(module, "sample.FooTest"): 1 for module in gate.API23_REQUIRED_MODULES}
+        with patch.object(gate, "API23_FLOORS", floors):
+            return gate.verify(self.root, "api23")
+
+    def all_api_modules(self) -> None:
+        for module in gate.API23_REQUIRED_MODULES:
+            self.source(module, android=True)
+            self.report(module, android=True)
+        self.api_logs()
 
     def api_logs(self, api: str = "23", status: str = "0") -> None:
         self.write("ci-logs/60-api23-api-level.log", api + "\n")
         self.write("ci-logs/60-api23-exit-status.txt", status + "\n")
+        self.write("ci-logs/63-api23-storage-observations.log", "".join(
+            f"I/Morsec4S( 1234): {marker}\n" for marker in gate.API23_STORAGE_MARKERS
+        ))
 
     def test_green_jvm_reports_every_source_method(self) -> None:
         self.source(methods=("passes", "another case"))
@@ -240,16 +255,58 @@ class EvidenceGateTest(unittest.TestCase):
         with self.assertRaisesRegex(gate.EvidenceError, "skipped tests"):
             self.check_api()
 
+    def test_all_three_api23_modules_and_their_reported_methods_are_required(self) -> None:
+        self.all_api_modules()
+        result, expected = self.check_all_api_modules()
+        self.assertEqual(3, result.tests)
+        self.assertEqual(gate.API23_REQUIRED_MODULES, frozenset(expected))
+        for missing in gate.API23_REQUIRED_MODULES:
+            with self.subTest(missing=missing):
+                report = self.root / missing / "build/outputs/androidTest-results/connected/debug/TEST-device.xml"
+                saved = report.read_text(encoding="utf-8")
+                report.unlink()
+                with self.assertRaisesRegex(gate.EvidenceError, "missing from XML"):
+                    self.check_all_api_modules()
+                report.write_text(saved, encoding="utf-8")
+
+    def test_api23_requires_each_tagged_device_observation(self) -> None:
+        self.all_api_modules()
+        observations = self.root / "ci-logs/63-api23-storage-observations.log"
+        original = observations.read_text(encoding="utf-8")
+        for marker in gate.API23_STORAGE_MARKERS:
+            with self.subTest(marker=marker):
+                observations.write_text(original.replace(marker, "missing"), encoding="utf-8")
+                with self.assertRaisesRegex(gate.EvidenceError, "storage observation missing"):
+                    self.check_all_api_modules()
+        observations.write_text(original.replace("I/Morsec4S", "I/OtherTag"), encoding="utf-8")
+        with self.assertRaisesRegex(gate.EvidenceError, "storage observation missing"):
+            self.check_all_api_modules()
+
+    def test_api23_storage_skip_or_absent_source_never_passes_on_transport_results(self) -> None:
+        self.all_api_modules()
+        report = self.root / "core-storage/build/outputs/androidTest-results/connected/debug/TEST-device.xml"
+        doc = ET.fromstring(report.read_text(encoding="utf-8"))
+        ET.SubElement(doc.find("testcase"), "skipped")
+        doc.set("skipped", "1")
+        report.write_bytes(ET.tostring(doc))
+        with self.assertRaisesRegex(gate.EvidenceError, "skipped tests"):
+            self.check_all_api_modules()
+        self.report("core-storage", android=True)
+        (self.root / "core-data/src/androidTest/kotlin/sample/FooTest.kt").unlink()
+        with self.assertRaisesRegex(gate.EvidenceError, "core-data"):
+            self.check_all_api_modules()
+
     def test_real_source_inventory_covers_repaired_and_device_suites(self) -> None:
         root = gate.ROOT
         jvm = gate.inventory_sources(root, sorted(root.glob("*/src/test")))
         self.assertTrue(gate.JVM_REQUIRED_MODULES.issubset(jvm))
         for (module, classname), floor in gate.JVM_4R_FLOORS.items():
             self.assertGreaterEqual(sum(cls == classname for cls, _ in jvm[module]), floor)
-        device = gate.inventory_sources(root, [root / "transport-lan/src/androidTest"])
+        device = gate.inventory_sources(root, [root / module / "src/androidTest" for module in gate.API23_REQUIRED_MODULES])
+        self.assertTrue(gate.API23_REQUIRED_MODULES.issubset(device))
         for (module, classname), floor in gate.API23_FLOORS.items():
             self.assertGreaterEqual(sum(cls == classname for cls, _ in device[module]), floor)
-        self.assertEqual(74, sum(gate.API23_FLOORS.values()))
+        self.assertEqual(97, sum(gate.API23_FLOORS.values()))
 
 
 def make_xml(cases: list[tuple[str, str]]) -> str:

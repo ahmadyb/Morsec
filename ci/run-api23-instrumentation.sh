@@ -45,14 +45,30 @@ adb shell getprop ro.build.version.sdk > ci-logs/60-api23-api-level.log 2>&1
 A3_TAG="${A3_PHASE_TAG:-MorsecA3Phase}"
 # The J-PAKE feasibility harness reports bounded phase timings under its own tag.
 JPAKE_TAG="${JPAKE_PHASE_TAG:-MorsecJpakePhase}"
+# Never allow an earlier connected run's XML to substitute for this run.
+if ! rm -rf transport-lan/build/outputs/androidTest-results/connected \
+            core-storage/build/outputs/androidTest-results/connected \
+            core-data/build/outputs/androidTest-results/connected; then
+  echo "Cannot clear stale connected-test results" >&2
+  printf '1\n' > ci-logs/60-api23-exit-status.txt
+  exit 1
+fi
+
 : > ci-logs/62-api23-phases.log
 adb logcat -c > /dev/null 2>&1
 adb logcat -v time -s "$A3_TAG:I" "$JPAKE_TAG:I" >> ci-logs/62-api23-phases.log 2>&1 &
 A3_LOGCAT_PID=$!
+# Slice 4S emits only fixed, non-identifying platform-observation markers.
+STORAGE_TAG="${STORAGE_PHASE_TAG:-Morsec4S}"
+: > ci-logs/63-api23-storage-observations.log
+adb logcat -v time -s "$STORAGE_TAG:I" >> ci-logs/63-api23-storage-observations.log 2>&1 &
+STORAGE_LOGCAT_PID=$!
 
 timeout --kill-after="${TIMEOUT_GRACE_SECONDS}s" "${TIMEOUT_BOUND_SECONDS}s" \
-  ./gradlew --no-daemon --stacktrace --console=plain \
-  :transport-lan:connectedDebugAndroidTest > ci-logs/60-api23-connected.log 2>&1
+  ./gradlew --no-daemon --no-parallel --stacktrace --console=plain \
+  :transport-lan:connectedDebugAndroidTest \
+  :core-storage:connectedDebugAndroidTest \
+  :core-data:connectedDebugAndroidTest > ci-logs/60-api23-connected.log 2>&1
 status=$?
 
 # Written immediately: the value must survive even if this script is killed afterwards, which is
@@ -73,7 +89,10 @@ tail -n 150 ci-logs/60-api23-connected.log
 # died early -- for example on an ADB disconnect mid-run.
 kill "$A3_LOGCAT_PID" > /dev/null 2>&1
 wait "$A3_LOGCAT_PID" > /dev/null 2>&1
+kill "$STORAGE_LOGCAT_PID" > /dev/null 2>&1
+wait "$STORAGE_LOGCAT_PID" > /dev/null 2>&1
 adb logcat -d -s "${A3_PHASE_TAG:-MorsecA3Phase}:I" "${JPAKE_PHASE_TAG:-MorsecJpakePhase}:I" >> ci-logs/62-api23-phases.log 2>&1
+adb logcat -d -s "${STORAGE_PHASE_TAG:-Morsec4S}:I" >> ci-logs/63-api23-storage-observations.log 2>&1
 
 if [ "$status" -ne 0 ]; then
   adb devices -l > ci-logs/61-api23-device-after.log 2>&1

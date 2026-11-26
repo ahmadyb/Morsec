@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Installed only in this library's self-instrumenting test APK. -->
+        <provider
+            android:name="app.morsecode.core.storage.transfer.Slice4sTestProvider"
+            android:authorities="app.morsecode.core.storage.test.slice4s.provider"
+            android:exported="false"
+            android:grantUriPermissions="false"
+            android:multiprocess="false" />
+    </application>
+</manifest>

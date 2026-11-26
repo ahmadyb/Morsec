@@ -4,8 +4,9 @@
 This complements Gradle's exit status, which the workflow must still preserve.
 JVM reports are checked for every current JUnit @Test method in the repository's
 ordinary src/test Kotlin sources, including the Slice 4R reducer/Room tests and Slice 4A runtime tests.
-The connected check covers the transport-lan API-23 task (not app androidTests).
-A parameterized source method must appear at least once; this check does not
+The connected check inventories transport-lan, core-storage and core-data
+API-23 tasks (not app androidTests). A parameterized source method must appear
+at least once; this check does not
 prove that every possible parameter value was exercised.
 
 The source inventory is intentionally narrow and fail-closed: if a test source
@@ -42,7 +43,20 @@ JVM_4R_FLOORS = {
     ("core-transfer", "app.morsecode.core.transfer.runtime.SingleFileRuntimeTest"): 43,
     ("core-storage", "app.morsecode.core.storage.transfer.SingleFileTypedReaderRuntimeTest"): 3,
 }
+API23_REQUIRED_MODULES = frozenset({"transport-lan", "core-storage", "core-data"})
+# These fixed, non-identifying messages are logged only after their device
+# assertions pass. The streamed log survives the small API-23 ring buffer.
+API23_STORAGE_MARKERS = (
+    "test_provider private same_uid resolver_open=ok",
+    "reliable_pipe typed=short_eof explicit_checkError=ioexception length_digest=refused",
+    "private_partial force=ok explicit_fd_sync=ok close_reopen_bytes_length=ok",
+    "provider_fd_sync=ok guarantee=unknown close_reopen_bytes_length=ok",
+    "room_v2 failed_completion_save=reopened_provisional publication=unresolved",
+)
 API23_FLOORS = {
+    ("core-storage", "app.morsecode.core.storage.transfer.StorageSourceApi23Test"): 9,
+    ("core-storage", "app.morsecode.core.storage.transfer.StorageDestinationApi23Test"): 8,
+    ("core-data", "app.morsecode.core.data.db.RoomStorageApi23Test"): 6,
     ("transport-lan", "app.morsecode.transport.lan.ControlEstablishmentCapacityTest"): 1,
     ("transport-lan", "app.morsecode.transport.lan.security.ConscryptApi23CompatibilityTest"): 1,
     ("transport-lan", "app.morsecode.transport.lan.security.HostileSecureSessionApi23Test"): 11,
@@ -224,16 +238,25 @@ def verify(root: Path, kind: str) -> tuple[Results, dict[str, set[tuple[str, str
         paths = sorted(root.glob("*/build/test-results/**/TEST-*.xml"))
         required = JVM_REQUIRED_MODULES
     elif kind == "api23":
-        source_dirs = [root / "transport-lan/src/androidTest"]
-        paths = sorted((root / "transport-lan/build/outputs/androidTest-results/connected").glob("**/TEST-*.xml"))
-        required = frozenset({"transport-lan"})
+        required = API23_REQUIRED_MODULES
+        source_dirs = [root / module / "src/androidTest" for module in sorted(required)]
+        paths = sorted(
+            path
+            for module in required
+            for path in (root / module / "build/outputs/androidTest-results/connected").glob("**/TEST-*.xml")
+        )
         try:
             api = (root / "ci-logs/60-api23-api-level.log").read_text(encoding="utf-8").strip()
             exit_status = (root / "ci-logs/60-api23-exit-status.txt").read_text(encoding="utf-8").strip()
+            observations = (root / "ci-logs/63-api23-storage-observations.log").read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
-            raise EvidenceError(f"API-23 device level or Gradle exit status missing: {exc}") from exc
+            raise EvidenceError(f"API-23 device level, Gradle status or storage observations missing: {exc}") from exc
         if api != "23" or exit_status != "0":
             raise EvidenceError(f"expected API 23 and connected Gradle status 0, got API {api!r}, status {exit_status!r}")
+        for marker in API23_STORAGE_MARKERS:
+            pattern = r"\bI/Morsec4S\s*\(\s*\d+\):\s*" + re.escape(marker) + r"\s*$"
+            if not re.search(pattern, observations, re.MULTILINE):
+                raise EvidenceError(f"API-23 storage observation missing: {marker}")
     else:
         raise EvidenceError(f"unknown evidence kind {kind!r}")
 
@@ -267,6 +290,8 @@ def main(argv: list[str]) -> int:
         f"{results.files} XML reports; {class_count} source classes and {method_count} source methods "
         f"represented at least once; {modules}"
     )
+    if kind == "api23":
+        print("::notice title=API-23 storage observations::" + "; ".join(API23_STORAGE_MARKERS))
     return 0
 
 
